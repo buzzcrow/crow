@@ -8,7 +8,7 @@ import { cn } from '../utils/cn';
 import { toUiHealth } from '../utils/entityDisplay';
 
 interface CrowdbKVNodeData {
-  kind: 'Datacenter' | 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica' | 'DiskGroup';
+  kind: 'Datacenter' | 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica' | 'DiskGroup' | 'Disk';
   label: string;
   sublabel?: string;
   health?: string;
@@ -32,6 +32,7 @@ const iconForKind: Record<CrowdbKVNodeData['kind'], typeof FolderTree> = {
   LocalReplica: HardDrive,
   RemoteReplica: RadioTower,
   DiskGroup: Boxes,
+  Disk: HardDrive,
 };
 
 const accentForKind: Record<CrowdbKVNodeData['kind'], string> = {
@@ -45,6 +46,7 @@ const accentForKind: Record<CrowdbKVNodeData['kind'], string> = {
   LocalReplica: 'tw-text-healthy',
   RemoteReplica: 'tw-text-remote',
   DiskGroup: 'tw-text-accent',
+  Disk: 'tw-text-accent2',
 };
 
 const surfaceForKind: Record<CrowdbKVNodeData['kind'], string> = {
@@ -58,6 +60,7 @@ const surfaceForKind: Record<CrowdbKVNodeData['kind'], string> = {
   LocalReplica: 'tw-bg-healthy/10 tw-border-healthy/30',
   RemoteReplica: 'tw-bg-remote/10 tw-border-remote/30',
   DiskGroup: 'tw-bg-accent/10 tw-border-accent/30',
+  Disk: 'tw-bg-accent2/10 tw-border-accent2/30',
 };
 
 /**

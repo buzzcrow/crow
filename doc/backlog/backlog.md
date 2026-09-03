@@ -11,76 +11,10 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R125** — Bump this line in the same commit when adding a new item.
+**Next R number: R129** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
-- **[R124](R124-console-bench-lifecycle-split.md)** — split bench
-  lifecycle into deploy/prepare/run/clean/teardown verbs — Area:
-  console / cli / bench — `bench kv` is monolithic per invocation
-  (provision + pre-pop + run + teardown every call), so the
-  regression sentinels pay deploy + pre-pop overhead on every
-  sub-test (read 11×, scan 14×, write 7×), capping practical dataset
-  size. Split into discrete CLI verbs orchestrated by the script:
-  `bench deploy --name <deploy> --kind kv|rpc|chunk|storage`
-  (multi-kind from the start; rpc needs no console-web, kv/chunk/
-  storage start one), `bench prepare --target <deploy>` (default
-  `put` semantics, multi-round to grow data), `bench run --target
-  <deploy>` (reads all connection info from the deploy folder, no
-  port re-entry), `bench clean --target <deploy>` (per-service wipe
-  endpoint with a deliberately non-trivial name/flow so it can't be
-  triggered accidentally; wipes WAL + engine data, keeps group0
-  sysdata), `bench teardown --target <deploy>`. Each deploy writes
-  metadata + node workspaces + server logs + cli logs under a named
-  `runtime/<deploy-name>/` folder (generalizing `bench-runs/`),
-  co-locating bench and cluster artifacts. Rewrite the three
-  `tools/bench-kv-*-regression.sh` scripts to deploy once → prepare
-  once → run × N → teardown (read/scan), and deploy once → (clean →
-  run) × N → teardown (write). Decisions resolved: console-web
-  lifetime is kind-dependent; clean is per-service with a hard-to-
-  mistake flow; `bench run` is a standalone verb with `--target`;
-  prepare uses default put; handles live in named runtime folders.
-- **[R118](R118-cluster-unify-port-usage.md)** — unify port usage &
-  test port prober — Area: cluster / protocol / server —
-  `crowdb-protocol/src/ports.rs` already defines base ports + stride +
-  `ServicePort` for all services, but adoption is incomplete:
-  `crowdb-kv-server` has no CLI flag for the consensus (`KV_RPC_BASE`) or
-  client-facing (`KV_CLIENT_RPC_BASE`) RPC ports; `crowdb-diskdb` takes
-  listen addrs from TOML config (not CLI flags with `ports.rs` defaults);
-  and `KvServer::start` still supports port 0 (OS-assigned), contradicting
-  the project flow. Wire every server to accept explicit per-listener
-  port flags (defaults from `crowdb-protocol::ports`), reject port 0, and
-  add an in-process port-prober + flock-coordinated claim file (library
-  + `crowdb-port-alloc` CLI binary, no daemon) that is the single place
-  picking ports, so tests and cluster bootstrap run in parallel without
-  `Address already in use`. Console UI E2E shells out to the CLI binary
-  to replace its private `freePort()` counter. Open questions: claim-to-
-  bind TOCTOU mitigation, claim-file path/format, probe port range,
-  cross-host scope, paired-port override semantics.
-- **[R119](R119-cluster-log-file-usage-review.md)** — log file usage
-  review & unification — Area: cluster / observability — CROWDB has
-  two logging stacks (Rust `tracing` in `crowdb-common/rust`, C++
-  `spdlog` in `crowdb-common/cpp`) and four servers + `crowdb-cli`, but
-  only `crowdb-kv-server` wires up file logging with rotation +
-  compression; `crowdb-diskdb`, `crowdb-chunkdb`, and `crowdb-web`
-  initialize console-only `tracing_subscriber::fmt().init()` and
-  lose every log line when daemonized. The `crowdb-rpc` C++ library
-  ships a `crowdb_rpc_init_logging` C API that no Rust caller ever
-  invokes (no FFI wrapper, no call site), so the consensus
-  transport layer is silent. Log directories diverge (`"log"`,
-  `~/.crowdb-kv/log`, temp paths), log formats differ between Rust
-  and C++, and no audit has been done of whether log lines are
-  meaningful and self-explaining. R119 does a two-prong audit
-  (code review of every logging call site + run each service's
-  e2e test and read the real log output), then unifies every
-  server on the shared rotating-file logging stack, wires the
-  crowdb-rpc C++ logging through an FFI bridge, adopts one log
-  directory + format convention, adds a "Logging" section to
-  `design-crowdb-kv-observability.md` (current design gap — the doc
-  covers metrics only), and fixes log lines that are opaque,
-  noisy, or missing context. Verification: each service's e2e
-  test asserts its log file exists, is non-empty, and contains
-  self-explaining key lines.
 - **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
   migration — Area: chunkdb / kv — Implement the full
   `Copying`/`Cutover`/`Complete` migration flow for transferring chunkdb
@@ -442,22 +376,6 @@ R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
   whether the R67 fix has a write-path gap and file a follow-up
   requirement. Low complexity; verifies R67's coverage extends to
   writes.
-- **[R120](R120-kv-ignored-test-migration.md)** — revive crowdb-rpc migrated
-  ignored tests — Area: kv / tests — Two `#[ignore]`d test stubs in
-  `group_test.rs` cover real contracts with no other coverage at the
-  `crowdb-kv` layer: the forwarded-flag loop guard on `Get`/`Scan` (a
-  follower must not re-forward an already-forwarded request) and malformed
-  `Accept` rejection on the LearnerStream bidi path. Both have empty
-  bodies pending crowdb-rpc migration; the infrastructure now exists — write
-  the test bodies and un-ignore. Low complexity; no dependencies.
-- **[R123](R123-console-cli-short-flags.md)** — CLI short flag aliases
-  for all subcommands — Area: console / cli — Only `bench rpc` and the
-  global `--config` (`-p`) have short aliases; all other subcommands
-  (`bench kv`, `diskdb`, `disk`, `server`, `paxos`, `node`) and global
-  args (`--ip`, `--port`, `--json`) are long-only. Add `short = '<char>'`
-  to every `#[arg]` across all subcommands, following the `bench rpc`
-  precedent. Low complexity; no dependencies.
-
 ---
 
 ## Implementation Process

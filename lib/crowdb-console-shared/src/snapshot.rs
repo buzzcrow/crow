@@ -15,7 +15,7 @@ pub use crowdb_protocol::mgmt::{
     HealthResponse as HealthInfo, KvStoreStatus as KvStoreView, MetricField as MetricFieldView,
     MetricPoint as MetricPointView, MetricsResponse, MetricsSnapshot as RemoteMetrics,
     ReadStateView as ReadStateSnapshot, RemoteStatus as RemoteReplicaView, ReplicaStatus as LocalReplicaView,
-    StoreStatus as StoreView, TopologyResponse,
+    StoreStatus as StoreView, TopologyResponse, WipeResult,
 };
 
 // `GroupView` and `GroupStatus` have the same wire shape but the

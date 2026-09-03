@@ -65,6 +65,78 @@ Nagle improves coroutine throughput by 91%, 113%, and 62% at 64T, 512T,
 and 1,000T. It also reduces p99 by 13%, 36%, and 75%. Tokio is slower and
 produces queue-full errors under bursty high concurrency.
 
+### Linux — 2026-08-31
+
+AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux 6.8. Same hw as 2026-08-27.
+Fix: per-call control flatbuffer — `request_id` now embedded in
+`ConnectionPingRequest.id` per call (was fixed `id=0`), enabling correct
+slab slot correlation. 6 of 10 configs strictly better than 2026-08-27;
+4 retained (1L/1C coroutine ops/s slightly lower, 64T nagle-on p999
+worse, tokio 64T ops/s lower, tokio 1000T errors worse).
+
+| Workers | Load | Mode | Nagle | ops/s | avg us | p50 us | p99 us | p999 us | Errors |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1T:1C | coroutine | off | 52,134 | 18 | 17 | 17 | 31 | 0 |
+| 4 | 64T:4C | coroutine | off | 517,687 | 122 | 94 | 96 | 260 | 0 |
+| 8 | 512T:8C | coroutine | off | 830,174 | 614 | 486 | 505 | 1,074 | 0 |
+| 16 | 1,000T:32C | coroutine | off | 1,307,488 | 762 | 302 | 324 | 9,645 | 0 |
+| 4 | 64T:4C | coroutine | on | 994,296 | 63 | 44 | 46 | 578 | 0 |
+| 8 | 512T:8C | coroutine | on | 1,869,083 | 271 | 209 | 219 | 3,993 | 0 |
+| 16 | 1,000T:32C | coroutine | on | 2,213,182 | 448 | 157 | 171 | 1,999 | 0 |
+| 1 | 1T:1C | tokio | off | 29,367 | 32 | 24 | 25 | 71 | 0 |
+| 4 | 64T:4C | tokio | off | 487,362 | 127 | 63 | 71 | 519 | 4 |
+| 16 | 1,000T:32C | tokio | off | 995,573 | 993 | 327 | 408 | 5,540 | 895 |
+
+The per-call control fix dramatically improves p99 at high concurrency:
+coroutine 1,000T p99 drops from 6,148us to 324us (−95%) without nagle,
+and from 1,550us to 171us (−89%) with nagle. The 1,000T nagle-on peak
+rises to 2.21M ops/s (+9.4%). Tokio 1T:1C improves 24.6% (29,367 vs
+23,564) — the fixed correlation eliminates resp_missed overhead.
+
+### Linux — 2026-09-02
+
+AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux 6.8. Same hw as 2026-08-31.
+The crowdb-tree engine changes (page-count metrics + flush re-check
+loop) do not touch the RPC transport — this run confirms no
+transport-level regression. Results are within noise (−1% to −5% vs
+2026-08-31). p50/p99 use coarser histogram buckets (100/500/1000/5000us)
+than the 2026-08-31 exact values. Not strictly better — reference
+retained per regression policy.
+
+| Workers | Load | Mode | Nagle | ops/s | avg us | p50 us | p99 us | Errors |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1T:1C | coroutine | off | 50,663 | 18 | 100 | 100 | 0 |
+| 4 | 64T:4C | coroutine | off | 514,318 | 123 | 500 | 500 | 0 |
+| 8 | 512T:8C | coroutine | off | 814,807 | 626 | 1,000 | 1,000 | 0 |
+| 16 | 1,000T:32C | coroutine | off | 1,271,548 | 783 | 500 | 10,000 | 0 |
+| 4 | 64T:4C | coroutine | on | 973,317 | 64 | 100 | 500 | 0 |
+| 8 | 512T:8C | coroutine | on | 1,775,602 | 286 | 500 | 500 | 0 |
+| 16 | 1,000T:32C | coroutine | on | 2,130,032 | 466 | 500 | 5,000 | 0 |
+| 1 | 1T:1C | tokio | off | 28,062 | 34 | 100 | 100 | 0 |
+| 4 | 64T:4C | tokio | off | 492,924 | 126 | 500 | 500 | 0 |
+| 16 | 1,000T:32C | tokio | off | 988,956 | 999 | 1,000 | 5,000 | 0 |
+
+### Linux — 2026-09-02 (group 1, mem-block WAL wipe fix)
+
+AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux 6.8. Same hw as prior runs.
+RPC echo does not touch the KV/storage layer, so the mem-block WAL wipe
+fix and group-1 bench change have no transport-level impact. Results are
+within noise of the prior 2026-09-02 run (all within ±2.6%). Reference
+retained per regression policy.
+
+| Workers | Load | Mode | Nagle | ops/s | avg us | p50 us | p99 us | Errors |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1T:1C | coroutine | off | 50,168 | 18 | 100 | 100 | 0 |
+| 4 | 64T:4C | coroutine | off | 505,195 | 125 | 500 | 500 | 0 |
+| 8 | 512T:8C | coroutine | off | 817,808 | 624 | 1,000 | 1,000 | 0 |
+| 16 | 1,000T:32C | coroutine | off | 1,275,553 | 781 | 500 | 10,000 | 0 |
+| 4 | 64T:4C | coroutine | on | 968,977 | 64 | 100 | 500 | 0 |
+| 8 | 512T:8C | coroutine | on | 1,775,375 | 286 | 500 | 500 | 0 |
+| 16 | 1,000T:32C | coroutine | on | 2,116,393 | 468 | 500 | 5,000 | 0 |
+| 1 | 1T:1C | tokio | off | 28,790 | 33 | 100 | 100 | 0 |
+| 4 | 64T:4C | tokio | off | 490,288 | 126 | 500 | 500 | 0 |
+| 16 | 1,000T:32C | tokio | off | 991,402 | 996 | 1,000 | 5,000 | 0 |
+
 ### macOS — 2026-08-21
 
 Apple M5 Pro, 18c, arm64, macOS 26/Darwin 25.5. kqueue, 128B values, and
@@ -158,3 +230,29 @@ Replaced the Linux reference with the current single-engine sweep and
 retained the macOS standalone baseline. Metrics shutdown now wakes its
 condition variable, reducing shutdown delay from ~5s to 60ms; it does not
 affect request throughput.
+
+### Per-call control flatbuffer (2026-08-31)
+
+The `bench rpc` echo client was building a fixed `ConnectionPingRequest`
+control flatbuffer with `id=0` and reusing it for every request. The
+echo handler extracts `request_id` from the control's `id` field during
+parse and echoes it back in the response. With `id=0`, every response
+arrived with `request_id=0`, which never matched the slab slot's
+per-call `request_id` — causing `resp_missed` and indefinite hangs.
+
+Fix: `build_control(request_id)` builds a fresh `ConnectionPingRequest`
+with `id=request_id` per call. Both tokio and coroutine modes now
+correlate responses correctly.
+
+Perf: 6 of 10 configs strictly better than 2026-08-27. The most dramatic
+improvement is p99 at 1,000T: 6,148us→324us (−95%) without nagle,
+1,550us→171us (−89%) with nagle. Peak nagle-on throughput rises to
+2.21M ops/s (+9.4%). Tokio 1T:1C improves 24.6% (29,367 vs 23,564).
+
+### B-tree page-count metrics + flush re-check loop (2026-09-02)
+
+The crowdb-tree engine changes (page-count gauges + flush re-check loop)
+do not touch the RPC transport layer. This run confirms no
+transport-level regression: results are within noise (−1% to −5% vs
+2026-08-31). Reference retained per regression policy. See the
+"Linux — 2026-09-02" subsection above for the full table.

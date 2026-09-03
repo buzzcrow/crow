@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 #![allow(clippy::missing_errors_doc)]
-#![allow(dead_code)] // Wired in Phase 7 (CrowdbClient transport selection)
+#![allow(dead_code)] // Wired in Phase 7 (CrowdbKvClient transport selection)
 
 //! crowdb-rpc client transport for the KV client-facing service (R117
 //! migration). Mirrors `px_rpc_transport.rs` (consensus side): builds
@@ -13,7 +13,7 @@
 //! retry/topology/`NotLeaderHint` logic in `client.rs` is unchanged.
 //!
 //! The only transport path (the former transport `ConnectionPool` was removed).
-//! window; `CrowdbClient` selects the transport via
+//! window; `CrowdbKvClient` selects the transport via
 //! `with_rpc_transport`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -131,10 +131,21 @@ impl KvRpcTransport {
     }
 
     /// Convert an `RpcError` to `Error`, dropping cached connections
-    /// for `endpoint` on retryable transport errors so the next call
-    /// reconnects. Preserves the endpoint in the error message.
+    /// for `endpoint` on connection-level errors (closed/reset) and
+    /// `Timeout`. `Timeout` can indicate a dead connection whose TCP
+    /// FIN has not yet been processed by the epoll worker (e.g. the
+    /// remote process was killed and restarted on the same port) — the
+    /// reaper fails the pending request but leaves the stale fd in the
+    /// pool, so retrying on the same connection would time out again.
+    /// Dropping forces `conn_for` to establish a fresh connection.
+    /// `SendQueueFull` is truly transient (the connection is alive but
+    /// the send queue is full) so the pool is preserved. Preserves the
+    /// endpoint in the error message.
     fn map_rpc_err(&self, e: RpcError, endpoint: &str) -> Error {
-        if e.is_retryable() {
+        if matches!(
+            e,
+            RpcError::ConnectionClosed | RpcError::ConnectionError | RpcError::Timeout
+        ) {
             self.drop_endpoint(endpoint);
         }
         Error::Transport {
@@ -765,6 +776,13 @@ impl KvRpcTransport {
     /// Allocate a request ID (public — used by `WatchNotifyClient`).
     pub fn alloc_id(&self) -> u64 {
         self.next_id()
+    }
+
+    /// The next request ID that will be allocated (for diagnostics:
+    /// compare against dumped pending IDs to see how old they are).
+    #[must_use]
+    pub fn next_req_id(&self) -> u64 {
+        self.next_req_id.load(Ordering::Relaxed)
     }
 }
 

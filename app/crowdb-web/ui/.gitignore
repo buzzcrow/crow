@@ -6,3 +6,7 @@ a11y-reports/
 lighthouse-report.json
 lighthouse-report.html
 e2e-debug.png
+
+# Runtime artifacts from E2E runs
+log/
+runtime-data/

@@ -31,6 +31,22 @@ pub trait KVEngine: Send + Sync {
     /// I/O path and always returns `Ok()`.
     fn apply(&self, slot: u64, batch: &Batch) -> KVFuture<Result<(), String>>;
 
+    /// Advance the engine's internal contiguous-slot watermark for a
+    /// `NoOp` slot (empty batch from `repair_once` gap-fill). Without this,
+    /// `contiguous_slot_` (C++) stalls at the `NoOp`, permanently blocking
+    /// `flush()` drain and `last_applied_slot_` advancement. Default:
+    /// no-op (engines without a contiguous-slot watermark don't need it).
+    fn noop(&self, _slot: u64) {}
+
+    /// Returns `true` if the engine has frozen memtables waiting to be
+    /// flushed (i.e. `flush()` would do real work). The maintenance loop
+    /// polls this after each pass to decide whether to run another flush
+    /// immediately or sleep until the next tick. Default: `false` (engines
+    /// without a frozen-queue concept never need an immediate flush).
+    fn flush_pending(&self) -> bool {
+        false
+    }
+
     /// Live value and its resolved slot, or `None` if unset or tombstoned.
     fn get(&self, key: &[u8]) -> KVFuture<Option<(u64, Vec<u8>)>>;
 
@@ -80,9 +96,6 @@ pub trait KVEngine: Send + Sync {
         keys_only: bool,
         deadline_ms: u64,
     ) -> KVFuture<Result<(Vec<(Bytes, u64, Bytes)>, bool), String>>;
-
-    /// Number of live (non-tombstoned) keys.
-    fn live_key_count(&self) -> usize;
 
     /// Drop all state. Used by snapshot-install reset (before importing a
     /// peer's snapshot) and by tests that need to simulate a wiped replica.
@@ -148,7 +161,12 @@ pub trait KVEngine: Send + Sync {
         0
     }
 
-    /// Persist a durable snapshot now.
+    /// Persist a durable snapshot now. Callers MUST call [`Self::flush`]
+    /// first so the in-memory write buffer (L0) is drained into the
+    /// durable tree (L1) — this method does NOT flush internally (O7:
+    /// avoiding a redundant `write_mutex_` acquire when the caller already
+    /// flushed, enabling pipelining of the next flush with this snapshot's
+    /// disk I/O).
     /// Returns the slot the snapshot covers (everything in `[1, slot]` is
     /// now durably reflected — the same contract [`Self::resume_from_slot`]
     /// documents), or `0` if nothing was persisted (default: `InMemKV` has

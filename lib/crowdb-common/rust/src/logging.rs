@@ -158,6 +158,44 @@ fn gzip_file(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Format the current wall clock as `YYYYMMDD-HHMM.SS` (UTC). Used for
+/// per-invocation log directory names.
+#[must_use]
+pub fn timestamp_secs() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    format_secs(secs)
+}
+
+/// Derive the C++ log level string from `RUST_LOG` or a fallback.
+///
+/// If `RUST_LOG` is set and non-empty, the first global directive (the
+/// part before any `=`) is used — e.g. `RUST_LOG=debug` → `"debug"`,
+/// `RUST_LOG=crowdb_kv=info` → `"info"`. If `RUST_LOG` is unset or
+/// empty, `fallback` is used. If the derived level is not a valid
+/// spdlog level, `"info"` is returned.
+#[must_use]
+pub fn cpp_level_from_rust_log(fallback: &str) -> String {
+    let valid = ["trace", "debug", "info", "warn", "error", "off"];
+    if let Some(rust_log) = std::env::var("RUST_LOG").ok().filter(|s| !s.is_empty()) {
+        // Take the first comma-separated directive; if it has no '=',
+        // it is a global level; otherwise it is target-specific and
+        // we fall back to the default.
+        let first = rust_log.split(',').next().unwrap_or(&rust_log);
+        if let Some((level, _)) = first.split_once('=') {
+            // target=level — not a global level; use fallback
+            let _ = level; // target name, unused
+            return fallback.to_string();
+        }
+        let candidate = first.trim();
+        if valid.contains(&candidate) {
+            return candidate.to_string();
+        }
+    }
+    fallback.to_string()
+}
+
 /// Format epoch millis as `YYYYMMDD-HHMMSS.mmm` (UTC).
 fn format_timestamp(millis: u128) -> String {
     let secs = u64::try_from(millis / 1000).unwrap_or(u64::MAX);
@@ -167,8 +205,34 @@ fn format_timestamp(millis: u128) -> String {
     let hour = rem / 3600;
     let min = (rem % 3600) / 60;
     let sec = rem % 60;
+    let (year, m, d) = civil_from_days(days);
+    let date = format!("{year}{m:02}{d:02}");
+    let hms = format!("{hour:02}{min:02}{sec:02}");
+    format!("{date}-{hms}.{ms:03}")
+}
 
-    // Civil from days since 1970-01-01 (Howard Hinnant's algorithm).
+/// Split epoch seconds into `(YYYYMMDD, HHMM.SS)` (UTC).
+fn split_secs(secs: u64) -> (String, String) {
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let hour = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let sec = rem % 60;
+    let (year, m, d) = civil_from_days(days);
+    (
+        format!("{year}{m:02}{d:02}"),
+        format!("{hour:02}{min:02}.{sec:02}"),
+    )
+}
+
+/// Format epoch seconds as `YYYYMMDD-HHMM.SS` (UTC).
+fn format_secs(secs: u64) -> String {
+    let (date, hms) = split_secs(secs);
+    format!("{date}-{hms}")
+}
+
+/// Civil (year, month, day) from days since 1970-01-01 (Howard Hinnant's algorithm).
+fn civil_from_days(days: u64) -> (i64, i64, i64) {
     let z = i64::try_from(days).unwrap_or(i64::MAX) + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -179,8 +243,7 @@ fn format_timestamp(millis: u128) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = y + i64::from(m <= 2);
-
-    format!("{year}{m:02}{d:02}-{hour:02}{min:02}{sec:02}.{ms:03}")
+    (year, m, d)
 }
 
 /// Initializes file logging to the specified directory.
@@ -226,6 +289,28 @@ pub fn init_file_logging(
     Ok(LogGuards { _file: file_guard })
 }
 
+/// Opens a rotating log file with a caller-supplied prefix.
+/// File naming: `{prefix}-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`.
+///
+/// # Errors
+/// Returns `Err` if the log directory cannot be created.
+pub fn open_named_log(
+    log_dir: impl AsRef<Path>,
+    prefix: &str,
+    max_file_mb: usize,
+    max_files: usize,
+) -> Result<RotatingLogWriter, String> {
+    let pid = std::process::id();
+    RotatingLogWriter::new(
+        log_dir.as_ref().to_path_buf(),
+        prefix,
+        pid,
+        max_file_mb,
+        max_files,
+    )
+    .map_err(|e| format!("failed to open log file; next step: check path permissions: {e}"))
+}
+
 /// Opens a metrics log file in the specified directory with size-based
 /// rotation and gzip compression on rotated files.
 /// File naming: `{process_name}-metrics-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`.
@@ -238,16 +323,8 @@ pub fn open_metrics_log(
     max_file_mb: usize,
     max_files: usize,
 ) -> Result<RotatingLogWriter, String> {
-    let pid = std::process::id();
     let prefix = format!("{process_name}-metrics");
-    RotatingLogWriter::new(
-        log_dir.as_ref().to_path_buf(),
-        &prefix,
-        pid,
-        max_file_mb,
-        max_files,
-    )
-    .map_err(|e| format!("failed to open metrics log file; next step: check path permissions: {e}"))
+    open_named_log(log_dir, &prefix, max_file_mb, max_files)
 }
 
 /// Initializes file and console logging with **split** default filters:
@@ -362,4 +439,57 @@ pub fn init_file_and_console_logging(
         .map_err(|e| format!("failed to initialize tracing subscriber; next step: initialize logging only once per process: {e}"))?;
 
     Ok(LogGuards { _file: file_guard })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cpp_level_from_rust_log;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serialize tests that mutate the process-global `RUST_LOG` env
+    /// var — without this, parallel tests race on `set_var`/`remove_var`
+    /// and flake.
+    fn rust_log_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn cpp_level_global_directive() {
+        let _guard = rust_log_lock().lock().unwrap();
+        std::env::set_var("RUST_LOG", "debug");
+        assert_eq!(cpp_level_from_rust_log("info"), "debug");
+        std::env::remove_var("RUST_LOG");
+    }
+
+    #[test]
+    fn cpp_level_target_directive_uses_fallback() {
+        let _guard = rust_log_lock().lock().unwrap();
+        std::env::set_var("RUST_LOG", "crowdb_kv=info");
+        assert_eq!(cpp_level_from_rust_log("info"), "info");
+        std::env::remove_var("RUST_LOG");
+    }
+
+    #[test]
+    fn cpp_level_empty_rust_log_uses_fallback() {
+        let _guard = rust_log_lock().lock().unwrap();
+        std::env::set_var("RUST_LOG", "");
+        assert_eq!(cpp_level_from_rust_log("info"), "info");
+        std::env::remove_var("RUST_LOG");
+    }
+
+    #[test]
+    fn cpp_level_unset_rust_log_uses_fallback() {
+        let _guard = rust_log_lock().lock().unwrap();
+        std::env::remove_var("RUST_LOG");
+        assert_eq!(cpp_level_from_rust_log("warn"), "warn");
+    }
+
+    #[test]
+    fn cpp_level_invalid_level_uses_fallback() {
+        let _guard = rust_log_lock().lock().unwrap();
+        std::env::set_var("RUST_LOG", "bogus");
+        assert_eq!(cpp_level_from_rust_log("info"), "info");
+        std::env::remove_var("RUST_LOG");
+    }
 }

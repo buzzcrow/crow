@@ -159,13 +159,15 @@ TEST(MetricsRegistry, FlushFormat)
     std::fclose(fp);
 
     std::string output(buf);
-    EXPECT_NE(output.find("[metrics"), std::string::npos);
+    EXPECT_NE(output.find("metrics\n"), std::string::npos);
     EXPECT_NE(output.find("s.1.kv.delete.c"), std::string::npos);
     EXPECT_NE(output.find("s.1.g.0.buf.resident.g"), std::string::npos);
     EXPECT_NE(output.find("s.1.kv.scan.l"), std::string::npos);
     EXPECT_NE(output.find("512"), std::string::npos);
     // Counter header should appear (counter was inc'd)
-    EXPECT_NE(output.find("count  tps(/s)  total"), std::string::npos);
+    EXPECT_NE(output.find("count"), std::string::npos);
+    EXPECT_NE(output.find("tps(/s)"), std::string::npos);
+    EXPECT_NE(output.find("total"), std::string::npos);
     // Bandwidth header should be suppressed (no bandwidth registered)
     EXPECT_EQ(output.find("avg_size(KB)"), std::string::npos);
 }
@@ -176,7 +178,7 @@ TEST(MetricsRegistry, FlushMetricsStrFormat)
     Options      opt;
     opt.page_store = &store;
     Crowdbtree t(opt);
-    t.init_metrics("s.0.g.0");
+    t.init_metrics("s.0.g.0", "mem");
 
     // Trigger a snapshot to populate some metrics.
     ASSERT_TRUE(t.apply(1, Batch{{{.key = "k", .kind = OpKind::kPut, .value = "v"}}}).ok());
@@ -185,12 +187,11 @@ TEST(MetricsRegistry, FlushMetricsStrFormat)
 
     std::string out = t.flush_metrics_str(5.0, "2026-07-15T16:30:05.123Z", 0);
     ASSERT_FALSE(out.empty());
-    EXPECT_NE(out.find("[cpp-metrics"), std::string::npos);
-    EXPECT_NE(out.find("window=5.000s"), std::string::npos);
+    EXPECT_NE(out.find("cpp-tree\n"), std::string::npos);
     // Latency section should use us units.
     EXPECT_NE(out.find("us"), std::string::npos);
-    // Bandwidth section should use KB.
-    EXPECT_NE(out.find("KB"), std::string::npos);
+    // Bandwidth section should use MB.
+    EXPECT_NE(out.find("MB"), std::string::npos);
     // tps column should be present.
     EXPECT_NE(out.find("tps"), std::string::npos);
     // max_name_len should be non-zero after init_metrics.

@@ -53,6 +53,15 @@ impl MetricsRunner {
         &self.registry
     }
 
+    /// Write a raw line to the metrics log file. Used by bench commands
+    /// to append the final JSON report alongside the periodic flush blocks.
+    pub fn write_raw(&self, line: &str) {
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = writeln!(w, "{line}");
+            let _ = w.flush();
+        }
+    }
+
     /// Set a pre-flush collector callback. Called before each flush
     /// tick so the caller can poll external stats (e.g. C++ engine
     /// counters) and update registered metrics via the registry.
@@ -61,9 +70,9 @@ impl MetricsRunner {
     }
 
     /// Set a post-flush C++ metrics callback. Called after the Rust
-    /// `[metrics]` + misc section is written. The callback receives
+    /// `rust` + misc section is written. The callback receives
     /// (writer, `window_secs`, timestamp, `shared_width`, `count_w`, `tps_w`) and should write
-    /// the `[cpp-metrics]` block(s) to the writer.
+    /// the `cpp-tree` block(s) to the writer.
     pub fn set_cpp_flush(
         &mut self,
         f: impl Fn(&mut dyn std::io::Write, f64, &str, usize, usize, usize) + Send + Sync + 'static,
@@ -115,17 +124,17 @@ impl MetricsRunner {
                 }
                 if let Ok(reg) = registry.lock() {
                     let rust_max = reg.max_name_len();
-                    let (cpp_count_w, cpp_tps_w) = cpp_negotiate.as_ref().map_or((5, 7), |neg| neg());
-                    let count_w = 5.max(cpp_count_w);
+                    let (cpp_count_w, cpp_tps_w) = cpp_negotiate.as_ref().map_or((7, 7), |neg| neg());
+                    let count_w = 7.max(cpp_count_w);
                     let tps_w = 7.max(cpp_tps_w);
                     if let Ok(mut w) = writer.lock() {
+                        let _ = writeln!(w, "[{ts} window={window_secs:.3}s]");
                         reg.flush_with_width(&mut *w, window_secs, &ts, rust_max, count_w, tps_w);
                         let _ = writeln!(w, "misc");
                         if let Ok(mut sc) = sys_collector.lock() {
                             let snap = sc.collect();
                             flush_system(&mut *w, &snap);
                         }
-                        let _ = writeln!(w);
                         if let Some(ref cpp) = cpp_flush {
                             cpp(&mut *w, window_secs, &ts, rust_max, count_w, tps_w);
                             let _ = w.flush();
@@ -156,17 +165,17 @@ impl MetricsRunner {
         let ts = iso8601_now();
         if let Ok(reg) = self.registry.lock() {
             let rust_max = reg.max_name_len();
-            let (cpp_count_w, cpp_tps_w) = self.cpp_negotiate.as_ref().map_or((5, 7), |neg| neg());
-            let count_w = 5.max(cpp_count_w);
+            let (cpp_count_w, cpp_tps_w) = self.cpp_negotiate.as_ref().map_or((7, 7), |neg| neg());
+            let count_w = 7.max(cpp_count_w);
             let tps_w = 7.max(cpp_tps_w);
             if let Ok(mut w) = self.writer.lock() {
+                let _ = writeln!(w, "[{ts} window={window_secs:.3}s]");
                 reg.flush_with_width(&mut *w, window_secs, &ts, rust_max, count_w, tps_w);
                 let _ = writeln!(w, "misc");
                 if let Ok(mut sc) = self.system_collector.lock() {
                     let snap = sc.collect();
                     flush_system(&mut *w, &snap);
                 }
-                let _ = writeln!(w);
                 if let Some(ref cpp) = self.cpp_flush {
                     cpp(&mut *w, window_secs, &ts, rust_max, count_w, tps_w);
                 }
@@ -212,7 +221,7 @@ mod tests {
             .map(|e| e.path())
             .expect("metrics log file not found");
         let content = std::fs::read_to_string(&metrics_file).unwrap();
-        let block_count = content.matches("[metrics").count();
+        let block_count = content.matches("\nrust\n").count();
         assert!(
             block_count >= 2,
             "expected >= 2 flush blocks, got {block_count}: {content}"

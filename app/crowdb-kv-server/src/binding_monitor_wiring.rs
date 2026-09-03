@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use crowdb_kv_client::{
-    BindingMonitor, ChunkdbRangeStrategy, ClientConfig, CrowdbClient, ServiceRegistryClient,
+    BindingMonitor, ChunkdbRangeStrategy, ClientConfig, CrowdbKvClient, ServiceRegistryClient,
 };
 use tracing::info;
 
@@ -46,10 +46,12 @@ impl Drop for BindingMonitorHandle {
 /// Spawn the chunkdb range binding monitor on this group-0 replica.
 ///
 /// `group0_endpoint` is the crowdb-rpc endpoint of this server's group-0
-/// listener (used by the monitor's `CrowdbClient` to read/write the
-/// binding table + scan the service registry). `interval_secs` is the
-/// tick interval; `0` is rejected by the caller (do not call this
-/// function when the interval is 0).
+/// listener (used by the monitor's `CrowdbKvClient` to read/write the
+/// binding table + scan the service registry). `mgmt_endpoint` is the
+/// HTTP management URL used as a `/topology` discovery seed when the
+/// local node is not the group-0 leader. `interval_secs` is the tick
+/// interval; `0` is rejected by the caller (do not call this function
+/// when the interval is 0).
 ///
 /// The monitor checks leader status on each tick via the local
 /// registry's group-0 replica. If this node is the group-0 leader, it
@@ -59,13 +61,12 @@ impl Drop for BindingMonitorHandle {
 pub fn spawn_chunkdb_binding_monitor(
     registry: &Arc<KvStoreRegistry>,
     group0_endpoint: String,
+    mgmt_endpoint: String,
     interval_secs: u64,
 ) -> BindingMonitorHandle {
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
 
-    let kv = Arc::new(CrowdbClient::new(ClientConfig::new(
-        vec![group0_endpoint.clone()],
-    )));
+    let kv = Arc::new(CrowdbKvClient::new(ClientConfig::new(vec![mgmt_endpoint])));
     kv.seed_leader(0, 0, group0_endpoint);
     let svc = ServiceRegistryClient::from_shared(Arc::clone(&kv));
     let strategy = ChunkdbRangeStrategy::new();

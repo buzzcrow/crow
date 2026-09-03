@@ -7,6 +7,7 @@
 #include "crowdb-rpc/transport.h"
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -25,7 +26,7 @@ class Worker;
 //
 // Latency histogram for the submit → writev queue wait. The raw
 // aggregation counters and event-loop timing that used to live here
-// have been replaced by crowdb-common metrics (rpc.transport.* histograms,
+// have been replaced by crowdb-common metrics (rpc.* histograms,
 // bandwidths, and counters registered via rpc_metrics.h).
 //
 // Latency steps (nanoseconds, log2 buckets 0..30 = 1ns..1s):
@@ -144,6 +145,12 @@ class SocketEngine
 
     // Register a listen socket (acceptor only). fd is the listening socket.
     virtual void add_listen_fd(int fd) = 0;
+
+    // Remove a listen socket from the event loop.
+    virtual void remove_listen_fd(int fd)
+    {
+        (void)fd;
+    }
 
     // Connection management. read_fd and write_fd are separate fds
     // (write_fd = dup(read_fd)) so EPOLLONESHOT on read and write are
@@ -405,6 +412,28 @@ class SocketTransport : public Transport
         return event_write_;
     }
 
+    // Register a listen socket fd with the first I/O engine. The engine
+    // monitors it via epoll/kqueue and delivers Accept events to a worker
+    // thread, which calls on_accept(). This replaces the dedicated
+    // acceptor thread — the worker's epoll loop is already woken by I/O
+    // events, so accept is not starved under CPU contention.
+    void add_listen_fd(int fd);
+
+    // Remove the listen socket from the event loop (shutdown cleanup).
+    void remove_listen_fd(int fd);
+
+    // Set the accept handler called by a worker when the listen fd is
+    // readable. The handler should loop accept() until EAGAIN. Called
+    // on the I/O worker thread.
+    void set_accept_handler(std::function<void(int)> handler)
+    {
+        accept_handler_ = std::move(handler);
+    }
+
+    // Called by Worker::run_loop on Accept events. Invokes the
+    // registered accept handler with the listen fd.
+    void on_accept(int listen_fd);
+
   private:
     BufferPool                                *pool_;
     std::vector<std::unique_ptr<Worker>>       workers_;
@@ -428,6 +457,10 @@ class SocketTransport : public Transport
     // Event-write mode: when true, submit() notifies the I/O worker
     // instead of calling try_send() directly. Default false.
     bool event_write_{false};
+
+    // Accept handler — called by a worker thread when the listen fd
+    // is readable. Set by the server via set_accept_handler.
+    std::function<void(int)> accept_handler_;
 
     // Connection registry: maps raw Connection* to shared_ptr, so
     // submit() can safely access connections from arbitrary threads

@@ -259,7 +259,7 @@ async function fetchWithOptions(
  * a flat `Vec<RackEntry>`; at `recursive>=1` it switches to an envelope
  * `{ items, truncated_at }` (`app/crowdb-web/src/lifecycle.rs`
  * `http_list_racks`). We normalize both shapes back to `Rack[]` so every
- * caller — in particular `usePhysicalTree` — sees the rack a user just
+ * caller — in particular `useClusterTree` — sees the rack a user just
  * created and renders it in the sidebar.
  */
 export async function listRacks(recursive?: number, options?: RequestOptions): Promise<Rack[]> {
@@ -585,12 +585,12 @@ export async function initCluster(
 }
 
 /**
- * Reset the entire cluster: tear down all groups, stores, server
+ * Destroy the entire cluster: tear down all groups, stores, server
  * processes, nodes, and racks in dependency order. The system group
  * (store 0, group 0) is included. Console config is cleared.
  */
 export async function resetCluster(options?: RequestOptions): Promise<unknown> {
-  const url = `/api/cluster/reset`;
+  const url = `/api/cluster/destroy`;
   return jsonOrThrow(
     await fetchWithOptions(url, {
       ...options,
@@ -1177,25 +1177,6 @@ export async function removeDisk(nodeId: number, dgId: number, diskId: string, o
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
     throw new Error(`DELETE disk: HTTP ${resp.status}: ${body}`);
-  }
-}
-
-/** `POST /api/disks/:disk_id/move` — move a disk to a new disk-group. */
-export async function moveDisk(
-  diskId: string,
-  body: { new_rack_id: number; new_node_id: number; new_disk_group_id: number },
-  options?: RequestOptions,
-): Promise<void> {
-  const resp = await fetchWithOptions(`/api/disks/${encodeURIComponent(diskId)}/move`, {
-    ...options,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    skipDeduplication: true,
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error(`POST move disk: HTTP ${resp.status}: ${text}`);
   }
 }
 

@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-use crate::error::{err_400, err_500, err_502, map_config_err, map_persist_err, ErrorBody};
+use crate::error::{err_500, err_502, map_config_err, map_persist_err, ErrorBody};
 use crate::expand::Recursive;
 use crate::physical_view::PhysicalBuilder;
 use crate::state::AppState;
@@ -14,9 +14,8 @@ use crowdb_console_shared::config::{
 };
 use crowdb_console_shared::expand::RecursiveDepth;
 use crowdb_console_shared::monitor::NodeRecord;
+use crowdb_console_shared::ops;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::time::Duration;
 
 fn live_server_process(entry: &ServerEntry, rec: Option<&NodeRecord>) -> ServerProcess {
     let health = rec.map_or(NodeHealth::Unknown, |node| node.health);
@@ -128,19 +127,14 @@ pub async fn http_add_rack(
         cfg.add_rack(entry.clone()).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
-
-    // Sync group-0 sysdata. Best-effort: config TOML is the source of
-    // truth; sysdata is derived. A later cluster_init re-run reconciles.
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+    // Best-effort sysdata sync (non-blocking — config already committed).
+    if let Ok(ctx) = state.op_context().await {
         let value = crowdb_protocol::common::RackValue {
             status: crowdb_protocol::common::HwStatus::Up as i32,
             node_ids: Vec::new(),
         };
-        if let Err(e) = hw.add_rack(entry.id, &value).await {
-            tracing::warn!(rack_id = entry.id, error = %e, "sysdata sync: add_rack failed");
-        }
+        let _ = ctx.sysmd().add_rack(body.id, &value).await;
     }
-
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -160,14 +154,10 @@ pub async fn http_remove_rack(
         cfg.remove_rack(id).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
-
-    // Cascade-remove group-0 sysdata (rack + child nodes + their disk-groups).
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        if let Err(e) = hw.remove_rack_cascade(id).await {
-            tracing::warn!(rack_id = id, error = %e, "sysdata sync: remove_rack_cascade failed");
-        }
+    // Best-effort sysdata sync (non-blocking — config already committed).
+    if let Ok(ctx) = state.op_context().await {
+        let _ = ctx.sysmd().remove_rack_cascade(id).await;
     }
-
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -212,9 +202,8 @@ pub async fn http_add_node(
     state
         .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
-
-    // Sync group-0 sysdata. Best-effort.
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+    // Best-effort sysdata sync (non-blocking — config already committed).
+    if let Ok(ctx) = state.op_context().await {
         let value = crowdb_protocol::common::NodeValue {
             status: crowdb_protocol::common::HwStatus::Up as i32,
             last_used_dg_id: 0,
@@ -222,11 +211,8 @@ pub async fn http_add_node(
             status_changed_at_ms: 0,
             temp_failure_since_ms: None,
         };
-        if let Err(e) = hw.add_node(entry.rack_id, entry.id, &value).await {
-            tracing::warn!(node_id = entry.id, error = %e, "sysdata sync: add_node failed");
-        }
+        let _ = ctx.sysmd().add_node(entry.rack_id, entry.id, &value).await;
     }
-
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -241,30 +227,49 @@ pub async fn http_remove_node(
     State(state): State<AppState>,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    // Capture rack_id before removing from config (needed for sysdata cascade).
-    let rack_id = {
-        let cfg = state.config.read().unwrap();
-        cfg.node(id).map(|n| n.rack_id)
-    };
+    let t0 = std::time::Instant::now();
     // Cascade-stop the server process and drop its deployment record +
     // topology before removing the node, so a direct DELETE /api/nodes/:id
     // does not orphan a running crowdb-kv-server. No-op when no server is
     // deployed (e.g. the UI already called DELETE .../server first).
     stop_and_remove_server_for_node(&state, id).await;
+    let t_stop = t0.elapsed().as_millis();
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.nodes.iter().find(|n| n.id == id).map(|n| n.rack_id)
+    };
     {
         let mut cfg = state.config.write().unwrap();
         cfg.remove_node(id).map_err(map_config_err)?;
     }
-    state.monitor_cache.drop_node(&id).await;
     state.persist().map_err(map_persist_err)?;
-
-    // Cascade-remove group-0 sysdata (node + child disk-groups + disks).
-    if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
-        if let Err(e) = hw.remove_node_cascade(rack_id, id).await {
-            tracing::warn!(node_id = id, error = %e, "sysdata sync: remove_node_cascade failed");
+    let t_cfg = t0.elapsed().as_millis() - t_stop;
+    // Refresh the monitor cache for remaining group-0 nodes and poll
+    // until a post-election leader is observed, so the sysdata write
+    // targets the new leader instead of a stale hint pointing at the
+    // just-stopped node (which would trigger a 5s transport-error
+    // retry cycle in the KV client).
+    let leader_found = state.refresh_group0_leader(Some(id)).await;
+    let t_refresh = t0.elapsed().as_millis() - t_stop - t_cfg;
+    // Best-effort sysdata sync (non-blocking — config already committed).
+    // Skip when refresh_group0_leader found no leader — e.g. deleting the
+    // last node leaves no group-0 endpoint, and the RPC would retry against
+    // a dead endpoint for 5s+ per attempt, blocking the DELETE response.
+    if leader_found {
+        if let (Some(rack_id), Ok(ctx)) = (rack_id, state.op_context().await) {
+            let _ = ctx.sysmd().remove_node_cascade(rack_id, id).await;
         }
     }
-
+    let t_sysmd = t0.elapsed().as_millis() - t_stop - t_cfg - t_refresh;
+    state.monitor_cache.drop_node(&id).await;
+    tracing::debug!(
+        "http_remove_node: id={id} stop={}ms cfg={}ms refresh={}ms sysmd={}ms total={}ms",
+        t_stop,
+        t_cfg,
+        t_refresh,
+        t_sysmd,
+        t0.elapsed().as_millis()
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -468,9 +473,8 @@ pub async fn http_add_rack_node(
     state
         .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
-
-    // Sync group-0 sysdata. Best-effort.
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+    // Best-effort sysdata sync (non-blocking — config already committed).
+    if let Ok(ctx) = state.op_context().await {
         let value = crowdb_protocol::common::NodeValue {
             status: crowdb_protocol::common::HwStatus::Up as i32,
             last_used_dg_id: 0,
@@ -478,11 +482,8 @@ pub async fn http_add_rack_node(
             status_changed_at_ms: 0,
             temp_failure_since_ms: None,
         };
-        if let Err(e) = hw.add_node(rack_id, entry.id, &value).await {
-            tracing::warn!(node_id = entry.id, error = %e, "sysdata sync: add_node failed");
-        }
+        let _ = ctx.sysmd().add_node(entry.rack_id, entry.id, &value).await;
     }
-
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -592,6 +593,7 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
                 service_type: match s.service_type {
                     crowdb_console_shared::config::ServiceType::Kv => "kv",
                     crowdb_console_shared::config::ServiceType::Diskdb => "diskdb",
+                    crowdb_console_shared::config::ServiceType::Rpc => "rpc",
                 }
                 .to_string(),
             }
@@ -701,28 +703,11 @@ pub async fn http_deploy_node_server(
     Path(node_id): Path<u64>,
     Json(body): Json<DeployNodeServerBody>,
 ) -> Result<(StatusCode, Json<DeployResult>), (StatusCode, Json<ErrorBody>)> {
-    use crowdb_console_shared::lifecycle::{self, DeployRequest};
+    use crowdb_console_shared::lifecycle::DeployRequest;
 
-    let node = {
-        let cfg = state.config.read().unwrap();
-        if cfg.server_for_node(node_id).is_some() {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(ErrorBody {
-                    error: format!("node {node_id} already hosts a deployed server"),
-                }),
-            ));
-        }
-        cfg.node(node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("node {node_id} not found"),
-                }),
-            )
-        })?
-    };
-
+    let workspace_dir = state
+        .prepare_node_workspace(node_id)
+        .map_err(|e| err_500(e.to_string()))?;
     let req = DeployRequest {
         server_id: node_id.to_string(),
         rest_port: body.rest_port,
@@ -748,47 +733,28 @@ pub async fn http_deploy_node_server(
         rpc_workers: body.rpc_workers,
     };
 
-    let deployed = if node.ssh_enabled() {
-        let server_bin = body.binary.clone().unwrap_or_else(|| {
-            std::env::var("CROWDB_KV_SERVER_BIN").unwrap_or_else(|_| "crowdb-kv-server".to_string())
-        });
-        crowdb_console_shared::ssh::deploy_via_ssh(&req, &node, &server_bin)
-            .await
-            .map_err(|e| err_502(format!("ssh deploy: {e}")))?
-    } else {
-        let workspace_dir = state
-            .prepare_node_workspace(node_id)
-            .map_err(|e| err_500(e.to_string()))?;
-        lifecycle::deploy_local_in_dir(&req, &node, &workspace_dir)
-            .await
-            .map_err(|e| err_502(format!("local deploy: {e}")))?
-    };
-
-    let entry = ServerEntry {
-        id: node_id.to_string(),
-        url: deployed.mgmt_url.clone(),
-        node_id: Some(node_id),
-        rpc_url: Some(deployed.rpc_url.clone()),
-        rest_port: Some(body.rest_port),
-        rpc_port: Some(body.rpc_port),
-        auto_start: true,
-        binary: body.binary.clone(),
-        election_profile: body
-            .election_profile
-            .clone()
-            .or_else(|| std::env::var("CROWDB_KV_SERVER_ELECTION_PROFILE").ok()),
-        pid: None,
-        service_type: ServiceType::Kv,
-        rpc_workers: body.rpc_workers,
-        no_fsync: body.no_fsync,
-    };
-    state.set_runtime_pid(node_id, deployed.pid);
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let deployed = ops::kv_server::deploy(&ctx, &req, Some(&workspace_dir))
+        .await
+        .map_err(map_config_err)?;
+    // Apply the server entry directly to state.config instead of
+    // commit_op_context — the snapshot-replace pattern loses
+    // concurrent updates (e.g. parallel deploys on different nodes).
+    let entry = ctx
+        .config()
+        .server_for_node(node_id)
+        .ok_or_else(|| err_500("deploy succeeded but server entry not in ctx"))?
+        .clone();
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_server(entry).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+    state.set_runtime_pid(node_id, deployed.pid);
     crate::mgmt::refresh_node_cache(&state, node_id).await;
+    // A new server is now in the config — re-seed the shared kv_client
+    // so topology refresh can reach this node.
+    state.reseed_kv_client().await;
     Ok((
         StatusCode::CREATED,
         Json(DeployResult {
@@ -817,48 +783,22 @@ pub async fn http_deploy_node_server(
 /// # Errors
 /// Returns `404` if no server is registered for this node, `502` if
 /// the SSH/local restart cycle fails.
-#[allow(clippy::too_many_lines)]
 pub async fn http_restart_node_server(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<Json<DeployResult>, (StatusCode, Json<ErrorBody>)> {
-    use crowdb_console_shared::lifecycle::{self, DeployRequest};
+    use crowdb_console_shared::lifecycle;
 
-    let (entry, node) = {
-        let cfg = state.config.read().unwrap();
-        let entry = cfg.server_for_node(node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server registered on node {node_id}"),
-                }),
-            )
-        })?;
-        let node = cfg.node(node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("node {node_id} not found"),
-                }),
-            )
-        })?;
-        (entry, node)
-    };
-
-    // Extract ports from the persisted URLs. The deploy path stamped
-    // them in originally as host:port; if either fails to parse we
-    // surface a 500 since that's a console-state-corruption case.
-    let rest_port = crate::mgmt::port_of(&entry.url)
-        .ok_or_else(|| err_500(format!("server entry has malformed mgmt_url: {}", entry.url)))?;
-    let rpc_port = entry
-        .rpc_url
-        .as_deref()
-        .and_then(crate::mgmt::port_of)
-        .ok_or_else(|| err_500(format!("server entry has malformed rpc_url: {:?}", entry.rpc_url)))?;
-
+    // Stop the running process first (using the in-memory runtime PID).
+    // ops::kv_server::restart also tries to stop via entry.pid, but the
+    // runtime PID is authoritative for web-deployed servers.
     if let Some(pid) = state.runtime_pid(node_id) {
-        let _sent = match &node {
-            n if n.ssh_enabled() => crowdb_console_shared::ssh::stop_via_ssh(n, pid)
+        let node = {
+            let cfg = state.config.read().unwrap();
+            cfg.node(node_id).cloned()
+        };
+        let _sent = match node {
+            Some(n) if n.ssh_enabled() => crowdb_console_shared::ssh::stop_via_ssh(&n, pid)
                 .await
                 .map_err(|e| err_502(format!("ssh stop (restart): {e}")))?,
             _ => tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid))
@@ -868,62 +808,39 @@ pub async fn http_restart_node_server(
         };
     }
 
-    let req = DeployRequest {
-        server_id: node_id.to_string(),
-        rest_port,
-        rpc_port,
-        election_profile: entry
-            .election_profile
-            .clone()
-            .or_else(|| std::env::var("CROWDB_KV_SERVER_ELECTION_PROFILE").ok()),
-        binary: None,
-        rpc_workers: entry.rpc_workers,
-        no_fsync: entry.no_fsync,
-        ..Default::default()
-    };
-    let deployed = if node.ssh_enabled() {
-        let server_bin =
-            std::env::var("CROWDB_KV_SERVER_BIN").unwrap_or_else(|_| "crowdb-kv-server".to_string());
-        crowdb_console_shared::ssh::deploy_via_ssh(&req, &node, &server_bin)
-            .await
-            .map_err(|e| err_502(format!("ssh redeploy (restart): {e}")))?
-    } else {
-        let workspace_dir = state
-            .prepare_node_workspace(node_id)
-            .map_err(|e| err_500(e.to_string()))?;
-        lifecycle::deploy_local_in_dir(&req, &node, &workspace_dir)
-            .await
-            .map_err(|e| err_502(format!("local redeploy (restart): {e}")))?
-    };
-
-    let new_entry = ServerEntry {
-        id: node_id.to_string(),
-        url: deployed.mgmt_url.clone(),
-        node_id: Some(node_id),
-        rpc_url: Some(deployed.rpc_url.clone()),
-        rest_port: entry.rest_port,
-        rpc_port: entry.rpc_port,
-        auto_start: entry.auto_start,
-        binary: entry.binary.clone(),
-        election_profile: entry.election_profile.clone(),
-        pid: None,
-        service_type: entry.service_type,
-        rpc_workers: entry.rpc_workers,
-        no_fsync: entry.no_fsync,
-    };
+    let workspace_dir = state
+        .prepare_node_workspace(node_id)
+        .map_err(|e| err_500(e.to_string()))?;
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let deployed = ops::kv_server::restart(&ctx, node_id, Some(&workspace_dir))
+        .await
+        .map_err(map_config_err)?;
+    // Apply the updated server entry directly to state.config (avoid
+    // commit_op_context snapshot-replace race).
+    let new_entry = ctx
+        .config()
+        .server_for_node(node_id)
+        .ok_or_else(|| err_500("restart succeeded but server entry not in ctx"))?
+        .clone();
+    {
+        let mut cfg = state.config.write().unwrap();
+        let _ = cfg.remove_server_for_node(node_id);
+        cfg.add_server(new_entry).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
     state.set_runtime_pid(node_id, deployed.pid);
     // Clear cached KV RPC connections so the next KV request reconnects
     // to the restarted server instead of reusing a stale TCP connection.
     if let Some(t) = state.kv_rpc_transport.read().await.as_ref() {
         t.clear_connections();
     }
-    {
-        let mut cfg = state.config.write().unwrap();
-        // The old entry is still keyed by node_id; replace it.
-        let _ = cfg.remove_server_for_node(node_id);
-        cfg.add_server(new_entry).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
+    // Mark the node as recovering so the monitor cache preserves
+    // previously-known stores until the server's /topology confirms
+    // them (WAL replay may still be in progress when the first
+    // topology fetch succeeds). Must be set BEFORE
+    // restore_persisted_topology_for_node, which calls
+    // refresh_node_cache internally.
+    state.monitor_cache.mark_recovering(node_id).await;
     crate::mgmt::restore_persisted_topology_for_node(&state, node_id)
         .await
         .map_err(|e| err_502(format!("restore topology after restart: {e}")))?;
@@ -970,32 +887,40 @@ pub async fn http_stop_node_server(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<Json<StopResult>, (StatusCode, Json<ErrorBody>)> {
-    use crowdb_console_shared::lifecycle;
-
+    let pid = state.runtime_pid(node_id);
     let node = {
         let cfg = state.config.read().unwrap();
-        let _entry = cfg.server_for_node(node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server deployed on node {node_id}"),
-                }),
-            )
-        })?;
         cfg.node(node_id).cloned()
     };
-    let Some(pid) = state.runtime_pid(node_id) else {
-        return Err(err_400(format!("server on node {node_id} has no tracked pid")));
-    };
-    let sent = match node {
-        Some(n) if n.ssh_enabled() => crowdb_console_shared::ssh::stop_via_ssh(&n, pid)
+    // Send SIGTERM without blocking — the server's graceful shutdown can
+    // take up to 10s (shutdown_timeout_ms), and blocking here delays the
+    // stop response. The process is reaped in the background (SIGKILL
+    // after 15s if needed) so ports/WAL files are released for reuse.
+    let sent = if let Some(pid) = pid {
+        match node {
+            Some(n) if n.ssh_enabled() => crowdb_console_shared::ssh::stop_via_ssh(&n, pid)
+                .await
+                .map_err(|e| err_502(format!("ssh stop: {e}")))?,
+            _ => {
+                tokio::task::spawn_blocking(move || {
+                    crowdb_console_shared::lifecycle::stop_pid(pid).unwrap_or(false)
+                });
+                true
+            }
+        }
+    } else {
+        // No runtime PID — check config for a persisted PID (e.g. server
+        // was deployed by a prior web-server instance).
+        let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+        ops::kv_server::stop(&ctx, node_id, pid)
             .await
-            .map_err(|e| err_502(format!("ssh stop: {e}")))?,
-        _ => tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid))
-            .await
-            .map_err(|e| err_500(format!("spawn_blocking: {e}")))?
-            .map_err(|e| err_500(format!("stop_pid: {e}")))?,
+            .map_err(map_config_err)?
     };
+    // Clear only the in-memory runtime PID — the config PID is left
+    // intact so ops::kv_server::restart() can stop the old process
+    // (blocking wait) before redeploying on the same port. The config
+    // PID is cleared by resetAll (which removes the server entry) or
+    // by the next deploy (which overwrites it with the new PID).
     state.clear_runtime_pid(node_id);
     // Clear cached KV RPC connections — the server is stopping, so any
     // cached TCP connection is now dead. The next KV request (after a
@@ -1013,6 +938,10 @@ pub async fn http_stop_node_server(
     if state.diskdb_runtime_pid(node_id).is_none() {
         state.monitor_cache.mark_down(node_id, "server stopped").await;
     }
+    // Refresh group-0 leader so the next op_context targets the
+    // post-election leader instead of the stopped node (which would
+    // trigger a 5s transport-error retry cycle in the KV client).
+    state.refresh_group0_leader(Some(node_id)).await;
     Ok(Json(StopResult { sent }))
 }
 
@@ -1029,23 +958,41 @@ pub async fn http_stop_node_server(
 async fn stop_and_remove_server_for_node(state: &AppState, node_id: u64) -> bool {
     use crowdb_console_shared::lifecycle;
 
-    let node = {
+    let (node, config_pid) = {
         let cfg = state.config.read().unwrap();
         if cfg.server_for_node(node_id).is_none() {
             return false;
         }
-        cfg.node(node_id).cloned()
+        (
+            cfg.node(node_id).cloned(),
+            cfg.server_for_node(node_id).and_then(|s| s.pid),
+        )
     };
-    if let Some(pid) = state.runtime_pid(node_id) {
-        let _ = match node {
-            Some(n) if n.ssh_enabled() => crowdb_console_shared::ssh::stop_via_ssh(&n, pid)
-                .await
-                .unwrap_or(false),
-            _ => matches!(
-                tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await,
-                Ok(Ok(true))
-            ),
-        };
+    // Prefer the in-memory runtime PID (set at deploy time); fall back
+    // to the persisted config PID so we can still stop a server whose
+    // process was spawned by a prior web-server instance.
+    let pid = state.runtime_pid(node_id).or(config_pid);
+    if let Some(pid) = pid {
+        match node {
+            Some(n) if n.ssh_enabled() => {
+                let _ = crowdb_console_shared::ssh::stop_via_ssh(&n, pid)
+                    .await
+                    .unwrap_or(false);
+            }
+            _ => {
+                // Send SIGTERM and reap the process in the background.
+                // The server's graceful shutdown can take up to 10s
+                // (shutdown_timeout_ms), and blocking here delays the
+                // DELETE response until the process fully exits. The
+                // node is removed from config below regardless — the
+                // tree updates immediately. The background task ensures
+                // the process is reaped (SIGKILL after 15s if needed)
+                // so ports/WAL files are released for reuse.
+                tokio::task::spawn_blocking(move || {
+                    let _ = lifecycle::stop_pid(pid);
+                });
+            }
+        }
     }
     {
         let mut cfg = state.config.write().unwrap();
@@ -1058,17 +1005,35 @@ async fn stop_and_remove_server_for_node(state: &AppState, node_id: u64) -> bool
 }
 
 /// `DELETE /api/nodes/:node_id/server`. Stop and remove the deployment
-/// record. Returns 204 on success, 404 if no server is deployed.
+/// record. Returns 204 on success, 404 if no server is deployed, 409
+/// if the node still hosts replicas in group-0 sysdata (require-empty).
 ///
 /// # Panics
 /// Panics if the `RwLock` is poisoned.
 ///
 /// # Errors
-/// Returns `404` if no server is deployed on this node.
+/// Returns `404` if no server is deployed on this node; `409` if the
+/// node still hosts replicas.
 pub async fn http_delete_node_server(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    // Require-empty: refuse if the node still hosts replicas in
+    // group-0 sysdata. Best-effort — if sysdata is unreachable, the
+    // check is skipped (cluster may not be initialized). Skip entirely
+    // when no store 0 exists in the local config — the cluster has not
+    // been initialized, so there can be no replicas to check, and the
+    // sysdata RPC would hang retrying against a bootstrap mgmt URL.
+    let cluster_initialized = {
+        let cfg = state.config.read().unwrap();
+        cfg.stores.iter().any(|s| s.store_id == 0)
+    };
+    if cluster_initialized {
+        let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+        ops::kv_server::check_require_empty(&ctx, node_id)
+            .await
+            .map_err(map_config_err)?;
+    }
     if !stop_and_remove_server_for_node(&state, node_id).await {
         return Err((
             StatusCode::NOT_FOUND,
@@ -1081,94 +1046,40 @@ pub async fn http_delete_node_server(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── Per-node OpenAPI proxy ───────────────────────────────────────────
-
-const OPENAPI_CACHE_TTL: Duration = Duration::from_secs(300);
-
-/// `GET /api/nodes/:node_id/openapi.json`. Reverse-proxy the node's
-/// management API `/openapi.json` endpoint. Uses the same TTL cache as
-/// the old global proxy.
-///
-/// # Panics
-/// Panics if the `RwLock` or `Mutex` is poisoned.
+/// `POST /api/cluster/clean`. Wipe user data on every node + wait for
+/// re-election. Preserves group-0 sysdata + topology.
 ///
 /// # Errors
-/// Returns an error if no server is deployed or the upstream request fails.
-pub async fn http_node_openapi_proxy(
+/// Returns `502` if the wipe or re-election wait fails.
+pub async fn http_cluster_clean(
     State(state): State<AppState>,
-    Path(node_id): Path<u64>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
-    let mgmt_url = {
-        let cfg = state.config.read().unwrap();
-        let entry = cfg.server_for_node(node_id).ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server deployed on node {node_id}"),
-                }),
-            )
-        })?;
-        entry.url.clone()
-    };
-
-    // Check cache
-    {
-        let cache = state.openapi_cache.lock().unwrap();
-        if let Some((value, timestamp)) = cache.get(&node_id) {
-            if timestamp.elapsed() < OPENAPI_CACHE_TTL {
-                return Ok(Json(value.clone()));
-            }
-        }
-    }
-
-    let url = format!("{}/openapi.json", mgmt_url.trim_end_matches('/'));
-    let cid = crowdb_console_shared::corr_id::current_or_new();
-    let started = std::time::Instant::now();
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .header(crowdb_console_shared::corr_id::HEADER, &cid)
-        .send()
+) -> Result<Json<ops::cluster::CleanResult>, (StatusCode, Json<ErrorBody>)> {
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::cluster::clean(&ctx, 0, 0)
         .await
-        .map_err(|e| {
-            crowdb_console_shared::ops_log::append_http(
-                &cid,
-                "GET",
-                &url,
-                0,
-                started.elapsed().as_millis(),
-                Some(&format!("transport error: {e}")),
-            );
-            err_502(format!("openapi proxy: {e}"))
-        })?;
-    let upstream_status = resp.status();
-    crowdb_console_shared::ops_log::append_http(
-        &cid,
-        "GET",
-        &url,
-        upstream_status.as_u16(),
-        started.elapsed().as_millis(),
-        None,
-    );
-    if !upstream_status.is_success() {
-        return Err(err_502(format!("openapi proxy: upstream {upstream_status}")));
-    }
-    let value = resp
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| err_502(format!("openapi proxy: parse: {e}")))?;
-
-    {
-        let mut cache = state.openapi_cache.lock().unwrap();
-        cache.insert(node_id, (value.clone(), std::time::Instant::now()));
-    }
-
-    Ok(Json(value))
+        .map(Json)
+        .map_err(|e| err_502(format!("{e}")))
 }
 
-/// `POST /internal/reset`. Tear down the entire cluster in dependency
-/// order: groups → stores → server processes → nodes → racks, then
-/// clear workspace dirs and caches. Intended for E2E test fixtures;
-/// never exposed in the public API surface.
+/// `POST /api/cluster/reset`. Remove orphaned sysdata entries
+/// (stores/groups/replicas that have no corresponding running server).
+/// Does not stop any running servers.
+///
+/// # Errors
+/// Returns `502` if the sysdata scan fails.
+pub async fn http_cluster_reset(
+    State(state): State<AppState>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::cluster::reset(&ctx)
+        .await
+        .map_err(|e| err_502(format!("{e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/cluster/destroy` (alias: `/internal/reset`). Tear down
+/// the entire cluster in dependency order: groups → stores → server
+/// processes → nodes → racks, then clear workspace dirs and caches.
 ///
 /// # Panics
 /// Panics if the `RwLock` or `Mutex` is poisoned.
@@ -1228,11 +1139,17 @@ pub async fn http_internal_reset(
     }
 
     // 8. Clear caches and workspace directories.
-    state.openapi_cache.lock().unwrap().clear();
     state.clear_kv_client().await;
-    state
-        .clear_workspaces()
-        .map_err(|e| err_500(format!("clear workspaces: {e}")))?;
+    // Defer workspace cleanup to a background task — the KV server
+    // processes are still shutting down (async SIGTERM in
+    // stop_all_services), and removing their WAL/engine files while
+    // they are open would fail or race. The background task removes
+    // the dirs best-effort; the next deploy recreates them as needed.
+    // Defer workspace cleanup — processes may still be shutting down.
+    let state_clone = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = state_clone.clear_workspaces();
+    });
     state.persist().map_err(map_persist_err)?;
 
     Ok(Json(ResetResult { stopped }))
@@ -1332,6 +1249,19 @@ async fn shutdown_kv_data(state: &AppState) -> Vec<String> {
 
     // Step 3: clean group-0 sysdata — rack cascade, store records,
     // diskdb unregister. Group-0 is still alive at this point.
+    // Refresh the monitor cache for all running nodes first so the
+    // group-0 leader endpoint is current (a prior test may have
+    // stopped/restarted nodes, leaving stale cache entries).
+    let running_nodes: Vec<NodeId> = {
+        let snap = state.monitor_cache.snapshot().await;
+        snap.keys()
+            .copied()
+            .filter(|n| state.runtime_pid(*n).is_some())
+            .collect()
+    };
+    for nid in &running_nodes {
+        crate::mgmt::refresh_node_cache(state, *nid).await;
+    }
     if let Some(hw) = crate::mgmt::build_hardware_client(state).await {
         for rid in &rack_ids {
             if let Err(e) = hw.remove_rack_cascade(*rid).await {
@@ -1418,6 +1348,11 @@ async fn stop_all_services(state: &AppState) -> Vec<String> {
 
     for nid in &node_ids {
         // Stop the KV server process if a PID is tracked.
+        // Send SIGTERM and reap in the background — the server's
+        // graceful shutdown can take up to 10s (shutdown_timeout_ms),
+        // and blocking here serializes N nodes × 10s = N×10s delays.
+        // The process is reaped in the background (SIGKILL after 15s
+        // if needed) so ports/WAL files are released for reuse.
         if let Some(pid) = state.runtime_pid(nid) {
             let ssh = state
                 .config
@@ -1425,23 +1360,23 @@ async fn stop_all_services(state: &AppState) -> Vec<String> {
                 .unwrap()
                 .node(*nid)
                 .is_some_and(crowdb_console_shared::config::NodeEntry::ssh_enabled);
-            let sent = if ssh {
-                false
+            if ssh {
+                let node = state.config.read().unwrap().node(*nid).cloned().unwrap();
+                let _ = crowdb_console_shared::ssh::stop_via_ssh(&node, pid).await;
             } else {
-                matches!(
-                    tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await,
-                    Ok(Ok(true))
-                )
-            };
-            if sent {
-                stopped.push(nid.to_string());
+                tokio::task::spawn_blocking(move || {
+                    let _ = lifecycle::stop_pid(pid);
+                });
             }
+            stopped.push(nid.to_string());
             state.clear_runtime_pid(nid);
         }
 
         // Stop the DDB process if a PID is tracked.
         if let Some(pid) = state.diskdb_runtime_pid(nid) {
-            let _ = tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await;
+            tokio::task::spawn_blocking(move || {
+                let _ = lifecycle::stop_pid(pid);
+            });
             state.clear_diskdb_runtime_pid(nid);
         }
     }
@@ -1594,49 +1529,18 @@ pub async fn http_add_node_disk_group(
     Path(node_id): Path<NodeId>,
     Json(body): Json<AddDiskGroupBody>,
 ) -> Result<(StatusCode, Json<DiskGroupEntry>), (StatusCode, Json<ErrorBody>)> {
-    // Resolve rack_id from the node.
-    let rack_id = {
-        let cfg = state.config.read().unwrap();
-        cfg.node(node_id).map(|n| n.rack_id).ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("node {node_id} not found"),
-                }),
-            )
-        })?
-    };
-    let entry = DiskGroupEntry {
-        id: body.id,
-        rack_id,
-        node_id,
-        name: body.name,
-    };
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.add_disk_group(entry.clone()).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let entry = ops::hardware::add_disk_group(&ctx, node_id, body.id, &body.name)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
 
-    // Sync group-0 sysdata. Best-effort.
+    // Auto-assign ownership: pick the diskdb instance with the
+    // fewest owned DGs and write the ownership entry to group-0.
     if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        let value = crowdb_protocol::diskdb::rpc::DiskGroupValue {
-            status: crowdb_protocol::common::HwStatus::Up as i32,
-            disk_ids: Vec::new(),
-        };
-        if let Err(e) = hw.add_disk_group(rack_id, node_id, entry.id, &value).await {
-            tracing::warn!(disk_group_id = entry.id, error = %e, "sysdata sync: add_disk_group failed");
-        }
-
-        // Auto-assign ownership: pick the diskdb instance with the
-        // fewest owned DGs and write the ownership entry to group-0.
-        // This ensures new DGs are immediately visible to a diskdb
-        // keepalive sync without manual assignment via the UI.
-        if let Err(e) = auto_assign_owner(&hw, rack_id, node_id, entry.id).await {
+        if let Err(e) = auto_assign_owner(&hw, entry.rack_id, node_id, entry.id).await {
             tracing::warn!(disk_group_id = entry.id, error = %e, "sysdata sync: auto-assign owner failed");
         }
-    } else {
-        tracing::warn!(disk_group_id = entry.id, "sysdata sync skipped: group-0 endpoint not in monitor cache yet; DG is in config only and will sync on next add");
     }
 
     Ok((StatusCode::CREATED, Json(entry)))
@@ -1716,38 +1620,11 @@ pub async fn http_remove_node_disk_group(
     State(state): State<AppState>,
     Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    // Capture rack_id + child disk ids before removing.
-    let (rack_id, disk_ids): (Option<RackId>, Vec<String>) = {
-        let cfg = state.config.read().unwrap();
-        let rack_id = cfg
-            .disk_groups
-            .iter()
-            .find(|dg| dg.node_id == node_id && dg.id == dg_id)
-            .map(|dg| dg.rack_id);
-        let disk_ids = cfg
-            .disks_in_group(dg_id)
-            .iter()
-            .map(|d| d.disk_id.clone())
-            .collect();
-        (rack_id, disk_ids)
-    };
-    {
-        let mut cfg = state.config.write().unwrap();
-        // Cascade-remove child disks first, then the disk-group.
-        for disk_id in &disk_ids {
-            cfg.remove_disk(disk_id).map_err(map_config_err)?;
-        }
-        cfg.remove_disk_group(dg_id).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
-
-    // Cascade-remove group-0 sysdata (handles child disks + DG).
-    if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
-        if let Err(e) = hw.remove_disk_group_cascade(rack_id, node_id, dg_id).await {
-            tracing::warn!(disk_group_id = dg_id, error = %e, "sysdata sync: remove_disk_group_cascade failed");
-        }
-    }
-
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::hardware::remove_disk_group(&ctx, node_id, dg_id)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1762,106 +1639,6 @@ pub struct AddDiskBody {
     unit_size_bytes: u32,
     #[serde(default)]
     device_path: String,
-}
-
-/// Validate a single disk-add input, producing the `DiskEntry`, proto
-/// `DiskId`, and `DiskValue` for group-0 sysdata sync. Shared by
-/// `http_add_disk` and `http_add_disks_batch` so both paths reject
-/// bad inputs before any config mutation or persist.
-fn validate_disk_input(
-    body: &AddDiskBody,
-    dg_id: DiskGroupId,
-    rack_id: RackId,
-    node_id: NodeId,
-) -> Result<
-    (
-        DiskEntry,
-        crowdb_protocol::common::DiskId,
-        crowdb_protocol::diskdb::rpc::DiskValue,
-    ),
-    (StatusCode, Json<ErrorBody>),
-> {
-    let disk_id_proto =
-        match <crowdb_protocol::common::DiskId as crowdb_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&body.disk_id) {
-            Ok(id) => id,
-            Err(e) => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorBody {
-                        error: format!("invalid disk_id format for {}: {e}", body.disk_id),
-                    }),
-                ));
-            }
-        };
-    if body.unit_size_bytes == 0 || body.zone_size_bytes == 0 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: format!(
-                    "disk {}: unit_size_bytes and zone_size_bytes must be non-zero",
-                    body.disk_id
-                ),
-            }),
-        ));
-    }
-    if body.zone_size_bytes % u64::from(body.unit_size_bytes) != 0 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: format!(
-                    "disk {}: zone_size_bytes must be a multiple of unit_size_bytes",
-                    body.disk_id
-                ),
-            }),
-        ));
-    }
-    if body.capacity_bytes < body.zone_size_bytes {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: format!("disk {}: capacity_bytes must be >= zone_size_bytes", body.disk_id),
-            }),
-        ));
-    }
-    let unit_size = u64::from(body.unit_size_bytes);
-    let capacity_units = body.capacity_bytes / unit_size;
-    let zone_size_units = body.zone_size_bytes / unit_size;
-    let zone_count = u32::try_from(capacity_units / zone_size_units).unwrap_or(u32::MAX);
-    let disk_type_proto = match body.disk_type.as_str() {
-        "Hdd" | "BLOCK_HDD" => crowdb_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
-        "Ssd" | "BLOCK_SSD" => crowdb_protocol::diskdb::rpc::DiskType::BlockSsd as i32,
-        "ZONE_SSD" => crowdb_protocol::diskdb::rpc::DiskType::ZoneSsd as i32,
-        "SMR_HDD" => crowdb_protocol::diskdb::rpc::DiskType::SmrHdd as i32,
-        other => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody {
-                    error: format!("disk {}: unknown disk_type: {other}", body.disk_id),
-                }),
-            ));
-        }
-    };
-    let entry = DiskEntry {
-        disk_id: body.disk_id.clone(),
-        disk_group_id: dg_id,
-        rack_id,
-        node_id,
-        disk_type: body.disk_type.clone(),
-        capacity_bytes: body.capacity_bytes,
-        zone_size_bytes: body.zone_size_bytes,
-        unit_size_bytes: body.unit_size_bytes,
-        device_path: body.device_path.clone(),
-    };
-    let value = crowdb_protocol::diskdb::rpc::DiskValue {
-        status: crowdb_protocol::common::HwStatus::Up as i32,
-        disk_type: disk_type_proto,
-        capacity_units,
-        zone_size_units,
-        unit_size_bytes: body.unit_size_bytes,
-        zone_count,
-        device_path: body.device_path.clone(),
-    };
-    Ok((entry, disk_id_proto, value))
 }
 
 /// `GET /api/nodes/:node_id/disk-groups/:dg_id/disks`.
@@ -2047,39 +1824,19 @@ pub async fn http_add_disk(
     Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
     Json(body): Json<AddDiskBody>,
 ) -> Result<(StatusCode, Json<DiskEntry>), (StatusCode, Json<ErrorBody>)> {
-    // Resolve rack_id from the disk-group.
-    let rack_id = {
-        let cfg = state.config.read().unwrap();
-        cfg.disk_groups
-            .iter()
-            .find(|dg| dg.node_id == node_id && dg.id == dg_id)
-            .map(|dg| dg.rack_id)
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorBody {
-                        error: format!("disk-group {dg_id} not found on node {node_id}"),
-                    }),
-                )
-            })?
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let input = ops::hardware::AddDiskInput {
+        disk_id: body.disk_id,
+        disk_type: body.disk_type,
+        capacity_bytes: body.capacity_bytes,
+        zone_size_bytes: body.zone_size_bytes,
+        unit_size_bytes: body.unit_size_bytes,
+        device_path: body.device_path,
     };
-    // Validate all inputs before mutating config or syncing group 0.
-    let (entry, disk_id_proto, value) = validate_disk_input(&body, dg_id, rack_id, node_id)?;
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.add_disk(entry.clone()).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
-
-    // Sync group-0 sysdata. Best-effort.
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, &disk_id_proto, &value).await {
-            tracing::warn!(disk_id = %entry.disk_id, error = %e, "sysdata sync: add_disk failed");
-        }
-    } else {
-        tracing::warn!(disk_id = %entry.disk_id, "sysdata sync skipped: group-0 endpoint not in monitor cache yet; disk is in config only");
-    }
-
+    let entry = ops::hardware::add_disk(&ctx, node_id, dg_id, &input)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -2102,82 +1859,28 @@ pub async fn http_add_disks_batch(
     Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
     Json(body): Json<AddDisksBatchBody>,
 ) -> Result<(StatusCode, Json<AddDisksBatchResult>), (StatusCode, Json<ErrorBody>)> {
-    let rack_id = {
-        let cfg = state.config.read().unwrap();
-        cfg.disk_groups
-            .iter()
-            .find(|dg| dg.node_id == node_id && dg.id == dg_id)
-            .map(|dg| dg.rack_id)
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorBody {
-                        error: format!("disk-group {dg_id} not found on node {node_id}"),
-                    }),
-                )
-            })?
-    };
-
-    // Validate all inputs and check for duplicates before any mutation.
-    let mut validated: Vec<(
-        DiskEntry,
-        crowdb_protocol::common::DiskId,
-        crowdb_protocol::diskdb::rpc::DiskValue,
-    )> = Vec::with_capacity(body.disks.len());
-    let mut seen_ids: HashSet<String> = HashSet::with_capacity(body.disks.len());
-    for d in &body.disks {
-        if !seen_ids.insert(d.disk_id.clone()) {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(ErrorBody {
-                    error: format!("duplicate disk_id within batch: {}", d.disk_id),
-                }),
-            ));
-        }
-        validated.push(validate_disk_input(d, dg_id, rack_id, node_id)?);
-    }
-
-    // Mutate config: add all disks. Roll back on any failure so the
-    // in-memory config stays consistent with the (un-persisted) state.
-    let mut added: Vec<DiskEntry> = Vec::with_capacity(validated.len());
-    {
-        let mut cfg = state.config.write().unwrap();
-        for (entry, _, _) in &validated {
-            if let Err(e) = cfg.add_disk(entry.clone()).map_err(map_config_err) {
-                // Roll back already-added disks.
-                for a in &added {
-                    let _ = cfg.remove_disk(&a.disk_id);
-                }
-                return Err(e);
-            }
-            added.push(entry.clone());
-        }
-    }
-    state.persist().map_err(map_persist_err)?;
-
-    // Best-effort sysdata sync per disk.
-    let mut sysdata_errors: Vec<String> = Vec::new();
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        for (entry, disk_id_proto, value) in &validated {
-            if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, disk_id_proto, value).await {
-                let msg = format!("disk {}: sysdata sync failed: {e}", entry.disk_id);
-                tracing::warn!(disk_id = %entry.disk_id, error = %e, "batch sysdata sync: add_disk failed");
-                sysdata_errors.push(msg);
-            }
-        }
-    } else {
-        tracing::warn!(
-            dg_id,
-            disk_count = validated.len(),
-            "batch sysdata sync skipped: group-0 endpoint not in monitor cache yet; disks are in config only"
-        );
-    }
-
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let inputs: Vec<ops::hardware::AddDiskInput> = body
+        .disks
+        .into_iter()
+        .map(|d| ops::hardware::AddDiskInput {
+            disk_id: d.disk_id,
+            disk_type: d.disk_type,
+            capacity_bytes: d.capacity_bytes,
+            zone_size_bytes: d.zone_size_bytes,
+            unit_size_bytes: d.unit_size_bytes,
+            device_path: d.device_path,
+        })
+        .collect();
+    let added = ops::hardware::add_disks_batch(&ctx, node_id, dg_id, &inputs)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     Ok((
         StatusCode::CREATED,
         Json(AddDisksBatchResult {
             added,
-            sysdata_errors,
+            sysdata_errors: Vec::new(),
         }),
     ))
 }
@@ -2204,400 +1907,12 @@ pub async fn http_remove_disk(
     State(state): State<AppState>,
     Path((node_id, dg_id, disk_id)): Path<(NodeId, DiskGroupId, String)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    // Capture rack_id before removing.
-    let rack_id = {
-        let cfg = state.config.read().unwrap();
-        cfg.disks
-            .iter()
-            .find(|d| d.node_id == node_id && d.disk_group_id == dg_id && d.disk_id == disk_id)
-            .map(|d| d.rack_id)
-    };
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.remove_disk(&disk_id).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
-
-    // Cascade-remove group-0 sysdata.
-    if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
-        match <crowdb_protocol::common::DiskId as crowdb_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&disk_id) {
-            Ok(disk_id_proto) => {
-                if let Err(e) = hw.remove_disk_cascade(rack_id, node_id, dg_id, &disk_id_proto).await {
-                    tracing::warn!(disk_id = %disk_id, error = %e, "sysdata sync: remove_disk_cascade failed");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(disk_id = %disk_id, error = %e, "sysdata sync: invalid disk_id format, skipping cascade");
-            }
-        }
-    }
-
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::hardware::remove_disk(&ctx, node_id, dg_id, &disk_id)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-// ── Disk move ────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-#[allow(clippy::struct_field_names)]
-pub struct MoveDiskBody {
-    new_rack_id: RackId,
-    new_node_id: NodeId,
-    new_disk_group_id: DiskGroupId,
-}
-
-/// `POST /api/disks/:disk_id/move`.
-///
-/// Moves a disk from its current placement to a new disk-group. The
-/// disk's records (zone/busy/free) are copied from the old bind to
-/// the new bind, then the group-0 placement is updated.
-///
-/// # Panics
-/// Panics if the `RwLock` is poisoned.
-///
-/// # Errors
-/// Returns an error if the disk is not found, the new disk-group is
-/// not found, or the record copy / group-0 update fails.
-///
-/// B.1: add-before-remove + conditional config update + quiescence
-/// window. The disk is never "nowhere" — it's added to the new
-/// placement before being removed from the old. The console config is
-/// updated only if both group-0 operations succeed.
-#[allow(clippy::too_many_lines)]
-pub async fn http_move_disk(
-    State(state): State<AppState>,
-    Path(disk_id): Path<String>,
-    Json(body): Json<MoveDiskBody>,
-) -> Result<Json<DiskEntry>, (StatusCode, Json<ErrorBody>)> {
-    // 1. Resolve the disk's current placement from config.
-    let (old_rack_id, old_node_id, old_dg_id, disk_entry) = {
-        let cfg = state.config.read().unwrap();
-        let entry = cfg.disk(&disk_id).ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("disk {disk_id} not found"),
-                }),
-            )
-        })?;
-        (entry.rack_id, entry.node_id, entry.disk_group_id, entry.clone())
-    };
-
-    // 2. Verify the new disk-group exists in config.
-    {
-        let cfg = state.config.read().unwrap();
-        if !cfg
-            .disk_groups
-            .iter()
-            .any(|dg| dg.id == body.new_disk_group_id && dg.node_id == body.new_node_id)
-        {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!(
-                        "disk-group {} on node {} not found",
-                        body.new_disk_group_id, body.new_node_id
-                    ),
-                }),
-            ));
-        }
-    }
-
-    // 3. Parse the disk_id into a proto DiskId.
-    let disk_id_proto = match <crowdb_protocol::common::DiskId as crowdb_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&disk_id)
-    {
-        Ok(id) => id,
-        Err(e) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody { error: format!("invalid disk_id format: {e}") }),
-            ));
-        }
-    };
-
-    let hw = crate::mgmt::build_hardware_client(&state).await.ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorBody {
-                error: "no hardware client available".into(),
-            }),
-        )
-    })?;
-
-    // 4. Set disk to Maintenance in group 0 (old placement) —
-    //    quiescence window. This blocks new allocates. The next
-    //    diskdb sync tick (10 s) applies the status change and drains
-    //    in-flight allocates.
-    if let Err(e) = hw
-        .set_disk_status(
-            old_rack_id,
-            old_node_id,
-            old_dg_id,
-            &disk_id_proto,
-            crowdb_protocol::common::HwStatus::Maintenance,
-        )
-        .await
-    {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorBody {
-                error: format!("move: set Maintenance failed: {e}"),
-            }),
-        ));
-    }
-
-    // 5. Wait for one sync tick (10 s) for diskdb to apply the
-    //    Maintenance status. This is the quiescence window — no source
-    //    lock, but Maintenance prevents new allocates and the sync
-    //    tick ensures the disk is removed from the allocating-disks
-    //    RCU context.
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-
-    // 6. Copy records from old bind to new bind.
-    let old_bind = match hw.get_bind(old_rack_id, old_node_id, old_dg_id).await {
-        Ok(Some(bind)) => (bind.store_id, bind.group_id),
-        Ok(None) => {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(ErrorBody {
-                    error: format!("no bind for old placement ({old_rack_id}, {old_node_id}, {old_dg_id})"),
-                }),
-            ));
-        }
-        Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorBody {
-                    error: format!("get old bind: {e}"),
-                }),
-            ));
-        }
-    };
-    let new_bind = match hw
-        .get_bind(body.new_rack_id, body.new_node_id, body.new_disk_group_id)
-        .await
-    {
-        Ok(Some(bind)) => (bind.store_id, bind.group_id),
-        Ok(None) => {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(ErrorBody {
-                    error: format!(
-                        "no bind for new placement ({}, {}, {}); create bind before move",
-                        body.new_rack_id, body.new_node_id, body.new_disk_group_id
-                    ),
-                }),
-            ));
-        }
-        Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorBody {
-                    error: format!("get new bind: {e}"),
-                }),
-            ));
-        }
-    };
-
-    // Build a CrowdbClient seeded with both old and new bind leaders.
-    let kv = crowdb_kv_client::CrowdbClient::new(crowdb_kv_client::ClientConfig::new(Vec::new()));
-    if let Some(ep) = crate::mgmt::rpc_endpoint_for_node(&state, old_node_id, old_bind.0).await {
-        kv.seed_leader(old_bind.0, old_bind.1, ep);
-    }
-    if let Some(ep) = crate::mgmt::rpc_endpoint_for_node(&state, body.new_node_id, new_bind.0).await {
-        kv.seed_leader(new_bind.0, new_bind.1, ep);
-    }
-    let copy_count = copy_disk_records(&kv, old_bind, new_bind, &disk_id_proto).await;
-    tracing::info!(disk_id = %disk_id, records_copied = copy_count, "move: records copied");
-
-    // 7. Get the current DiskValue from group 0 (old placement).
-    let disk_value = match hw
-        .get_disk(old_rack_id, old_node_id, old_dg_id, &disk_id_proto)
-        .await
-    {
-        Ok(Some(dv)) => dv,
-        Ok(None) => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("disk {disk_id} not found in group 0 (old placement)"),
-                }),
-            ));
-        }
-        Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorBody {
-                    error: format!("get disk from old placement: {e}"),
-                }),
-            ));
-        }
-    };
-
-    // 8. Add to new placement (Maintenance status) — add-before-remove.
-    //    If this fails, the disk is still in the old placement
-    //    (Maintenance), no data loss.
-    let mut new_value = disk_value;
-    new_value.status = crowdb_protocol::common::HwStatus::Maintenance as i32;
-    if let Err(e) = hw
-        .add_disk(
-            body.new_rack_id,
-            body.new_node_id,
-            body.new_disk_group_id,
-            &disk_id_proto,
-            &new_value,
-        )
-        .await
-    {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorBody {
-                error: format!("move: add to new placement failed (disk still in old): {e}"),
-            }),
-        ));
-    }
-
-    // 9. Remove from old placement. If this fails, the disk exists in
-    //    both placements (both Maintenance, not allocatable). The
-    //    operator should retry the remove.
-    let remove_ok = hw
-        .remove_disk(old_rack_id, old_node_id, old_dg_id, &disk_id_proto)
-        .await
-        .is_ok();
-    if !remove_ok {
-        // Partial success — disk in both placements. Don't update
-        // console config (it stays pointing to old). Return a
-        // partial-success response.
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorBody {
-                error: format!(
-                    "move: added to new placement but remove from old failed; disk is in both placements (both Maintenance). Retry the remove for ({old_rack_id}, {old_node_id}, {old_dg_id})"
-                ),
-            }),
-        ));
-    }
-
-    // 10. Update ConsoleConfig: move the DiskEntry to the new
-    //     disk-group. Only done if both group-0 operations succeeded.
-    let updated_entry = {
-        let mut cfg = state.config.write().unwrap();
-        cfg.remove_disk(&disk_id).map_err(map_config_err)?;
-        let new_entry = DiskEntry {
-            disk_id: disk_entry.disk_id,
-            disk_group_id: body.new_disk_group_id,
-            rack_id: body.new_rack_id,
-            node_id: body.new_node_id,
-            disk_type: disk_entry.disk_type,
-            capacity_bytes: disk_entry.capacity_bytes,
-            zone_size_bytes: disk_entry.zone_size_bytes,
-            unit_size_bytes: disk_entry.unit_size_bytes,
-            device_path: disk_entry.device_path,
-        };
-        cfg.add_disk(new_entry.clone()).map_err(map_config_err)?;
-        new_entry
-    };
-    state.persist().map_err(map_persist_err)?;
-
-    // 11. Set disk to Up in new placement — diskdb at the new
-    //     placement sees the disk on the next sync tick, runs
-    //     background_zone_load (Init → Up), and the disk becomes
-    //     allocatable. We set Up here so the operator doesn't need to
-    //     do it manually.
-    if let Err(e) = hw
-        .set_disk_status(
-            body.new_rack_id,
-            body.new_node_id,
-            body.new_disk_group_id,
-            &disk_id_proto,
-            crowdb_protocol::common::HwStatus::Up,
-        )
-        .await
-    {
-        tracing::warn!(disk_id = %disk_id, error = %e, "move: set Up at new placement failed (operator can set manually)");
-    }
-
-    Ok(Json(updated_entry))
-}
-
-/// Copy all records for a disk from one bind to another. Scans zone,
-/// busy, and free block records by `DiskId` prefix, batch-writes them
-/// to the new bind.
-async fn copy_disk_records(
-    kv: &crowdb_kv_client::CrowdbClient,
-    old_bind: (u64, u64),
-    new_bind: (u64, u64),
-    disk_id: &crowdb_protocol::common::DiskId,
-) -> u64 {
-    use crowdb_protocol::key::{BusyBlockKey, FreeBlockKey, ZoneKey};
-
-    let prefixes = [
-        ZoneKey::prefix_for_disk(disk_id),
-        BusyBlockKey::prefix_for_disk(disk_id),
-        FreeBlockKey::prefix_for_disk(disk_id),
-    ];
-
-    let mut total_copied: u64 = 0;
-    let batch_size = 100u32;
-
-    for prefix in &prefixes {
-        let mut start_after: Vec<u8> = Vec::new();
-        loop {
-            let outcome = match kv
-                .scan(
-                    old_bind.0,
-                    old_bind.1,
-                    prefix,
-                    &start_after,
-                    &[], // empty end_key = no upper bound
-                    batch_size,
-                    crowdb_kv_client::ReadMode::Linearizable,
-                    None,
-                    false,
-                    None,
-                )
-                .await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    tracing::warn!(error = %e, "copy_disk_records: scan failed");
-                    break;
-                }
-            };
-
-            if outcome.items.is_empty() {
-                break;
-            }
-
-            // Batch-write to new bind.
-            let ops: Vec<crowdb_kv_client::BatchOp> = outcome
-                .items
-                .iter()
-                .map(|(k, v)| crowdb_kv_client::BatchOp::Put {
-                    key: k.clone(),
-                    value: v.clone(),
-                })
-                .collect();
-
-            if let Err(e) = kv.batch_write(new_bind.0, new_bind.1, &ops).await {
-                tracing::warn!(error = %e, "copy_disk_records: batch_write failed");
-                break;
-            }
-
-            total_copied += u64::try_from(outcome.items.len()).unwrap_or(0);
-
-            if !outcome.truncated {
-                break;
-            }
-            // Set start_after to the last key for pagination.
-            if let Some((last_key, _)) = outcome.items.last() {
-                start_after = last_key.to_vec();
-            } else {
-                break;
-            }
-        }
-    }
-
-    total_copied
 }
 
 #[cfg(test)]

@@ -33,7 +33,10 @@ pub(super) fn flush_counters<W: Write>(
         .iter()
         .filter_map(|e| {
             let snap = e.handle.flush();
-            (snap.count > 0).then_some((*e, snap))
+            // Show counters with window activity or a non-zero
+            // cumulative total; hide truly idle counters (count=0
+            // total=0) to keep the log concise.
+            (snap.count > 0 || snap.total > 0).then_some((*e, snap))
         })
         .collect();
     if active.is_empty() {
@@ -204,8 +207,8 @@ pub(super) fn flush_bandwidths<W: Write>(
         "count",
         "tps(/s)",
         "avg_size(KB)",
-        "rate(KB/s)",
-        "total(KB)",
+        "rate(MB/s)",
+        "total(MB)",
         width = width,
         count_w = count_w,
         tps_w = tps_w
@@ -213,16 +216,20 @@ pub(super) fn flush_bandwidths<W: Write>(
     for (e, snap) in &active {
         #[allow(clippy::cast_precision_loss)]
         let avg_kb = snap.avg_size as f64 / 1024.0;
+        #[allow(clippy::cast_precision_loss)]
+        let rate_mb = snap.rate as f64 / (1024.0 * 1024.0);
+        #[allow(clippy::cast_precision_loss)]
+        let total_mb = snap.total_bytes as f64 / (1024.0 * 1024.0);
         let name_w = e.name.len().max(width);
         let _ = writeln!(
             writer,
-            "{:<name_w$}  {:>count_w$}  {:>tps_w$}  {:>12.1}  {:>10}  {:>9}",
+            "{:<name_w$}  {:>count_w$}  {:>tps_w$}  {:>12.2}  {:>10.2}  {:>9.2}",
             e.name,
             snap.count,
             tps(snap.count, window_secs),
             avg_kb,
-            snap.rate / 1024,
-            snap.total_bytes / 1024,
+            rate_mb,
+            total_mb,
             name_w = name_w,
             count_w = count_w,
             tps_w = tps_w

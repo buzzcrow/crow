@@ -27,7 +27,7 @@ use crowdb_kv::cluster::status::{GroupStatus, RemoteStatus, ReplicaStatus, Store
 use crowdb_protocol::mgmt::{
     AddGroupRequest, AddStoreRequest, GroupSummary, HealthResponse, MetricField, MetricPoint,
     MetricsResponse, RemoteListResponse, RemoteReplicaInfo, StepDownRequest, StepDownResult, StoreDetail,
-    StoreListResponse, StoreSummary, SystemInitRequest, SystemInitResponse, TopologyResponse,
+    StoreListResponse, StoreSummary, SystemInitRequest, SystemInitResponse, TopologyResponse, WipeResult,
 };
 
 use crate::operation_registry::OperationTarget;
@@ -152,6 +152,10 @@ pub fn router(state: RegistryArc) -> Router {
             post(group_ops::join_group_via_snapshot),
         )
         .route("/stores/:sid/groups/:gid/flush", post(group_ops::flush_group))
+        .route(
+            "/stores/:sid/groups/:gid/wipe-user-data",
+            post(group_ops::wipe_user_data),
+        )
         .route("/stores/:sid/groups/:gid/ready", get(group_ops::group_readiness))
         .route("/operations/:id", get(group_ops::get_operation))
         .route("/topology", get(topology::export_topology))
@@ -176,6 +180,7 @@ pub fn router(state: RegistryArc) -> Router {
         group_ops::remove_group,
         group_ops::join_group_via_snapshot,
         group_ops::flush_group,
+        group_ops::wipe_user_data,
         group_ops::step_down,
         group_ops::group_readiness,
         group_ops::get_operation,
@@ -209,6 +214,7 @@ pub fn router(state: RegistryArc) -> Router {
             StepDownRequest,
             StepDownResult,
             group_ops::FlushResult,
+            WipeResult,
             group_ops::ReadinessResponse,
             group_ops::OperationResponse,
             OperationTarget,

@@ -4,10 +4,10 @@
 # any non-`[server]` section is also valid (serde fills from `Default`).
 
 [server]
-listen_addr = "0.0.0.0:9941"
-http_listen_addr = "0.0.0.0:9942"
-rpc_listen_addr = "0.0.0.0:9931"
-kv_server_mgmt_seeds = ["http://127.0.0.1:9910"]
+listen_addr = "0.0.0.0:11000"
+http_listen_addr = "0.0.0.0:11100"
+rpc_listen_addr = "0.0.0.0:11200"
+kv_server_mgmt_seeds = ["http://127.0.0.1:10000"]
 
 [storage]
 zone_size_bytes = 17179869184

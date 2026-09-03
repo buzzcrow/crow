@@ -138,7 +138,7 @@ impl Default for WindowLatency {
     }
 }
 
-/// Metrics embedded in [`crate::CrowdbClient`]. Hot-path error counters
+/// Metrics embedded in [`crate::CrowdbKvClient`]. Hot-path error counters
 /// are lock-free atomics; per-op latency histograms are `Mutex<Histogram>`;
 /// leader-change tracking uses a `Mutex` (rare event, not hot path).
 #[derive(Debug, Default)]
@@ -321,7 +321,7 @@ impl ClientMetrics {
     }
 
     /// Flush per-op-kind window latency histograms to `writer` in the
-    /// same column-aligned format as the server `[metrics]` log.
+    /// same column-aligned format as the server `rust` log.
     /// Takes a pre-drained `WindowLatencySnapshot` so the caller can
     /// also use it for cumulative accumulation.
     #[allow(
@@ -337,7 +337,7 @@ impl ClientMetrics {
         window_secs: f64,
     ) {
         let width = 24usize;
-        let count_w = 5usize;
+        let count_w = 7usize;
         let tps_w = 7usize;
 
         let entries: [(&str, &PreciseHistogram); 5] = [

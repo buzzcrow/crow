@@ -7,6 +7,7 @@
 #include "crowdb-rpc/c_api.h"
 #include "crowdb-rpc/c_api_internal.h"
 #include "crowdb-rpc/client/client.h"
+#include "crowdb-rpc/client/rpc_client_metrics.h"
 #include "crowdb-rpc/connection.h"
 #include "crowdb-rpc/rpc_metrics.h"
 #include "crowdb-rpc/transport.h"
@@ -232,6 +233,7 @@ static CoTask co_run(CoState *s)
             if (data != nullptr)
                 crowdb_rpc_buffer_release(data);
             s->total_errors++;
+            rpc_submit_retry().inc();
             // Yield this thread — suspend until resumed. We use a
             // self-resume: set handle, then suspend. A helper thread
             // (or the spin-wait loop) will resume us shortly.

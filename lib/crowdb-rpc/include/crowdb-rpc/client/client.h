@@ -146,6 +146,14 @@ class RpcClient
     // via crowdb_rpc_server_submit_response.
     void register_handler(uint16_t msg_type, crowdb_rpc_handler_fn callback, void *user_data);
 
+    // Clear all registered request handlers. Called during shutdown
+    // to break reference cycles (Rust handler closures capture Arcs).
+    void clear_handlers()
+    {
+        std::lock_guard<std::mutex> lock(handler_mu_);
+        request_handlers_.clear();
+    }
+
     // Set the transport for submitting UnknownMessage responses when
     // no handler matches an incoming request msg_type. If not set,
     // unmatched request frames are dropped.
@@ -162,6 +170,11 @@ class RpcClient
 
     // Number of pending requests (for diagnostics).
     size_t pending_count();
+
+    // Dump all pending request IDs + deadlines to the log. For diagnostics:
+    // call when the bench stops to see which requests are still in-flight
+    // and how long they've been waiting.
+    void dump_pending();
 
     // Size the callback completion pool. Must be a power of two; the
     // caller passes the max in-flight (the next power of two is used).

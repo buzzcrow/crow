@@ -16,6 +16,15 @@ use std::time::Instant as StdInstant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
+/// Current monotonic instant for lease bookkeeping. Uses
+/// `tokio::time::Instant::now()` so that `#[tokio::test(start_paused)]
+///` tests respect the paused clock — `std::time::Instant::now()` would
+/// keep ticking in real time and expire the lease under CI load. In
+/// production (non-paused runtime) both are identical.
+fn lease_now() -> StdInstant {
+    tokio::time::Instant::now().into_std()
+}
+
 use crate::cluster::group::{PendingReadBarrier, PxGroup};
 use crate::cluster::group_election::{
     HeartbeatOutcome, LeaderElection, PendingLeaderHandoff, ReadBarrierOutcome, StepDownReason,
@@ -85,7 +94,7 @@ impl PxGroup {
         let group_id = self.group_id;
         let voting_peers = self.voting_remote_ids();
         let quorum = self.quorum();
-        let t_send = StdInstant::now();
+        let t_send = lease_now();
         // `t_send_ms_mono` is monotonic millis since the process-start
         // anchor shared with `common::time::process_anchor`.
         let t_send_ms_mono = crate::common::time::instant_to_anchor_ms(t_send);
@@ -153,8 +162,19 @@ impl PxGroup {
                         self.note_peer_durable(peer_id, hb.durable_snapshot_slot);
                         if acks >= quorum {
                             replica.renew_lease(t_send, cfg);
-                            // Keep draining remaining replies; no further
-                            // state changes happen unless a higher term shows.
+                            // Quorum reached — renew lease and return
+                            // immediately. Don't abort the remaining
+                            // in-flight heartbeats: a restarted peer
+                            // needs at least one heartbeat to learn the
+                            // leader (set believed_leader_id). Aborting
+                            // would cancel the RPC before it reaches the
+                            // peer, leaving it in Unknown state
+                            // indefinitely. Spawn a background drain so
+                            // the remaining tasks complete and deliver
+                            // the heartbeat; their results are ignored
+                            // (a higher-term self-heals next round).
+                            tokio::spawn(async move { while joinset.join_next().await.is_some() {} });
+                            return HeartbeatOutcome::Continued { quorum_acked: true };
                         }
                     }
                 }
@@ -195,14 +215,10 @@ impl PxGroup {
             return ReadBarrierOutcome::NoQuorum;
         }
 
-        let lease_valid = replica.lease_read_valid(StdInstant::now());
-        if let Some(h) = self.read_handles() {
-            h.lease_valid.set(u64::from(lease_valid));
-        }
+        let lease_valid = replica.lease_read_valid(lease_now());
         if lease_valid {
             if let Some(h) = self.read_handles() {
                 h.barrier.observe(barrier_start.elapsed().as_nanos() as u64);
-                h.lease_path.inc();
             }
             return ReadBarrierOutcome::Ready { read_slot };
         }
@@ -240,9 +256,6 @@ impl PxGroup {
             let outcome = rx.await.unwrap_or(ReadBarrierOutcome::NoQuorum);
             if let Some(h) = self.read_handles() {
                 h.barrier.observe(barrier_start.elapsed().as_nanos() as u64);
-                if matches!(outcome, ReadBarrierOutcome::Ready { .. }) {
-                    h.readindex_path.inc();
-                }
             }
             return outcome;
         }
@@ -282,10 +295,6 @@ impl PxGroup {
 
         if let Some(h) = self.read_handles() {
             h.barrier.observe(barrier_start.elapsed().as_nanos() as u64);
-            h.readindex_rounds.inc();
-            if matches!(outcome, ReadBarrierOutcome::Ready { .. }) {
-                h.readindex_path.inc();
-            }
         }
         outcome
     }
@@ -317,7 +326,7 @@ impl PxGroup {
 
         // Reset lease state at the start of the tenure. The first heartbeat
         // round that gets quorum extends the lease and unlocks read fast-path.
-        replica.reset_lease_to(StdInstant::now());
+        replica.reset_lease_to(lease_now());
 
         // Drop any safe-slot / per-peer watermarks inherited from a prior
         // tenure. `group_safe_slot` only advances within a tenure, so a new
@@ -399,7 +408,7 @@ impl PxGroup {
             }
             // Lease-unrenewable check on every Leader tick.
             let last_quorum = replica.last_quorum_heartbeat_at();
-            if StdInstant::now().duration_since(last_quorum) >= Duration::from_millis(cfg.lease_duration_ms) {
+            if lease_now().duration_since(last_quorum) >= Duration::from_millis(cfg.lease_duration_ms) {
                 self.step_down(&tenure_cancel, leader_term, StepDownReason::LeaseUnrenewable);
                 return;
             }

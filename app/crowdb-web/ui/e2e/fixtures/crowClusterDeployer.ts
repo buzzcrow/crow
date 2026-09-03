@@ -4,40 +4,43 @@
 import { expect, request } from '@playwright/test';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const DEFAULT_SERVER_BINARY =
   process.env.CROWDB_KV_SERVER_BINARY ?? resolve(__dirname, '../../../../../target/debug/crowdb-kv-server');
 
-// Monotonic port counter for E2E tests. Tests run sequentially (workers: 1),
-// so a counter is safe — each test cleans up its own servers before the
-// next test starts. Stays below the Linux ephemeral port range
-// (32768–60999) so the kernel never hands these ports to outgoing
-// connections, which would cause "Address already in use" bind errors.
-const PORT_BASE = 30000;
-const PORT_CEILING = 32768;
-let nextPort = PORT_BASE;
-export function freePort(): number {
-  if (nextPort >= PORT_CEILING) {
-    throw new Error(`freePort: exhausted ${PORT_CEILING - PORT_BASE} ports; raise PORT_CEILING above the ephemeral range`);
-  }
-  return nextPort++;
+// Path to the crowdb-port-alloc CLI binary. Used for flock-coordinated
+// port allocation with bind probes — no port 0, no TOCTOU.
+const PORT_ALLOC_BIN =
+  process.env.CROWDB_PORT_ALLOC_BIN ?? resolve(__dirname, '../../../../../target/debug/crowdb-port-alloc');
+
+// Per-process claim file root for E2E port allocation. Uses a temp
+// directory keyed by PID so parallel test runs don't collide.
+const PORT_ALLOC_ROOT = resolve(`/tmp/crowdb-port-alloc-e2e-${process.pid}`);
+
+// Allocate a single port for the given service via the crowdb-port-alloc
+// CLI. Services: kv-mgmt, kv-listen, diskdb-listen, diskdb-http,
+// diskdb-rpc, chunkdb-http, chunkdb-rpc, diskio-rpc, web.
+export function freePort(service = 'kv-mgmt'): number {
+  const out = execSync(
+    `${PORT_ALLOC_BIN} --root "${PORT_ALLOC_ROOT}" --service ${service}`,
+    { encoding: 'utf-8' },
+  ).trim();
+  return parseInt(out, 10);
 }
 
-// Allocate `count` consecutive ports. Needed for diskdb, which derives
-// http_port = rpc_port + 1 and rpc_listen_port = rpc_port + 2 from the
-// single rpc_port passed to deployDiskdb. Without this, the monotonic
-// counter only advances by 1, and the next freePort() call returns a
-// port the diskdb is already bound to (port conflict).
-export function freePortRange(count: number): number {
+// Allocate `count` consecutive ports for the given service. Returns the
+// base port (first in the range).
+export function freePortRange(count: number, service = 'kv-mgmt'): number {
   if (count < 1) throw new Error('freePortRange: count must be >= 1');
-  if (nextPort + count > PORT_CEILING) {
-    throw new Error(`freePortRange: exhausted ${PORT_CEILING - PORT_BASE} ports; raise PORT_CEILING above the ephemeral range`);
-  }
-  const base = nextPort;
-  nextPort += count;
-  return base;
+  const out = execSync(
+    `${PORT_ALLOC_BIN} --root "${PORT_ALLOC_ROOT}" --service ${service} --count ${count}`,
+    { encoding: 'utf-8' },
+  ).trim();
+  const ports = out.split('\n').map((p) => parseInt(p.trim(), 10));
+  return ports[0];
 }
 
 // ── Timing instrumentation ──────────────────────────────────────────
@@ -211,6 +214,11 @@ export async function deployNodeServer(baseURL: string, nodeId: number, restPort
         rpc_port: rpcPort,
         binary: DEFAULT_SERVER_BINARY,
         election_profile: 'e2e',
+        // Skip fsync on every write + shutdown. Data is still in the OS
+        // page cache (visible to a restart on the same host), just not
+        // forced to durable storage. Avoids slow macOS fsync and reduces
+        // SSD wear during long E2E sessions.
+        no_fsync: true,
       },
     });
     expect(response.status(), await response.text()).toBe(201);
@@ -270,7 +278,7 @@ export async function waitForLeader(baseURL: string, storeId: number, groupId: n
           (typeof v.leader_id === 'number' && v.leader_id > 0);
         if (hasLeader) return;
       }
-      await new Promise((res) => setTimeout(res, 100));
+      await new Promise((res) => setTimeout(res, 50));
     }
     throw new Error(`leader not elected for store ${storeId} group ${groupId} within ${timeoutMs}ms`);
   } finally {
@@ -300,6 +308,27 @@ export async function createStore(baseURL: string, storeId: number, nodeIds: num
       data: { store_id: storeId, nodes: nodeIds },
     });
     expect(response.status(), await response.text()).toBe(201);
+    await expect.poll(async () => {
+      const verify = await api.get(`/api/nodes/${nodeIds[0]}/stores`);
+      if (!verify.ok()) return false;
+      const stores = await verify.json();
+      return Array.isArray(stores) && stores.some((store: any) => Number(store.store_id) === storeId);
+    }, { timeout: 15_000, intervals: [200] }).toBe(true);
+  } finally {
+    await api.dispose();
+  }
+}
+
+// Like createStore but skips clusterInit — use after group-0 has been
+// bootstrapped once via clusterInit. add_store works on any deployed
+// node; it does not require the node to be in group-0's membership.
+export async function createStoreNoInit(baseURL: string, storeId: number, nodeIds: number[]) {
+  const api = await apiContext(baseURL);
+  try {
+    const response = await api.post('/api/stores', {
+      data: { store_id: storeId, nodes: nodeIds },
+    });
+    expect(response.status(), await response.text()).toBe(201);
   } finally {
     await api.dispose();
   }
@@ -315,16 +344,35 @@ export async function resetAll(baseURL: string) {
   }
 }
 
+export async function clusterClean(baseURL: string) {
+  const api = await apiContext(baseURL);
+  try {
+    const response = await api.post('/api/cluster/clean');
+    expect(response.status(), await response.text()).toBe(200);
+  } finally {
+    await api.dispose();
+  }
+}
+
 // ── DiskDB helpers ───────────────────────────────────────────────────
 
 export const DEFAULT_DISKDB_BINARY =
   process.env.CROWDB_DISKDB_BIN ?? resolve(__dirname, '../../../../../target/debug/crowdb-diskdb');
 
-export async function deployDiskdb(baseURL: string, nodeId: number, rpcPort: number) {
+export async function deployDiskdb(
+  baseURL: string,
+  nodeId: number,
+  rpcPort: number,
+  listenPort?: number,
+  httpPort?: number,
+) {
   const api = await apiContext(baseURL);
   try {
+    const body: Record<string, number> = { rpc_port: rpcPort };
+    if (listenPort !== undefined) body.listen_port = listenPort;
+    if (httpPort !== undefined) body.http_port = httpPort;
     const response = await api.post(`/api/nodes/${encodeURIComponent(nodeId)}/diskdb/deploy`, {
-      data: { rpc_port: rpcPort },
+      data: body,
     });
     expect(response.status(), await response.text()).toBe(201);
   } finally {
@@ -609,21 +657,25 @@ export class CrowdbClusterDeployer {
   private async provisionRacksAndNodes(topo: TopologyDescriptor): Promise<{ racks: number[]; nodes: number[] }> {
     const racks: number[] = [];
     const nodes: number[] = [];
-    for (let i = 0; i < topo.nodeCount; i++) {
-      const rackId = topo.rackBase + i;
-      const nodeId = topo.nodeBase + i;
-      await createRack(this.baseURL, { id: rackId, name: `rack-${rackId}` });
-      await createNode(this.baseURL, { id: nodeId, rack_id: rackId });
-      racks.push(rackId);
-      nodes.push(nodeId);
-    }
+    // Create all rack+node pairs in parallel — each pair is independent.
+    await Promise.all(
+      Array.from({ length: topo.nodeCount }, (_, i) => {
+        const rackId = topo.rackBase + i;
+        const nodeId = topo.nodeBase + i;
+        racks.push(rackId);
+        nodes.push(nodeId);
+        return createRack(this.baseURL, { id: rackId, name: `rack-${rackId}` }).then(() =>
+          createNode(this.baseURL, { id: nodeId, rack_id: rackId }),
+        );
+      }),
+    );
     return { racks, nodes };
   }
 
   private async deployKvServers(nodes: number[], topo: TopologyDescriptor): Promise<NodeInfo[]> {
     const deployPromises = nodes.map((nodeId) => {
-      const restPort = freePort();
-      const rpcPort = freePort();
+      const restPort = freePort('kv-mgmt');
+      const rpcPort = freePort('kv-listen');
       return deployNodeServer(this.baseURL, nodeId, restPort, rpcPort).then(async () => {
         const api = await apiContext(this.baseURL);
         try {
@@ -649,100 +701,156 @@ export class CrowdbClusterDeployer {
   }
 
   private async createStoresAndGroups(nodes: number[], topo: TopologyDescriptor): Promise<StoreInfo[]> {
-    const stores: StoreInfo[] = [];
+    const storeNodes = nodes.slice(0, Math.min(topo.replicasPerGroup, nodes.length));
+
+    // Build the full list of (storeId, groupId) pairs, then create
+    // stores and groups concurrently. Stores are independent; groups
+    // within a store are independent Paxos groups.
+    const storeSpecs: { storeId: number; groups: { groupId: number; groupNodes: number[] }[] }[] = [];
     for (let s = 0; s < topo.storeCount; s++) {
       const storeId = topo.storeBase + s;
-      const storeNodes = nodes.slice(0, Math.min(topo.replicasPerGroup, nodes.length));
-      await createStore(this.baseURL, storeId, storeNodes);
-
-      const groups: GroupInfo[] = [];
+      const groups: { groupId: number; groupNodes: number[] }[] = [];
       for (let g = 0; g < topo.groupsPerStore; g++) {
         const groupId = topo.groupBase + s * topo.groupsPerStore + g;
         const groupNodes = nodes.slice(0, topo.replicasPerGroup);
-        await addGroup(this.baseURL, storeId, groupId, 1, groupNodes);
-        groups.push({ groupId, leaderNodeId: null, leaderEndpoint: null });
+        groups.push({ groupId, groupNodes });
       }
-      stores.push({ storeId, nodes: storeNodes, groups });
+      storeSpecs.push({ storeId, groups });
     }
-    return stores;
+
+    // Create all stores in parallel first (addGroup requires the store
+    // to exist on each node).
+    await Promise.all(storeSpecs.map((spec) => createStore(this.baseURL, spec.storeId, storeNodes)));
+
+    // Create all groups in parallel — each is an independent Paxos group.
+    const groupPromises: Promise<{ storeId: number; groupId: number }>[] = [];
+    for (const spec of storeSpecs) {
+      for (const g of spec.groups) {
+        groupPromises.push(
+          addGroup(this.baseURL, spec.storeId, g.groupId, 1, g.groupNodes).then(() => ({
+            storeId: spec.storeId,
+            groupId: g.groupId,
+          })),
+        );
+      }
+    }
+    await Promise.all(groupPromises);
+
+    // Assemble StoreInfo from the specs.
+    return storeSpecs.map((spec) => ({
+      storeId: spec.storeId,
+      nodes: storeNodes,
+      groups: spec.groups.map((g) => ({ groupId: g.groupId, leaderNodeId: null, leaderEndpoint: null })),
+    }));
   }
 
   private async deployDiskdbInstances(nodes: number[], topo: TopologyDescriptor): Promise<DiskdbInfo[]> {
-    const instances: DiskdbInfo[] = [];
-    if (!topo.deployDiskdb) return instances;
-    for (const nodeId of nodes) {
-      const rpcPort = freePortRange(3);
-      await deployDiskdb(this.baseURL, nodeId, rpcPort);
-      instances.push({ nodeId, pid: 0, rpcPort });
-    }
+    if (!topo.deployDiskdb) return [];
+    // Deploy all diskdb instances in parallel — each is independent.
+    // Allocate independent ports for listen, http, and rpc.
+    const instances = await Promise.all(
+      nodes.map((nodeId) => {
+        const listenPort = freePort('diskdb-listen');
+        const httpPort = freePort('diskdb-http');
+        const rpcPort = freePort('diskdb-rpc');
+        return deployDiskdb(this.baseURL, nodeId, rpcPort, listenPort, httpPort).then(() => ({
+          nodeId,
+          pid: 0,
+          rpcPort,
+        }));
+      }),
+    );
     this.diskdbNodeIds = [...nodes];
     return instances;
   }
 
   private async createDiskGroupsAndDisks(nodes: number[], topo: TopologyDescriptor): Promise<void> {
     if (!topo.diskGroupsPerNode || topo.diskGroupsPerNode === 0) return;
-    for (const nodeId of nodes) {
-      for (let dg = 0; dg < topo.diskGroupsPerNode; dg++) {
-        const dgId = 1 + dg;
-        await addDiskGroup(this.baseURL, nodeId, dgId, `dg-${dgId}`);
-        if (topo.disksPerGroup && topo.disksPerGroup > 0) {
-          const disks = [];
-          for (let d = 0; d < topo.disksPerGroup; d++) {
-            disks.push({ disk_id: randomDiskId() });
+    // Create disk-groups + disks on all nodes in parallel — each node's
+    // disk-groups are independent.
+    await Promise.all(
+      nodes.map((nodeId) =>
+        (async () => {
+          for (let dg = 0; dg < topo.diskGroupsPerNode!; dg++) {
+            const dgId = 1 + dg;
+            await addDiskGroup(this.baseURL, nodeId, dgId, `dg-${dgId}`);
+            if (topo.disksPerGroup && topo.disksPerGroup! > 0) {
+              const disks = [];
+              for (let d = 0; d < topo.disksPerGroup!; d++) {
+                disks.push({ disk_id: randomDiskId() });
+              }
+              await addDisksBatch(this.baseURL, nodeId, dgId, disks);
+            }
           }
-          await addDisksBatch(this.baseURL, nodeId, dgId, disks);
-        }
-      }
-    }
+        })(),
+      ),
+    );
   }
 
   private async waitHealthy(stores: StoreInfo[], timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
+    // Poll all groups in parallel — leader elections are independent.
+    const groupSpecs: { storeId: number; groupId: number }[] = [];
     for (const store of stores) {
       for (const group of store.groups) {
-        while (true) {
-          const api = await apiContext(this.baseURL);
-          try {
-            const r = await api.get(`/api/stores/${store.storeId}/groups/${group.groupId}`);
-            if (r.ok()) {
-              const v = await r.json();
-              if (Array.isArray(v.replicas) && v.replicas.some((x: any) => String(x.role).toLowerCase() === 'leader')) {
-                break;
-              }
-            }
-          } finally {
-            await api.dispose();
-          }
-          if (Date.now() >= deadline) {
-            throw new Error(`no leader for store ${store.storeId} group ${group.groupId} within ${timeoutMs}ms`);
-          }
-          await new Promise((res) => setTimeout(res, 100));
-        }
+        groupSpecs.push({ storeId: store.storeId, groupId: group.groupId });
       }
     }
+    await Promise.all(
+      groupSpecs.map(({ storeId, groupId }) =>
+        (async () => {
+          while (true) {
+            const api = await apiContext(this.baseURL);
+            try {
+              const r = await api.get(`/api/stores/${storeId}/groups/${groupId}`);
+              if (r.ok()) {
+                const v = await r.json();
+                if (Array.isArray(v.replicas) && v.replicas.some((x: any) => String(x.role).toLowerCase() === 'leader')) {
+                  break;
+                }
+              }
+            } finally {
+              await api.dispose();
+            }
+            if (Date.now() >= deadline) {
+              throw new Error(`no leader for store ${storeId} group ${groupId} within ${timeoutMs}ms`);
+            }
+            await new Promise((res) => setTimeout(res, 100));
+          }
+        })(),
+      ),
+    );
   }
 
   private async collectLeaderInfo(stores: StoreInfo[]): Promise<StoreInfo[]> {
+    // Fetch leader info for all groups in parallel — each is an
+    // independent API call.
+    const promises: Promise<void>[] = [];
     for (const store of stores) {
       for (const group of store.groups) {
-        const api = await apiContext(this.baseURL);
-        try {
-          const r = await api.get(`/api/stores/${store.storeId}/groups/${group.groupId}`);
-          if (r.ok()) {
-            const v = await r.json();
-            const leader = v.replicas?.find((x: any) => String(x.role).toLowerCase() === 'leader');
-            group.leaderNodeId = leader?.node_id ?? null;
-          }
-          const epResp = await api.get(`/api/stores/${store.storeId}/groups/${group.groupId}/endpoint`);
-          if (epResp.ok()) {
-            const ep = await epResp.json();
-            if (ep.rpc_url) group.leaderEndpoint = ep.rpc_url;
-          }
-        } finally {
-          await api.dispose();
-        }
+        promises.push(
+          (async () => {
+            const api = await apiContext(this.baseURL);
+            try {
+              const r = await api.get(`/api/stores/${store.storeId}/groups/${group.groupId}`);
+              if (r.ok()) {
+                const v = await r.json();
+                const leader = v.replicas?.find((x: any) => String(x.role).toLowerCase() === 'leader');
+                group.leaderNodeId = leader?.node_id ?? null;
+              }
+              const epResp = await api.get(`/api/stores/${store.storeId}/groups/${group.groupId}/endpoint`);
+              if (epResp.ok()) {
+                const ep = await epResp.json();
+                if (ep.rpc_url) group.leaderEndpoint = ep.rpc_url;
+              }
+            } finally {
+              await api.dispose();
+            }
+          })(),
+        );
       }
     }
+    await Promise.all(promises);
     return stores;
   }
 }
@@ -766,34 +874,49 @@ export async function setupCluster(baseURL: string, topo: TopologyDescriptor): P
   const racks: number[] = [];
   const nodes: number[] = [];
 
-  for (let i = 0; i < topo.nodeCount; i++) {
-    const rackId = topo.rackBase + i;
-    const nodeId = topo.nodeBase + i;
-    await createRack(baseURL, { id: rackId, name: `rack-${rackId}` });
-    await createNode(baseURL, { id: nodeId, rack_id: rackId });
-    racks.push(rackId);
-    nodes.push(nodeId);
-  }
+  // Create all rack+node pairs in parallel — each pair is independent.
+  await Promise.all(
+    Array.from({ length: topo.nodeCount }, (_, i) => {
+      const rackId = topo.rackBase + i;
+      const nodeId = topo.nodeBase + i;
+      racks.push(rackId);
+      nodes.push(nodeId);
+      return createRack(baseURL, { id: rackId, name: `rack-${rackId}` }).then(() =>
+        createNode(baseURL, { id: nodeId, rack_id: rackId }),
+      );
+    }),
+  );
 
-  await Promise.all(nodes.map((nodeId) => deployNodeServer(baseURL, nodeId, freePort(), freePort())));
+  await Promise.all(nodes.map((nodeId) => deployNodeServer(baseURL, nodeId, freePort('kv-mgmt'), freePort('kv-listen'))));
 
   const stores: number[] = [];
   const groups: { storeId: number; groupId: number }[] = [];
 
+  // Create all stores in parallel — stores are independent.
+  const storeNodes = nodes.slice(0, Math.min(topo.replicasPerGroup, nodes.length));
+  for (let s = 0; s < topo.storeCount; s++) {
+    stores.push(topo.storeBase + s);
+  }
+  await Promise.all(stores.map((storeId) => createStore(baseURL, storeId, storeNodes)));
+
+  // Create all groups in parallel — each addGroup creates an independent
+  // Paxos group. The backend handles per-node fan-out concurrently.
+  const groupPromises: Promise<void>[] = [];
   for (let s = 0; s < topo.storeCount; s++) {
     const storeId = topo.storeBase + s;
-    const storeNodes = nodes.slice(0, Math.min(topo.replicasPerGroup, nodes.length));
-    await createStore(baseURL, storeId, storeNodes);
-    stores.push(storeId);
-
     for (let g = 0; g < topo.groupsPerStore; g++) {
       const groupId = topo.groupBase + s * topo.groupsPerStore + g;
       const groupNodes = nodes.slice(0, topo.replicasPerGroup);
-      await addGroup(baseURL, storeId, groupId, 1, groupNodes);
-      await waitForLeader(baseURL, storeId, groupId);
       groups.push({ storeId, groupId });
+      groupPromises.push(
+        addGroup(baseURL, storeId, groupId, 1, groupNodes).then(() =>
+          waitForLeader(baseURL, storeId, groupId),
+        ),
+      );
     }
   }
+
+  await Promise.all(groupPromises);
 
   return { racks, nodes, stores, groups, apiBase: baseURL };
 }

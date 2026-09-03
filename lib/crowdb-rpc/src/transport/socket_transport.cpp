@@ -193,7 +193,7 @@ void Worker::run_loop()
                             // level-triggered re-firing on the dead fd.
                             // Map erase is deferred to after the pending-write
                             // flush to avoid dangling raw pointers.
-                            CRB_LOG_INFO("worker: conn closed on read fd={} conn_id={} name={}", ev.fd,
+                            CRB_LOG_INFO("rpc transport: connection closed (read) fd={} conn_id={} peer={}", ev.fd,
                                          static_cast<long long>(ev.conn->id()), ev.conn->name());
                             int wfd = ev.conn->write_fd;
                             engine_->remove_connection(ev.fd, wfd);
@@ -216,11 +216,11 @@ void Worker::run_loop()
                     if (ev.conn != nullptr && ev.conn->is_open()) {
                         // ev.fd is the write fd (dup'd). try_send uses it.
                         uint64_t wh_start = now_nanos();
-                        bool     has_more = on_writable_impl(ev.conn, ev.fd, stats_);
+                        bool     all_sent = on_writable_impl(ev.conn, ev.fd, stats_);
                         hist_write_handle().observe(now_nanos() - wh_start);
                         if (!ev.conn->is_open()) {
                             // Connection closed during write (hard error).
-                            CRB_LOG_INFO("worker: conn closed on write fd={} conn_id={} name={}", ev.fd,
+                            CRB_LOG_INFO("rpc transport: connection closed (write) fd={} conn_id={} peer={}", ev.fd,
                                          static_cast<long long>(ev.conn->id()), ev.conn->name());
                             int rfd = static_cast<int>(ev.conn->transport_handle);
                             engine_->remove_connection(rfd, ev.fd);
@@ -231,16 +231,19 @@ void Worker::run_loop()
                             ev.conn->write_fd = -1;
                             closed_fds.push_back(rfd);
                         }
-                        else if (has_more) {
-                            // Still has data — re-arm write in one-shot mode.
-                            if (engine_->oneshot()) {
-                                engine_->arm_write(ev.fd, ev.conn);
-                            }
-                        }
-                        else {
+                        else if (all_sent) {
                             // Queue empty — disarm write (MOD with 0 events).
                             // Read fd is independent — no need to re-arm read.
                             engine_->disarm_write(ev.fd, ev.conn);
+                        }
+                        else {
+                            // EAGAIN/partial — re-arm write for retry.
+                            // Non-oneshot: level-triggered EPOLLOUT stays
+                            // armed, no MOD needed (kernel only fires when
+                            // socket becomes writable again).
+                            if (engine_->oneshot()) {
+                                engine_->arm_write(ev.fd, ev.conn);
+                            }
                         }
                     }
                     break;
@@ -261,7 +264,10 @@ void Worker::run_loop()
                     }
                     break;
                 case SocketEvent::Accept:
-                    // Acceptor only — handled by the server (Phase 4).
+                    // Listen socket readable — accept new connections.
+                    // The server's accept handler loops accept() until
+                    // EAGAIN, creating connections and registering them.
+                    transport_->on_accept(ev.fd);
                     break;
                 }
             }
@@ -305,7 +311,7 @@ void Worker::run_loop()
 
             // Round latency: epoll wake → round complete (skip empty wakes).
             if (round_start > 0) {
-                hist_round().observe(now_nanos() - round_start);
+                hist_epoll_run().observe(now_nanos() - round_start);
             }
         }
         CRB_LOG_INFO("worker {} event loop exited", id_);
@@ -493,6 +499,33 @@ void SocketTransport::stop()
     }
 }
 
+void SocketTransport::add_listen_fd(int fd)
+{
+    // Register the listen socket with the first engine. The engine
+    // monitors it via epoll/kqueue (level-triggered, no ONESHOT) and
+    // delivers Accept events to a worker thread. This avoids the
+    // dedicated acceptor thread, which can be starved under CPU
+    // contention (the worker's epoll loop is already being woken
+    // by other I/O events).
+    if (!engines_.empty()) {
+        engines_[0]->add_listen_fd(fd);
+    }
+}
+
+void SocketTransport::remove_listen_fd(int fd)
+{
+    if (!engines_.empty()) {
+        engines_[0]->remove_listen_fd(fd);
+    }
+}
+
+void SocketTransport::on_accept(int listen_fd)
+{
+    if (accept_handler_) {
+        accept_handler_(listen_fd);
+    }
+}
+
 void SocketTransport::shutdown()
 {
     stop();
@@ -541,10 +574,30 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
     }
     frame->create_nano = now_nano();
     if (!conn->enqueue_send(frame)) {
-        cnt_send_queue_reject().inc();
+        // Send queue full — try the overflow queue (deferred retry).
+        // The I/O worker drains overflow first in try_send(), so these
+        // frames are sent before new send_queue_ frames.
+        if (conn->enqueue_overflow(frame)) {
+            cnt_send_queue_full().inc();
+            // Arm write so the worker picks up the overflow frames.
+            auto *engine = static_cast<SocketEngine *>(conn->io_engine);
+            if (engine != nullptr) {
+                int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
+                engine->arm_write(wfd, conn);
+            }
+            return true;
+        }
+        // Overflow also full — drop the frame (last resort).
+        cnt_send_queue_full().inc();
         stats_.send_queue_rejects.fetch_add(1, std::memory_order_relaxed);
-        CRB_LOG_WARN("submit: enqueue_send failed (backpressure or closed) conn_id={} name={}",
-                     static_cast<long long>(conn->id()), conn->name());
+        CRB_LOG_WARN("submit: enqueue_send + overflow failed (backpressure) conn_id={} name={} request_id={}",
+                     static_cast<long long>(conn->id()), conn->name(),
+                     static_cast<unsigned long long>(frame->request_id));
+        if (frame->control != nullptr)
+            frame->control->release();
+        if (frame->data != nullptr)
+            frame->data->release();
+        delete frame;
         return false;
     }
 
@@ -587,7 +640,25 @@ bool SocketTransport::submit_inline(Connection *conn, OutFrame *frame)
     // (retry_direct for Path A, flush_send for Path B), batching all
     // frames accumulated during the read loop into a single writev.
     // send_direct is only used by submit() for cross-thread sends.
-    return conn->enqueue_send(frame);
+    if (conn->enqueue_send(frame)) {
+        return true;
+    }
+    // Send queue full — try overflow (deferred retry).
+    if (conn->enqueue_overflow(frame)) {
+        cnt_send_queue_full().inc();
+        return true;
+    }
+    // Overflow also full — drop (last resort).
+    cnt_send_queue_full().inc();
+    stats_.send_queue_rejects.fetch_add(1, std::memory_order_relaxed);
+    CRB_LOG_WARN("submit_inline: enqueue + overflow failed conn_id={} request_id={}",
+                 static_cast<long long>(conn->id()), static_cast<unsigned long long>(frame->request_id));
+    if (frame->control != nullptr)
+        frame->control->release();
+    if (frame->data != nullptr)
+        frame->data->release();
+    delete frame;
+    return false;
 }
 
 Worker *SocketTransport::get_worker()
@@ -694,6 +765,8 @@ std::shared_ptr<Connection> SocketTransport::connect(const std::string &addr, in
 
     auto conn      = create_connection(fd, addr + ":" + std::to_string(port));
     conn->quickack = quickack_;
+    CRB_LOG_INFO("rpc transport: connection established -> {}:{} conn_id={}", addr, port,
+                 static_cast<long long>(conn->id()));
     return conn;
 }
 

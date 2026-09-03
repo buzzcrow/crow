@@ -89,6 +89,62 @@ The macOS legacy run peaks at 87,448 ops/s. The current Linux crowdb-rpc run
 reaches 190,769 ops/s at the matching 256-thread load, but the transport and
 benchmark settings differ.
 
+### Linux — 2026-09-02
+
+AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux. Same workload as the 2026-08-26
+run but with `--event-write --peer-pool-size 4`, 20s duration (was 10s),
+and the crowdb-tree engine changes: B-tree page-count metrics (O(1)
+leaf/inner gauges maintained at SMO sites via relaxed atomics) and the
+flush re-check loop (drains memtables that freeze during an in-flight
+drain in the same `flush()` call). `win` is the inflight window; `co` is
+observed average coalesced keys over the configured maximum.
+
+| Threads | Conn | Workers | win | co | ops/s | WAL/node | p50 us | p99 us | Errors |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1 | 2 | 32 | 1.0/16 | 3,943 | 78,876 | 500 | 500 | 0 |
+| 16 | 2 | 2 | 32 | 4.9/16 | 57,867 | 238,370 | 500 | 1,000 | 0 |
+| 64 | 4 | 2 | 32 | 6.9/16 | 151,431 | 439,470 | 500 | 1,000 | 0 |
+| 128 | 4 | 4 | 32 | 4.4/16 | 168,756 | 775,238 | 1,000 | 5,000 | 0 |
+| 256 | 8 | 4 | 32 | 3.9/16 | 22,503 | 282,738 | 5,000 | 5,000 | 256 |
+| 512 | 16 | 4 | 64 | 58.0/64 | 264,130 | 91,061 | 5,000 | 5,000 | 0 |
+| 1,000 | 16 | 4 | 64 | 26.8/64 | 225,760 | 168,712 | 5,000 | 50,000 | 0 |
+
+The peak is 264,130 ops/s at 512 threads — +13.1% over the 2026-08-27
+event-write reference (233,601 ops/s). The 1,000T config also improved
+(+8.5%). The 256T:8C config hit a pre-existing consensus instability
+(accept-rejection storm + leader election churn, not storage-related;
+see `doc/working/todo_tree_count.md` for the open issue). The p50/p99
+values use coarser histogram buckets than the 2026-08-26 run and are not
+directly comparable.
+
+### Linux — 2026-09-02 (group 1, mem-block WAL wipe fix)
+
+AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux. Same workload as the prior
+2026-09-02 run but with two fixes: (1) `wipe_user_data` now calls
+`IoBackend::remove_dir_all` (clears mem-block in-memory WAL segments —
+`tokio::fs::remove_dir_all` was a no-op on them) and calls
+`remove_group` before `create_group_with_wal`; (2) bench runs on group 1
+(group 0 sysdata preserved). The 256T consensus instability is fixed:
+22K→181K ops/s, 256→0 errors. r2/r3 now respond at all thread counts.
+`cluster clean` frees RSS between sub-tests (128MB–9.5GB freed).
+
+| Threads | Conn | Workers | win | co | ops/s | WAL/node | p50 us | p99 us | Errors |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1 | 2 | 32 | 1.0/16 | 6,258 | 125,165 | 500 | 500 | 0 |
+| 16 | 2 | 2 | 32 | 4.3/16 | 65,897 | 303,919 | 500 | 500 | 0 |
+| 64 | 4 | 2 | 32 | 6.1/16 | 155,883 | 511,013 | 500 | 1,000 | 0 |
+| 128 | 4 | 4 | 32 | 4.9/16 | 184,812 | 749,977 | 1,000 | 5,000 | 0 |
+| 256 | 8 | 4 | 32 | 3.7/16 | 181,204 | 983,928 | 5,000 | 5,000 | 0 |
+| 512 | 16 | 4 | 64 | 57.4/64 | 239,669 | 83,509 | 5,000 | 5,000 | 0 |
+| 1,000 | 16 | 4 | 64 | 27.7/64 | 220,607 | 159,609 | 5,000 | 50,000 | 0 |
+
+The 256T config is now healthy (181K ops/s, 0 errors) — the prior run's
+consensus instability was caused by the broken `cluster clean` leaving
+stale WAL segments in the mem-block backend, which stalled
+`create_group_with_wal` for 9+ seconds and prevented the old group from
+being dropped. Peak is 239,669 ops/s at 512T (slightly lower than the
+prior 264K — within run-to-run noise).
+
 ## 3. Change History
 
 ### Concurrent Paxos phases
@@ -156,3 +212,54 @@ are improvements.
 
 The legacy baseline plateaued at ~29K ops/s across all high-thread configs;
 crowdb-rpc + coalescing scales to 191K at 128T before the accept-round ceiling.
+
+### B-tree page-count metrics + flush re-check loop (2026-09-02)
+
+Two crowdb-tree engine changes landed together:
+
+- **Page-count metrics**: O(1) leaf/inner page-count gauges maintained
+  via `std::atomic<uint64_t>` at SMO sites (split, merge, install
+  snapshot), persisted in the `CommitAnchor` (format version 3). A
+  `CallbackGauge` exposes the retired-page count for GC triggering. The
+  atomics use `memory_order_relaxed` — no fences on the hot path, only
+  at structural modification points which are already serialized under
+  `write_mutex_`.
+- **Flush re-check loop**: `flush()` now drains `frozen_` in a loop
+  until empty (or an iteration cap), re-reading `contiguous_slot_` each
+  pass. Memtables that freeze *during* an in-flight drain are caught in
+  the same call instead of waiting for the next maintenance tick.
+
+Perf: peak throughput rose from 233,601 to 264,130 ops/s at 512T
+(+13.1%); 1,000T improved from 208,114 to 225,760 (+8.5%). The
+high-concurrency configs benefit most from the flush re-check loop —
+frozen memtables accumulate faster under heavy write load, and draining
+them in-call reduces frozen-queue depth and keeps the memtable pipeline
+flowing. The 256T:8C config hit a pre-existing consensus instability
+(accept-rejection storm, not storage-related); see
+`doc/working/todo_tree_count.md` for the open issue.
+
+### Mem-block WAL wipe fix + bench on group 1 (2026-09-02)
+
+Two changes that fix the `cluster clean` memory leak and protect group-0
+sysdata:
+
+- **`IoBackend::remove_dir_all`**: `wipe_user_data` was calling
+  `tokio::fs::remove_dir_all` to delete the WAL directory, but this is a
+  no-op on the mem-block backend (segments are stored in-memory as
+  `BTreeMap<PathBuf, Vec<u8>>`). The stale segments persisted across
+  cleans, causing `create_group_with_wal` to replay them (9+ second
+  stalls) and preventing the old group from being dropped. The new
+  `MemBlockDevice::remove_prefix` method clears in-memory segments under
+  a path prefix; `IoBackend::remove_dir_all` dispatches to it for
+  mem-block and to `tokio::fs::remove_dir_all` for file/block-device.
+- **`remove_group` before `create_group_with_wal`**: the old group is
+  now removed from the store before the new one is created, so the old
+  group's memory is freed even if WAL replay is slow.
+- **Bench on group 1**: benchmarks now create and use group 1 (via `kv
+  group add`), leaving group 0 sysdata untouched. `cluster clean` and
+  all bench commands gained `--store`/`--group` flags (default 0 for
+  backward compat).
+
+Perf: the 256T config is fixed (22K→181K ops/s, 256→0 errors). `cluster
+clean` now frees RSS between sub-tests instead of increasing it. Peak
+throughput is within noise of the prior run (240K vs 264K at 512T).

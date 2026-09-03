@@ -109,7 +109,7 @@ impl KvStoreRegistry {
     ///
     /// Panics if the internal mutex is poisoned.
     #[must_use]
-    pub(crate) fn next_port(&self) -> Option<u16> {
+    pub fn next_port(&self) -> Option<u16> {
         let mut pool = self.port_pool.lock().unwrap();
         if pool.is_empty() {
             None

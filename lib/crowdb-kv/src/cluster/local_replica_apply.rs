@@ -54,9 +54,11 @@ impl PxLocalReplica {
         learner.record_dedup_tags(dedup_tags, entry.slot);
         // Deferred: engine apply + applied frontier (the FFI/memtable insert
         // moved off the write critical path; the apply fence gates reads).
+        // Gap 2: only advance `contiguous_applied` if the apply succeeded.
         tokio::spawn(async move {
-            learner.apply_entry(entry.slot, &entry.payload).await;
-            learner.advance_applied_frontier(entry.slot);
+            if learner.apply_entry(entry.slot, &entry.payload).await.is_ok() {
+                learner.advance_applied_frontier(entry.slot);
+            }
         });
     }
 
@@ -147,7 +149,6 @@ impl PxLocalReplica {
             h.gap_count.set(self.gap_slots.lock().len() as u64);
             h.fetchgap_inflight
                 .set(self.fetchgap_inflight.load(Ordering::Acquire));
-            h.last_chosen_slot.set(self.learner.last_chosen_slot());
             h.known_commit_slot
                 .set(self.known_commit_slot.load(Ordering::Acquire));
         }
@@ -339,8 +340,10 @@ async fn apply_loop_task(
             let known_val = known.load(Ordering::Acquire);
             if next <= known_val || learner.is_chosen(next) {
                 if let Some(entry) = acceptor.accepted_at(next) {
-                    learner.apply_entry(entry.slot, &entry.payload).await;
-                    learner.advance_applied_frontier(entry.slot);
+                    // Gap 2: only advance `contiguous_applied` if the apply succeeded.
+                    if learner.apply_entry(entry.slot, &entry.payload).await.is_ok() {
+                        learner.advance_applied_frontier(entry.slot);
+                    }
                 } else {
                     // R65: chosen (≤ known_commit_slot or in chosen set)
                     // but acceptor has no value — record gap for FetchGap.

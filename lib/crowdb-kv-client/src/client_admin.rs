@@ -1,17 +1,17 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Admin/management operations for [`CrowdbClient`]: snapshot lifecycle
+//! Admin/management operations for [`CrowdbKvClient`]: snapshot lifecycle
 //! (create, list, scan, release).
 
 use crowdb_kv::rpc::{
     CreateSnapshotResponse, ReadMode, ReleaseSnapshotResponse, SnapshotInfo, SnapshotScanResponse,
 };
 
-use crate::client::CrowdbClient;
+use crate::client::CrowdbKvClient;
 use crate::error::{Error, Result};
 
-impl CrowdbClient {
+impl CrowdbKvClient {
     /// Create a point-in-time-consistent snapshot. Flushes L0 → L1
     /// and pins the durable view at `last_applied_slot`. Returns a
     /// snapshot handle for use with `snapshot_scan`/`release_snapshot`.

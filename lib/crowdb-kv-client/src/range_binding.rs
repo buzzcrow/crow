@@ -23,7 +23,7 @@ use crowdb_protocol::common::{ChunkdbRangeBindingValue, RangeStatus};
 use crowdb_protocol::key::ChunkdbRangeBindingKey;
 
 use crate::watch_notify::WatchNotifyClient;
-use crate::{CrowdbClient, Error, ReadMode, Result};
+use crate::{CrowdbKvClient, Error, ReadMode, Result};
 
 const G0_STORE: u64 = 0;
 const G0_GROUP: u64 = 0;
@@ -88,10 +88,10 @@ pub enum RangeRouteError {
 
 /// Client for the chunkdb instance range binding table in group 0.
 ///
-/// All methods target store 0, group 0. The wrapped `CrowdbClient`
+/// All methods target store 0, group 0. The wrapped `CrowdbKvClient`
 /// must have its topology seeded with a group-0 leader endpoint.
 pub struct RangeBindingClient {
-    kv: Arc<CrowdbClient>,
+    kv: Arc<CrowdbKvClient>,
     /// Cached binding table, sorted by `sub_range_index` (the
     /// canonical key). Protected by a `RwLock` — reads (routing) take
     /// a read lock, refreshes take a write lock.
@@ -99,19 +99,19 @@ pub struct RangeBindingClient {
 }
 
 impl RangeBindingClient {
-    /// Wrap an already-shared `CrowdbClient` for chunkdb range binding
+    /// Wrap an already-shared `CrowdbKvClient` for chunkdb range binding
     /// access.
     #[must_use]
-    pub fn from_shared(kv: Arc<CrowdbClient>) -> Self {
+    pub fn from_shared(kv: Arc<CrowdbKvClient>) -> Self {
         Self {
             kv,
             bindings: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
-    /// Access the underlying `CrowdbClient`.
+    /// Access the underlying `CrowdbKvClient`.
     #[must_use]
-    pub fn kv(&self) -> &CrowdbClient {
+    pub fn kv(&self) -> &CrowdbKvClient {
         &self.kv
     }
 
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn route_bucket_returns_correct_instance() {
         let client = RangeBindingClient {
-            kv: Arc::new(CrowdbClient::new(crate::ClientConfig::new(vec![
+            kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
             bindings: Arc::new(RwLock::new(vec![
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn route_bucket_empty_returns_no_binding() {
         let client = RangeBindingClient {
-            kv: Arc::new(CrowdbClient::new(crate::ClientConfig::new(vec![
+            kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
             bindings: Arc::new(RwLock::new(Vec::new())),
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn route_bucket_unbound_returns_bucket_unbound() {
         let client = RangeBindingClient {
-            kv: Arc::new(CrowdbClient::new(crate::ClientConfig::new(vec![
+            kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
             bindings: Arc::new(RwLock::new(vec![binding(0, 1000, 1, "http://a:1")])),
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn replace_sorts_by_sub_range_index() {
         let client = RangeBindingClient {
-            kv: Arc::new(CrowdbClient::new(crate::ClientConfig::new(vec![
+            kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
             bindings: Arc::new(RwLock::new(Vec::new())),
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn is_empty_true_then_false_after_replace() {
         let client = RangeBindingClient {
-            kv: Arc::new(CrowdbClient::new(crate::ClientConfig::new(vec![
+            kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
             bindings: Arc::new(RwLock::new(Vec::new())),
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn route_with_fallback_stable_returns_no_fallback() {
         let client = RangeBindingClient {
-            kv: Arc::new(CrowdbClient::new(crate::ClientConfig::new(vec![
+            kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
             bindings: Arc::new(RwLock::new(vec![binding(0, 1000, 1, "http://a:1")])),
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn route_with_fallback_in_transition_returns_fallback() {
         let client = RangeBindingClient {
-            kv: Arc::new(CrowdbClient::new(crate::ClientConfig::new(vec![
+            kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
             bindings: Arc::new(RwLock::new(vec![binding_in_transition(
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn route_with_fallback_in_transition_no_original_returns_no_fallback() {
         let client = RangeBindingClient {
-            kv: Arc::new(CrowdbClient::new(crate::ClientConfig::new(vec![
+            kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
             bindings: Arc::new(RwLock::new(vec![{

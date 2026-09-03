@@ -38,6 +38,13 @@ pub struct NodeRecord {
     /// Last error from a failed probe, if any. Cleared on the next
     /// successful observation.
     pub last_error: Option<String>,
+    /// Set by the restart handler to signal that the server is loading
+    /// stores from WAL. While `true`, `refresh_node_cache` and the
+    /// background monitor preserve previously-known stores that the
+    /// server's `/topology` hasn't confirmed yet (WAL replay may still
+    /// be in progress). Cleared automatically once the topology reports
+    /// every store the cache had before the restart.
+    pub recovering: bool,
 }
 
 /// Live, thread-safe cache of every node's most recent topology report.
@@ -82,6 +89,18 @@ impl MonitorCache {
         entry.last_error = Some(reason.into());
     }
 
+    /// Mark a node as recovering from a restart. The cache preserves
+    /// previously-known stores that the server's `/topology` hasn't
+    /// confirmed yet (WAL replay may still be in progress). The flag
+    /// is cleared automatically by `refresh_node_cache` / the
+    /// background monitor once the topology reports every store the
+    /// cache had before the restart.
+    pub async fn mark_recovering(&self, node_id: NodeId) {
+        let mut guard = self.nodes.write().await;
+        let entry = guard.entry(node_id).or_default();
+        entry.recovering = true;
+    }
+
     /// Aggregate every node's report for a single store into one
     /// logical `StoreView`. Returns `None` if no node hosts the store.
     pub async fn resolve_store(&self, store_id: StoreId) -> Option<StoreView> {
@@ -114,6 +133,45 @@ impl MonitorCache {
             nodes,
             groups: groups.into_values().collect(),
         })
+    }
+
+    /// Resolve the live crowdb-rpc listen address of the group-0
+    /// leader (store 0, group 0). Returns `None` if no node hosts
+    /// store 0, no group 0 exists, no replica reports a `Leader`
+    /// role, or the leader's `listen_addr` has not yet been polled.
+    ///
+    /// Skips nodes marked `Down` — their cache entries are stale and
+    /// the leader endpoint is no longer valid. Without this, a stopped
+    /// node that was previously the group-0 leader would shadow the
+    /// freshly-elected leader on a running node, causing sysdata writes
+    /// to fail with "no known leader".
+    ///
+    /// Used by `AppState::op_context` to seed the shared
+    /// `CrowdbKvClient` with the actual group-0 endpoint so sysdata
+    /// writes reach the right listener (the configured `rpc_url` is
+    /// only correct for the bootstrap store, not for store 0 once the
+    /// system group has been initialized on a different port).
+    pub async fn group0_leader_endpoint(&self) -> Option<String> {
+        let guard = self.nodes.read().await;
+        for rec in guard.values() {
+            if rec.health == NodeHealth::Down {
+                continue;
+            }
+            let Some(ns) = rec.stores.get(&0) else {
+                continue;
+            };
+            let Some(g) = ns.groups.iter().find(|g| g.group_id == 0) else {
+                continue;
+            };
+            if g.local.role == ReplicaRole::Leader {
+                if let Some(addr) = &ns.listen_addr {
+                    if !addr.is_empty() {
+                        return Some(addr.clone());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Aggregate every node's report for a single group into one
@@ -201,6 +259,24 @@ impl MonitorCache {
         // No healthy node — return the first replica so the caller can
         // attempt anyway; crowdb-rpc will surface `NodeUnreachable`.
         view.replicas.first().map(|r| (r.replica_id, r.node_id))
+    }
+
+    /// Strict variant of [`leader_for`]: returns a replica that self-reports
+    /// as `Leader` and whose hosting node is `Up`. No first-healthy fallback
+    /// — returns `None` when no self-reported leader is observed among Up
+    /// nodes. Used by [`resolve_kv_endpoint`](crate::kv) so KV writes are not
+    /// routed to a follower (which would reject with "not leader" and trigger
+    /// a slow retry cycle in the KV client).
+    pub async fn strict_leader_for(&self, store_id: StoreId, group_id: u64) -> Option<(ReplicaId, NodeId)> {
+        let view = self.resolve_group(store_id, group_id).await?;
+        let guard = self.nodes.read().await;
+        view.replicas
+            .iter()
+            .find(|r| {
+                r.role == ReplicaRole::Leader
+                    && guard.get(&r.node_id).is_some_and(|n| n.health == NodeHealth::Up)
+            })
+            .map(|r| (r.replica_id, r.node_id))
     }
 }
 
@@ -371,24 +447,55 @@ impl MonitorTask {
         let probe = tokio::time::timeout(self.cfg.probe_timeout, client.health()).await;
         match probe {
             Ok(Ok(_)) => {
-                let mut rec = NodeRecord {
-                    health: NodeHealth::Up,
-                    last_seen_ms: now_ms(),
-                    stores: BTreeMap::new(),
-                    last_error: None,
-                };
+                let mut stores = BTreeMap::new();
                 // Topology fetch reuses the same per-node-store shape;
                 // the cache stays empty until the per-node topology RPC
                 // (A4) is wired through `ServerClient`. For A0–A2 the
                 // health probe is enough to drive `leader_for`'s
                 // healthy-fallback path.
-                if let Ok(Ok(stores)) = tokio::time::timeout(self.cfg.probe_timeout, client.topology()).await
+                if let Ok(Ok(fetched)) = tokio::time::timeout(self.cfg.probe_timeout, client.topology()).await
                 {
                     // Best-effort translation of the legacy snapshot
                     // shape into the new per-node-store cache entry.
                     // The new RPC (A4) will replace this verbatim.
-                    rec.stores = legacy_topology_to_node_stores(t.node_id, &stores);
+                    stores = legacy_topology_to_node_stores(t.node_id, &fetched);
                 }
+                // If the node is recovering from a restart, preserve
+                // previously-known stores that the server's /topology
+                // hasn't confirmed yet (WAL replay may still be in
+                // progress). The recovering flag is cleared once the
+                // topology reports every store the cache had before
+                // the restart.
+                let (merged, still_recovering) = {
+                    let snap = self.cache.snapshot().await;
+                    if let Some(old) = snap.get(&t.node_id) {
+                        if old.recovering {
+                            let mut merged = old.stores.clone();
+                            let mut all_confirmed = true;
+                            for (sid, ns) in &stores {
+                                merged.insert(*sid, ns.clone());
+                            }
+                            for old_sid in old.stores.keys() {
+                                if !stores.contains_key(old_sid) {
+                                    all_confirmed = false;
+                                    break;
+                                }
+                            }
+                            (merged, !all_confirmed)
+                        } else {
+                            (stores, false)
+                        }
+                    } else {
+                        (stores, false)
+                    }
+                };
+                let rec = NodeRecord {
+                    health: NodeHealth::Up,
+                    last_seen_ms: now_ms(),
+                    stores: merged,
+                    last_error: None,
+                    recovering: still_recovering,
+                };
                 self.cache.set_node_report(t.node_id, rec).await;
             }
             Ok(Err(e)) => {
@@ -493,6 +600,7 @@ mod tests {
             last_seen_ms: 1,
             stores: m,
             last_error: None,
+            recovering: false,
         }
     }
 

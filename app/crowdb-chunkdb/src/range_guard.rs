@@ -108,7 +108,7 @@ impl RangeGuard {
     /// Returns the underlying client error on scan/decode failure.
     pub async fn load_from_group0(
         &self,
-        kv: &crowdb_kv_client::CrowdbClient,
+        kv: &crowdb_kv_client::CrowdbKvClient,
         instance_id: u64,
     ) -> crowdb_kv_client::Result<()> {
         use crowdb_kv_client::ReadMode;

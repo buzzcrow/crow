@@ -7,7 +7,7 @@ import { createRack, createNode, deployNodeServer, stopNodeServer, freePort } fr
 import { step } from '../fixtures/stepTimer';
 
 // One rack/node/server shared by every test in this file so the canvas
-// has content in Physical and Capacity views (IDs reused from the former
+// has content in Cluster and Capacity views (IDs reused from the former
 // 48-canvas-fit-pan spec so they stay unique).
 const apiBase = consoleBaseURL();
 
@@ -40,9 +40,9 @@ test.describe('canvas · fit + pan', () => {
   });
 
   test('Fit All is available in every view and autofit centers nodes on load', async ({ page }) => {
-    // --- Fit All button visible/enabled in Physical view with content ---
+    // --- Fit All button visible/enabled in Cluster domain with content ---
     await step('canvas: goto', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Physical' }).click();
+    await page.getByTestId('domain-cluster').click();
 
     const fitBtn = page.getByTestId('fit-all-btn');
     await expect(fitBtn).toBeVisible();
@@ -53,17 +53,17 @@ test.describe('canvas · fit + pan', () => {
     await expect(fitBtn).toBeVisible();
 
     // --- Fit All button visible in KV Cluster view (empty canvas) ---
-    await page.getByRole('button', { name: 'KV Cluster' }).click();
+    await page.getByTestId('domain-kv').click();
     await expect(page.getByTestId('fit-all-btn')).toBeVisible();
 
     // --- Capacity view shows the CapacityPanel (no canvas) ---
-    await page.getByRole('button', { name: 'Capacity' }).click();
+    await page.getByTestId('domain-chunk').click();
     // CapacityPanel renders either the overview header or the empty state.
     await expect(page.getByText(/Capacity Overview|No diskdb instances registered/)).toBeVisible({ timeout: 5_000 });
 
     // --- autofit centers nodes on initial load ---
     await step('canvas: goto autofit', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Physical' }).click();
+    await page.getByTestId('domain-cluster').click();
 
     // Wait for nodes and the auto-fit to settle. The canvas should
     // center the nodes in the viewport — verify a node is within the
@@ -88,7 +88,7 @@ test.describe('canvas · fit + pan', () => {
 
   test('clicking Fit All resets the viewport after panning', async ({ page }) => {
     await step('canvas: goto', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Physical' }).click();
+    await page.getByTestId('domain-cluster').click();
 
     // Wait for nodes to render.
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
@@ -119,9 +119,9 @@ test.describe('canvas · fit + pan', () => {
 
   test('switching views always fits to window, not the stale viewport', async ({ page }) => {
     test.setTimeout(60_000);
-    // --- Physical -> KV Cluster -> Physical ---
+    // --- Cluster -> KV Cluster -> Cluster ---
     await step('canvas: goto', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Physical' }).click();
+    await page.getByTestId('domain-cluster').click();
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
 
     const viewport = page.locator('.react-flow__viewport');
@@ -146,13 +146,13 @@ test.describe('canvas · fit + pan', () => {
 
     // Switch to KV Cluster view — canvas should fit to window (no nodes
     // in KV Cluster since no stores, but the button must be visible).
-    await page.getByRole('button', { name: 'KV Cluster' }).click();
+    await page.getByTestId('domain-kv').click();
     await expect(page.getByTestId('fit-all-btn')).toBeVisible();
 
-    // Switch back to Physical — should fit to window, NOT restore the
+    // Switch back to Cluster — should fit to window, NOT restore the
     // panned viewport. The transform should match the fitted state
     // (translate ~0, scale ~1), not the panned offset.
-    await page.getByRole('button', { name: 'Physical' }).click();
+    await page.getByTestId('domain-cluster').click();
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
 
     // After switching back, the viewport should be re-fitted, not the
@@ -162,12 +162,12 @@ test.describe('canvas · fit + pan', () => {
       return viewport.evaluate((el) => (el as HTMLElement).style.transform);
     }, { timeout: 5_000, intervals: [100] }).not.toEqual(pannedTransform));
 
-    // --- Physical -> Capacity -> Physical ---
+    // --- Cluster -> Capacity -> Cluster ---
     await step('canvas: goto', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Physical' }).click();
+    await page.getByTestId('domain-cluster').click();
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
 
-    // Pan in Physical view.
+    // Pan in Cluster domain.
     await step('canvas: pan', async () => {
       await canvas.hover({ position: { x: 200, y: 200 } });
       await page.mouse.down();
@@ -177,12 +177,12 @@ test.describe('canvas · fit + pan', () => {
     const physicalPanned = await viewport.evaluate((el) => (el as HTMLElement).style.transform);
 
     // Switch to Capacity — shows CapacityPanel (no canvas).
-    await page.getByRole('button', { name: 'Capacity' }).click();
+    await page.getByTestId('domain-chunk').click();
     await expect(page.getByText(/Capacity Overview|No diskdb instances registered/)).toBeVisible({ timeout: 5_000 });
 
-    // Switch back to Physical — should fit to window, NOT restore the
-    // panned Physical viewport from the first visit.
-    await page.getByRole('button', { name: 'Physical' }).click();
+    // Switch back to Cluster — should fit to window, NOT restore the
+    // panned Cluster viewport from the first visit.
+    await page.getByTestId('domain-cluster').click();
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
     await page.waitForTimeout(300);
 

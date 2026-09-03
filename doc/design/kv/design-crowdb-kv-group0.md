@@ -39,6 +39,7 @@ Satisfies: [`design-crowdb-kv.md`](design-crowdb-kv.md) §3.3
   - [5.3 Greenfield migration](#53-greenfield-migration)
   - [5.4 Leader readiness before writing](#54-leader-readiness-before-writing)
 - [6. Relationship to Existing Design Docs](#6-relationship-to-existing-design-docs)
+- [7. Cascading cleanup](#7-cascading-cleanup)
 
 ---
 
@@ -407,6 +408,38 @@ filter expired entries when scanning. There is no active eviction.
 Expired entries are ignored and eventually overwritten or deleted on
 clean shutdown.
 
+### 4.4 Client discovery
+
+`ServiceDiscoveryClient` (in `crowdb-kv-client`) wraps
+`ServiceRegistryClient` with a per-service `DashMap` cache and
+TTL-based refresh. Clients call `discover_all(service)` or
+`discover_one(service)` to find living service instances by service
+name without hardcoding addresses. The cache is poll-on-demand: the
+first call queries group-0, subsequent calls within the cache TTL
+(default 5 seconds — one heartbeat cycle) return the cached result.
+`invalidate(service)` forces a re-query on the next call; called
+after known topology changes (e.g. `cluster_init`, `deploy_diskdb`).
+
+Instance selection is round-robin among live instances. The
+`DiskdbClient` and `ChunkdbClient` retain their per-disk-group /
+per-range routing caches (they have routing requirements that
+round-robin doesn't cover); the generic discovery client handles the
+"pick any living instance" case.
+
+The bootstrap flow: a client knows group-0's mgmt port (10000, from
+R118) → constructs `CrowdbKvClient` with that seed →
+`ServiceDiscoveryClient::from_shared_kv` → `discover_all("diskdb")`
+queries `/srv/diskdb/` via group-0 → cache → client connects to the
+discovered RPC endpoint. No per-service address configuration needed
+beyond group-0's bootstrap address.
+
+Explicit address overrides (`--diskdb-ip`, `--chunkdb-ip` on the
+CLI; `Option<&str>` explicit endpoint on ops functions) bypass
+discovery for that one call. This is the test exception (unit tests
+pass addresses directly) and the operator escape hatch. When the
+registry is empty and no override is provided, the client fails with
+a clear "no living instances" error.
+
 ---
 
 ## 5. Bootstrap and Cutover
@@ -469,3 +502,14 @@ existing flow doesn't already wait.
   primitive required.
 - **`design-crowdb-protocol-key.md` §5** — documents the unified key concept
   (one struct, two encoding traits: `BinaryKey` + `TextKey`).
+
+## 7. Cascading cleanup
+
+`HardwareClient` provides `remove_*_cascade` methods that delete an
+entity and all its children in group 0: `remove_rack_cascade` →
+nodes → disk-groups → disks + owner/bind/usage records. The
+single-record `remove_*` methods are kept for internal use.
+
+- **I1 — ID reuse safety**: After a rack/node/disk-group/disk is
+  removed, its ID can be safely reused. The group-0 sysdata deletion
+  is the fence against resurrection.

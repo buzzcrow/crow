@@ -21,10 +21,30 @@ namespace crowdb::common::metrics
 
 // ── MetricsRegistry ─────────────────────────────────────────────
 
+// File-scope pointer + function for atexit (lambdas with captures
+// can't be passed to std::atexit — it requires a plain function ptr).
+static MetricsRegistry *g_metrics_registry = nullptr;
+
+static void stop_metrics_registry()
+{
+    if (g_metrics_registry != nullptr) {
+        g_metrics_registry->stop();
+    }
+}
+
 MetricsRegistry &MetricsRegistry::global()
 {
-    static MetricsRegistry instance;
-    return instance;
+    // Heap-allocated + atexit(stop): the registry is never destroyed,
+    // so its counters remain valid for threads (e.g. the RPC reaper)
+    // that may still access them during process exit. A Meyers
+    // singleton destructor would free the counters before those
+    // threads stop, causing a use-after-free.
+    static MetricsRegistry *instance = [] {
+        g_metrics_registry = new MetricsRegistry();
+        std::atexit(stop_metrics_registry);
+        return g_metrics_registry;
+    }();
+    return *instance;
 }
 
 MetricsRegistry::~MetricsRegistry() // NOLINT(bugprone-exception-escape)
@@ -35,8 +55,14 @@ MetricsRegistry::~MetricsRegistry() // NOLINT(bugprone-exception-escape)
 Counter *MetricsRegistry::register_counter(const std::string &name)
 {
     std::scoped_lock lock(flush_mutex_);
-    auto             h   = std::make_unique<Counter>(name);
-    Counter         *raw = h.get();
+    auto             it = std::find_if(counters_.begin(), counters_.end(),
+                                       [&](const std::unique_ptr<Counter> &e) { return e->name() == name; });
+    if (it != counters_.end()) {
+        *it = std::make_unique<Counter>(name);
+        return it->get();
+    }
+    auto     h   = std::make_unique<Counter>(name);
+    Counter *raw = h.get();
     counters_.push_back(std::move(h));
     return raw;
 }
@@ -44,8 +70,14 @@ Counter *MetricsRegistry::register_counter(const std::string &name)
 Gauge *MetricsRegistry::register_gauge(const std::string &name)
 {
     std::scoped_lock lock(flush_mutex_);
-    auto             h   = std::make_unique<Gauge>(name);
-    Gauge           *raw = h.get();
+    auto             it = std::find_if(gauges_.begin(), gauges_.end(),
+                                       [&](const std::unique_ptr<Gauge> &e) { return e->name() == name; });
+    if (it != gauges_.end()) {
+        *it = std::make_unique<Gauge>(name);
+        return it->get();
+    }
+    auto   h   = std::make_unique<Gauge>(name);
+    Gauge *raw = h.get();
     gauges_.push_back(std::move(h));
     return raw;
 }
@@ -53,8 +85,14 @@ Gauge *MetricsRegistry::register_gauge(const std::string &name)
 CallbackGauge *MetricsRegistry::register_callback_gauge(const std::string &name, CallbackGauge::Callback cb)
 {
     std::scoped_lock lock(flush_mutex_);
-    auto             h   = std::make_unique<CallbackGauge>(name, std::move(cb));
-    CallbackGauge   *raw = h.get();
+    auto             it = std::find_if(callback_gauges_.begin(), callback_gauges_.end(),
+                                       [&](const std::unique_ptr<CallbackGauge> &e) { return e->name() == name; });
+    if (it != callback_gauges_.end()) {
+        *it = std::make_unique<CallbackGauge>(name, std::move(cb));
+        return it->get();
+    }
+    auto           h   = std::make_unique<CallbackGauge>(name, std::move(cb));
+    CallbackGauge *raw = h.get();
     callback_gauges_.push_back(std::move(h));
     return raw;
 }
@@ -62,15 +100,27 @@ CallbackGauge *MetricsRegistry::register_callback_gauge(const std::string &name,
 Bandwidth *MetricsRegistry::register_bandwidth(const std::string &name)
 {
     std::scoped_lock lock(flush_mutex_);
-    auto             h   = std::make_unique<Bandwidth>(name);
-    Bandwidth       *raw = h.get();
+    auto             it = std::find_if(bandwidths_.begin(), bandwidths_.end(),
+                                       [&](const std::unique_ptr<Bandwidth> &e) { return e->name() == name; });
+    if (it != bandwidths_.end()) {
+        *it = std::make_unique<Bandwidth>(name);
+        return it->get();
+    }
+    auto       h   = std::make_unique<Bandwidth>(name);
+    Bandwidth *raw = h.get();
     bandwidths_.push_back(std::move(h));
     return raw;
 }
 
 LatencyHistogram *MetricsRegistry::register_histogram(const std::string &name)
 {
-    std::scoped_lock  lock(flush_mutex_);
+    std::scoped_lock lock(flush_mutex_);
+    auto             it = std::find_if(histograms_.begin(), histograms_.end(),
+                                       [&](const std::unique_ptr<LatencyHistogram> &e) { return e->name() == name; });
+    if (it != histograms_.end()) {
+        *it = std::make_unique<LatencyHistogram>(name);
+        return it->get();
+    }
     auto              h   = std::make_unique<LatencyHistogram>(name);
     LatencyHistogram *raw = h.get();
     histograms_.push_back(std::move(h));
@@ -80,8 +130,14 @@ LatencyHistogram *MetricsRegistry::register_histogram(const std::string &name)
 LatencySummary *MetricsRegistry::register_summary(const std::string &name)
 {
     std::scoped_lock lock(flush_mutex_);
-    auto             h   = std::make_unique<LatencySummary>(name);
-    LatencySummary  *raw = h.get();
+    auto             it = std::find_if(summaries_.begin(), summaries_.end(),
+                                       [&](const std::unique_ptr<LatencySummary> &e) { return e->name() == name; });
+    if (it != summaries_.end()) {
+        *it = std::make_unique<LatencySummary>(name);
+        return it->get();
+    }
+    auto            h   = std::make_unique<LatencySummary>(name);
+    LatencySummary *raw = h.get();
     summaries_.push_back(std::move(h));
     return raw;
 }
@@ -109,7 +165,7 @@ template <typename T> static std::vector<size_t> sorted_indices(const std::vecto
     return idx;
 }
 
-void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timestamp, const char *section_label,
+void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char * /*timestamp*/, const char *section_label,
                                size_t width, size_t count_w, size_t tps_w)
 {
     std::scoped_lock lock(flush_mutex_);
@@ -119,33 +175,12 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
     if (name_w == 0) {
         name_w = max_name_len();
     }
-    // Negotiated column widths (0 = use C++ defaults).
-    size_t cw = count_w > 0 ? count_w : 5;
+    // Negotiated column widths (0 = use C++ defaults). count_w=7
+    // accommodates counts up to 9,999,999 (e.g. 1M ops/window).
+    size_t cw = count_w > 0 ? count_w : 7;
     size_t tw = tps_w > 0 ? tps_w : 7;
 
-    std::fprintf(fp, "[%s %s window=%.3fs]\n", section_label, timestamp, window_secs);
-
-    // Counters
-    if (!counters_.empty()) {
-        auto                                              idx = sorted_indices(counters_);
-        std::vector<std::pair<size_t, Counter::Snapshot>> active;
-        for (size_t i : idx) {
-            auto snap = counters_[i]->flush();
-            if (snap.count > 0) {
-                active.emplace_back(i, snap);
-            }
-        }
-        if (!active.empty()) {
-            std::fprintf(fp, "%-*s  count  tps(/s)  total\n", static_cast<int>(name_w), "");
-            for (const auto &[i, snap] : active) {
-                double tps_d = static_cast<double>(snap.count) / window_secs;
-                auto   tps   = static_cast<uint64_t>(tps_d);
-                std::fprintf(fp, "%-*s  %*llu  %*llu  %6llu\n", static_cast<int>(name_w), counters_[i]->name().c_str(),
-                             static_cast<int>(cw), static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
-                             static_cast<unsigned long long>(tps), static_cast<unsigned long long>(snap.total));
-            }
-        }
-    }
+    std::fprintf(fp, "%s\n", section_label);
 
     // Histograms
     if (!histograms_.empty()) {
@@ -158,14 +193,16 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
             }
         }
         if (!active.empty()) {
-            std::fprintf(fp, "%-*s  count  tps(/s)  avg(us)  p50  p99  max  total\n", static_cast<int>(name_w), "");
+            std::fprintf(fp, "%-*s  %*s  %*s  %7s  %7s  %7s  %7s  %8s\n", static_cast<int>(name_w), "",
+                         static_cast<int>(cw), "count", static_cast<int>(tw), "tps(/s)", "avg(us)", "p50", "p99", "max",
+                         "total");
             for (const auto &[i, snap] : active) {
                 uint64_t p50   = LatencyHistogram::percentile(snap, 50.0);
                 uint64_t p99   = LatencyHistogram::percentile(snap, 99.0);
                 uint64_t avg   = snap.count > 0 ? snap.sum / snap.count : 0;
                 double   tps_d = static_cast<double>(snap.count) / window_secs;
                 auto     tps   = static_cast<uint64_t>(tps_d);
-                std::fprintf(fp, "%-*s  %*llu  %*llu  %7llu  %4llu  %4llu  %7llu  %5llu\n", static_cast<int>(name_w),
+                std::fprintf(fp, "%-*s  %*llu  %*llu  %7llu  %7llu  %7llu  %7llu  %8llu\n", static_cast<int>(name_w),
                              histograms_[i]->name().c_str(), static_cast<int>(cw),
                              static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
                              static_cast<unsigned long long>(tps), static_cast<unsigned long long>(avg / 1000),
@@ -187,12 +224,13 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
             }
         }
         if (!active.empty()) {
-            std::fprintf(fp, "%-*s  count  tps(/s)  avg(us)  max(us)  total\n", static_cast<int>(name_w), "");
+            std::fprintf(fp, "%-*s  %*s  %*s  %7s  %7s  %8s\n", static_cast<int>(name_w), "", static_cast<int>(cw),
+                         "count", static_cast<int>(tw), "tps(/s)", "avg(us)", "max(us)", "total");
             for (const auto &[i, snap] : active) {
                 uint64_t avg   = snap.count > 0 ? snap.sum / snap.count : 0;
                 double   tps_d = static_cast<double>(snap.count) / window_secs;
                 auto     tps   = static_cast<uint64_t>(tps_d);
-                std::fprintf(fp, "%-*s  %*llu  %*llu  %7llu  %7llu  %5llu\n", static_cast<int>(name_w),
+                std::fprintf(fp, "%-*s  %*llu  %*llu  %7llu  %7llu  %8llu\n", static_cast<int>(name_w),
                              summaries_[i]->name().c_str(), static_cast<int>(cw),
                              static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
                              static_cast<unsigned long long>(tps), static_cast<unsigned long long>(avg / 1000),
@@ -213,21 +251,43 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
             }
         }
         if (!active.empty()) {
-            std::fprintf(fp, "%-*s  count  tps(/s)  avg_size(KB)  max(KB)  rate(KB/s)  total(KB)\n",
-                         static_cast<int>(name_w), "");
+            std::fprintf(fp, "%-*s  %*s  %*s  avg_size(KB)  max(KB)  rate(MB/s)  total(MB)\n", static_cast<int>(name_w),
+                         "", static_cast<int>(cw), "count", static_cast<int>(tw), "tps(/s)");
             for (const auto &[i, snap] : active) {
                 uint64_t avg_size = snap.count > 0 ? snap.sum / snap.count : 0;
                 double   rate_d   = static_cast<double>(snap.sum) / window_secs;
                 auto     rate     = static_cast<uint64_t>(rate_d);
                 double   tps_d    = static_cast<double>(snap.count) / window_secs;
                 auto     tps      = static_cast<uint64_t>(tps_d);
-                std::fprintf(fp, "%-*s  %*llu  %*llu  %12llu  %7llu  %10llu  %9llu\n", static_cast<int>(name_w),
-                             bandwidths_[i]->name().c_str(), static_cast<int>(cw),
-                             static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
-                             static_cast<unsigned long long>(tps), static_cast<unsigned long long>(avg_size / 1024),
-                             static_cast<unsigned long long>(snap.max_bytes / 1024),
-                             static_cast<unsigned long long>(rate / 1024),
-                             static_cast<unsigned long long>(snap.total_bytes / 1024));
+                std::fprintf(
+                    fp, "%-*s  %*llu  %*llu  %12.2f  %8.2f  %10.2f  %9.2f\n", static_cast<int>(name_w),
+                    bandwidths_[i]->name().c_str(), static_cast<int>(cw), static_cast<unsigned long long>(snap.count),
+                    static_cast<int>(tw), static_cast<unsigned long long>(tps), static_cast<double>(avg_size) / 1024.0,
+                    static_cast<double>(snap.max_bytes) / 1024.0, static_cast<double>(rate) / (1024.0 * 1024.0),
+                    static_cast<double>(snap.total_bytes) / (1024.0 * 1024.0));
+            }
+        }
+    }
+
+    // Counters
+    if (!counters_.empty()) {
+        auto                                              idx = sorted_indices(counters_);
+        std::vector<std::pair<size_t, Counter::Snapshot>> active;
+        for (size_t i : idx) {
+            auto snap = counters_[i]->flush();
+            if (snap.count > 0) {
+                active.emplace_back(i, snap);
+            }
+        }
+        if (!active.empty()) {
+            std::fprintf(fp, "%-*s  %*s  %*s  %8s\n", static_cast<int>(name_w), "", static_cast<int>(cw), "count",
+                         static_cast<int>(tw), "tps(/s)", "total");
+            for (const auto &[i, snap] : active) {
+                double tps_d = static_cast<double>(snap.count) / window_secs;
+                auto   tps   = static_cast<uint64_t>(tps_d);
+                std::fprintf(fp, "%-*s  %*llu  %*llu  %8llu\n", static_cast<int>(name_w), counters_[i]->name().c_str(),
+                             static_cast<int>(cw), static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
+                             static_cast<unsigned long long>(tps), static_cast<unsigned long long>(snap.total));
             }
         }
     }

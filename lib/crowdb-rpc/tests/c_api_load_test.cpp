@@ -175,8 +175,11 @@ TEST(CApiLoadTest, MultiWorkerOneshotSharedTransport)
     }
 
     crowdb_rpc_client_destroy(client);
-    // Connections are owned by the transport; the crowdb_rpc_conn_s
-    // wrappers are intentionally leaked (no crowdb_rpc_conn_destroy API).
+    // Destroy connection wrappers before the server stops so the
+    // shared_ptr<Connection> refs are released cleanly.
+    for (auto &c : conns) {
+        crowdb_rpc_conn_destroy(c);
+    }
     crowdb_rpc_server_stop(server);
     crowdb_rpc_server_destroy(server);
     crowdb_rpc_pool_destroy(pool);

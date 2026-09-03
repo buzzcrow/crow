@@ -22,7 +22,7 @@ use crowdb_diskdb::recovery::ZoneLoader;
 use crowdb_diskdb::scanner::{ScanState, ScannerTask};
 use crowdb_diskdb::service::DiskdbRpcService;
 use crowdb_kv_client::{
-    ClientConfig, CrowdbClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient,
+    ClientConfig, CrowdbKvClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient,
 };
 use tracing::info;
 
@@ -42,26 +42,99 @@ struct Cli {
     #[arg(long)]
     http_addr: Option<String>,
 
+    /// crowdb-rpc listener address (overrides config `rpc_listen_addr`).
+    #[arg(long)]
+    rpc_listen_addr: Option<String>,
+
+    /// Main listener port (overrides the port in config `listen_addr`).
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    listen_port: Option<u16>,
+
+    /// HTTP management port (overrides the port in config `http_listen_addr`).
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    http_port: Option<u16>,
+
+    /// crowdb-rpc listener port (overrides the port in config `rpc_listen_addr`).
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    rpc_port: Option<u16>,
+
     /// Number of crowdb-rpc I/O worker threads. Default: 2.
     #[arg(long, default_value_t = 2)]
     rpc_workers: u32,
+
+    /// Log directory. Default: "log" (relative to CWD).
+    #[arg(long)]
+    log_dir: Option<String>,
+
+    /// Log level for both Rust and C++ stacks. Default: "info"
+    /// (or derived from `RUST_LOG`).
+    #[arg(long)]
+    log_level: Option<String>,
+
+    /// Max log file size in MiB before rotation. Default: 30.
+    #[arg(long, default_value_t = crowdb_common::logging::DEFAULT_LOG_MAX_FILE_MB)]
+    log_max_file_mb: usize,
+
+    /// Number of rotated log files to keep. Default: 5.
+    #[arg(long, default_value_t = crowdb_common::logging::DEFAULT_LOG_MAX_FILES)]
+    log_max_files: usize,
+
+    /// Also print logs to console (in addition to file logging).
+    #[arg(short = 'l', long)]
+    log: bool,
+
+    /// Mirror C++ log lines at this level or above to stderr.
+    #[arg(long)]
+    log_stderr: Option<String>,
 }
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() {
     let args = Cli::parse();
+
+    let log_dir = args.log_dir.clone().unwrap_or_else(|| "log".to_string());
+    let cpp_level = args
+        .log_level
+        .clone()
+        .unwrap_or_else(|| crowdb_common::logging::cpp_level_from_rust_log("info"));
+
     // Layered logging: INFO+ to rotating file, WARN+ to console.
     // RUST_LOG overrides both sinks for debugging.
-    let _log_guards = crowdb_common::logging::init_file_and_console_logging_split(
-        "log",
-        "crowdb-diskdb",
-        crowdb_common::logging::DEFAULT_LOG_MAX_FILE_MB,
-        crowdb_common::logging::DEFAULT_LOG_MAX_FILES,
-        "info",
-        "warn",
-    )
-    .expect("failed to initialize crowdb-diskdb logging");
+    let _log_guards = if args.log {
+        crowdb_common::logging::init_file_and_console_logging_split(
+            &log_dir,
+            "crowdb-diskdb",
+            args.log_max_file_mb,
+            args.log_max_files,
+            "info",
+            "warn",
+        )
+        .expect("failed to initialize crowdb-diskdb logging")
+    } else {
+        crowdb_common::logging::init_file_logging(
+            &log_dir,
+            "crowdb-diskdb",
+            args.log_max_file_mb,
+            args.log_max_files,
+            "info",
+        )
+        .expect("failed to initialize crowdb-diskdb logging")
+    };
+
+    // Initialize the crowdb-rpc C++ spdlog logger (connection failures,
+    // transport errors). No-op when the build has no spdlog.
+    crowdb_rpc_ffi::init_logging(
+        &log_dir,
+        &cpp_level,
+        args.log_max_file_mb,
+        args.log_max_files,
+        "crowdb-diskdb-rpc",
+    );
+
+    if let Some(ref stderr_level) = args.log_stderr {
+        crowdb_rpc_ffi::add_log_stderr(stderr_level);
+    }
 
     let config = load_config(&args);
     // `load_from_file` already validates, but CLI overrides may
@@ -107,9 +180,9 @@ async fn main() {
     // leader and data-group leaders are discovered lazily via the
     // kv-server HTTP management API seeds from config — no pre-seeding.
     // One client is shared across all service classes (hardware,
-    // service-registry, data-group) since `CrowdbClient` is fully
+    // service-registry, data-group) since `CrowdbKvClient` is fully
     // interior-mutable; each service class takes it via `from_shared`.
-    let kv_client = Arc::new(CrowdbClient::new(ClientConfig::new(
+    let kv_client = Arc::new(CrowdbKvClient::new(ClientConfig::new(
         config.load().server.kv_server_mgmt_seeds.clone(),
     )));
     let (sys_store, sys_group) = kv_client.system_group();
@@ -390,6 +463,27 @@ fn load_config(args: &Cli) -> DdbConfig {
     if let Some(addr) = &args.http_addr {
         config.server.http_listen_addr.clone_from(addr);
     }
+    if let Some(addr) = &args.rpc_listen_addr {
+        config.server.rpc_listen_addr.clone_from(addr);
+    }
+    if let Some(port) = args.listen_port {
+        config.server.listen_addr = replace_port(&config.server.listen_addr, port);
+    }
+    if let Some(port) = args.http_port {
+        config.server.http_listen_addr = replace_port(&config.server.http_listen_addr, port);
+    }
+    if let Some(port) = args.rpc_port {
+        config.server.rpc_listen_addr = replace_port(&config.server.rpc_listen_addr, port);
+    }
 
     config
+}
+
+/// Replace the port portion of a `host:port` address string.
+fn replace_port(addr: &str, port: u16) -> String {
+    if let Some(idx) = addr.rfind(':') {
+        format!("{}:{port}", &addr[..idx])
+    } else {
+        format!("0.0.0.0:{port}")
+    }
 }

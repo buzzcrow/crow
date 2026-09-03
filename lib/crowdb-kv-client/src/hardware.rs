@@ -5,7 +5,7 @@
 
 //! [`HardwareClient`]: group-0 hardware hierarchy + per-disk-group maps.
 //!
-//! Wraps a [`CrowdbClient`] pinned to group 0 (store 0, group 0). All
+//! Wraps a [`CrowdbKvClient`] pinned to group 0 (store 0, group 0). All
 //! keys are text-path keys (see `design-crowdb-protocol-key.md` §5.2); all values
 //! are JSON-encoded proto `*Value` types from `crowdb-protocol`.
 //!
@@ -29,7 +29,7 @@ use crowdb_protocol::key::{
 use crowdb_protocol::sysdata::{DiskGroupEntry, DiskdbOwnerEntry, KVGroupBindEntry};
 
 use crate::client::{GetOutcome, ScanOutcome};
-use crate::{CrowdbClient, Error, Result};
+use crate::{CrowdbKvClient, Error, Result};
 
 /// Group-0 store/group IDs (the system group).
 const G0_STORE: u64 = 0;
@@ -114,12 +114,12 @@ pub struct HardwareCapacitySummary {
 /// Client for the hardware hierarchy and per-disk-group maps in
 /// group 0.
 ///
-/// All methods target store 0, group 0. The wrapped `CrowdbClient`
+/// All methods target store 0, group 0. The wrapped `CrowdbKvClient`
 /// must have its topology seeded with a group-0 leader endpoint
 /// (via `seed_leader(0, 0, endpoint)` or `/topology` discovery).
 #[derive(Clone)]
 pub struct HardwareClient {
-    kv: Arc<CrowdbClient>,
+    kv: Arc<CrowdbKvClient>,
 }
 
 fn now_ms() -> u64 {
@@ -130,7 +130,7 @@ fn now_ms() -> u64 {
 
 // ── helpers ─────────────────────────────────────────────────────
 
-async fn put_json<T: serde::Serialize>(kv: &CrowdbClient, key: &str, value: &T) -> Result<()> {
+async fn put_json<T: serde::Serialize>(kv: &CrowdbKvClient, key: &str, value: &T) -> Result<()> {
     let payload = serde_json::to_vec(value).map_err(|e| Error::SysdataDecode {
         key: key.to_string(),
         reason: e.to_string(),
@@ -140,7 +140,7 @@ async fn put_json<T: serde::Serialize>(kv: &CrowdbClient, key: &str, value: &T) 
         .map(|_| ())
 }
 
-async fn get_json<T: serde::de::DeserializeOwned>(kv: &CrowdbClient, key: &str) -> Result<Option<T>> {
+async fn get_json<T: serde::de::DeserializeOwned>(kv: &CrowdbKvClient, key: &str) -> Result<Option<T>> {
     match kv
         .get(
             G0_STORE,
@@ -163,7 +163,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(kv: &CrowdbClient, key: &str) 
 }
 
 pub(crate) async fn scan_prefix<T: serde::de::DeserializeOwned>(
-    kv: &CrowdbClient,
+    kv: &CrowdbKvClient,
     prefix: &str,
 ) -> Result<Vec<(String, T)>> {
     let mut out: Vec<(String, T)> = Vec::new();
@@ -212,27 +212,27 @@ pub(crate) async fn scan_prefix<T: serde::de::DeserializeOwned>(
 // ── rack ────────────────────────────────────────────────────────
 
 impl HardwareClient {
-    /// Wrap a `CrowdbClient` for group-0 hardware access.
+    /// Wrap a `CrowdbKvClient` for group-0 hardware access.
     #[must_use]
-    pub fn new(kv: CrowdbClient) -> Self {
+    pub fn new(kv: CrowdbKvClient) -> Self {
         Self { kv: Arc::new(kv) }
     }
 
-    /// Wrap an already-shared `CrowdbClient` for group-0 hardware access.
+    /// Wrap an already-shared `CrowdbKvClient` for group-0 hardware access.
     #[must_use]
-    pub fn from_shared(kv: Arc<CrowdbClient>) -> Self {
+    pub fn from_shared(kv: Arc<CrowdbKvClient>) -> Self {
         Self { kv }
     }
 
-    /// Access the underlying `CrowdbClient`.
+    /// Access the underlying `CrowdbKvClient`.
     #[must_use]
-    pub fn kv(&self) -> &CrowdbClient {
+    pub fn kv(&self) -> &CrowdbKvClient {
         &self.kv
     }
 
-    /// Access the underlying `CrowdbClient` as a shared `Arc`.
+    /// Access the underlying `CrowdbKvClient` as a shared `Arc`.
     #[must_use]
-    pub fn shared_kv(&self) -> Arc<CrowdbClient> {
+    pub fn shared_kv(&self) -> Arc<CrowdbKvClient> {
         Arc::clone(&self.kv)
     }
 

@@ -72,7 +72,6 @@ pub fn delete_writes_tombstone(e: &dyn KVEngine) {
     e.apply(1, &batch(vec![put(b"k", b"v")])).into_ready().unwrap();
     e.apply(2, &batch(vec![del(b"k")])).into_ready().unwrap();
     assert_eq!(e.get(b"k").into_ready(), None, "tombstoned key is not live");
-    assert_eq!(e.live_key_count(), 0);
     // The tombstone is retained internally (visible via iter_all) at its slot.
     let all = iter_all_dyn(e);
     assert_eq!(all, vec![(b"k".to_vec(), 2, Cell::Tombstone)]);

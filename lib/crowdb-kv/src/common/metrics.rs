@@ -21,7 +21,7 @@
 //!
 //! - `rpc_count`: successful RPCs.
 //! - `err_count`: failed RPCs (transport / quorum / paxos rejection).
-//! - `last_rtt_ms`: most recent successful round-trip latency in ms; 0 if no
+//! - `last_rtt_ns`: most recent successful round-trip latency in ns; 0 if no
 //!   successful RPC has been recorded.
 //!
 //! Future fields (deferred to V2): `bytes_in`, `bytes_out`, `tps_window`.
@@ -34,7 +34,7 @@ pub(crate) use crowdb_protocol::mgmt::MetricsSnapshot;
 pub(crate) struct LayerMetrics {
     rpc_count: AtomicU64,
     err_count: AtomicU64,
-    last_rtt_ms: AtomicU64,
+    last_rtt_ns: AtomicU64,
 }
 
 impl LayerMetrics {
@@ -43,10 +43,10 @@ impl LayerMetrics {
         Self::default()
     }
 
-    /// Record a successful RPC and its observed latency (rounded to ms).
-    pub(crate) fn record_ok(&self, rtt_ms: u64) {
+    /// Record a successful RPC and its observed latency (nanoseconds).
+    pub(crate) fn record_ok(&self, rtt_ns: u64) {
         self.rpc_count.fetch_add(1, Ordering::Relaxed);
-        self.last_rtt_ms.store(rtt_ms, Ordering::Relaxed);
+        self.last_rtt_ns.store(rtt_ns, Ordering::Relaxed);
     }
 
     /// Record a failed RPC.
@@ -60,7 +60,7 @@ impl LayerMetrics {
         MetricsSnapshot {
             rpc_count: self.rpc_count.load(Ordering::Relaxed),
             err_count: self.err_count.load(Ordering::Relaxed),
-            last_rtt_ms: self.last_rtt_ms.load(Ordering::Relaxed),
+            last_rtt_ms: self.last_rtt_ns.load(Ordering::Relaxed) / 1_000_000,
         }
     }
 }

@@ -31,9 +31,18 @@ use crowdb_kv_server::store_registry::KvStoreRegistry;
 async fn main() {
     let args = Cli::parse();
 
+    // Resolve log directory: --log-dir > config.log_dir > "log".
+    let log_dir = args.log_dir.clone().unwrap_or_else(|| "log".to_string());
+
+    // Derive C++ log level: --log-level > RUST_LOG first global > "info".
+    let cpp_level = args
+        .log_level
+        .clone()
+        .unwrap_or_else(|| crowdb_common::logging::cpp_level_from_rust_log("info"));
+
     let _guards = if args.log {
         crowdb_common::logging::init_file_and_console_logging_split(
-            "log",
+            &log_dir,
             "crowdb-kv-server",
             args.log_max_file_mb,
             args.log_max_files,
@@ -43,7 +52,7 @@ async fn main() {
         .expect("failed to initialize crowdb-kv-server logging")
     } else {
         crowdb_kv::common::logging::init_file_logging(
-            "log",
+            &log_dir,
             "crowdb-kv-server",
             args.log_max_file_mb,
             args.log_max_files,
@@ -55,8 +64,8 @@ async fn main() {
     // This must happen before any Crowdbtree::open() so all engine instances
     // share one logger. No-op when the build has no spdlog.
     crowdb_tree_ffi::ct_init_logging(
-        "log",
-        "info",
+        &log_dir,
+        &cpp_level,
         args.log_max_file_mb,
         args.log_max_files,
         "crowdb-kv-server-tree",
@@ -66,32 +75,49 @@ async fn main() {
     // transport errors). Separate log files from the tree logger. No-op
     // when the build has no spdlog.
     crowdb_rpc_ffi::init_logging(
-        "log",
-        "info",
+        &log_dir,
+        &cpp_level,
         args.log_max_file_mb,
         args.log_max_files,
         "crowdb-kv-server-rpc",
     );
 
+    // Optional err-to-stderr mirror for the C++ stacks.
+    if let Some(ref stderr_level) = args.log_stderr {
+        crowdb_tree_ffi::ct_add_log_stderr(stderr_level);
+        crowdb_rpc_ffi::add_log_stderr(stderr_level);
+    }
+
     info!("crowdb-kv-server starting...");
 
     // Metrics runner: periodic flush to a dedicated metrics log file.
-    let mut metrics_runner =
-        create_metrics_runner(args.metrics_interval, args.log_max_file_mb, args.log_max_files);
-
-    info!(
-        stores = ?args.stores.as_deref(),
-        groups = ?args.groups.as_deref(),
-        replica = args.replica,
-        ports = ?args.ports.as_deref(),
-        management_addr = %args.management_addr,
-        management_port = args.management_port,
-        election_profile = %args.election_profile,
-        kv_backend = %args.kv_backend,
-        wal_backend = %args.wal_backend,
-        max_inflight = args.max_inflight,
-        "parsed CLI arguments"
+    let mut metrics_runner = create_metrics_runner(
+        args.metrics_interval,
+        &log_dir,
+        args.log_max_file_mb,
+        args.log_max_files,
     );
+
+    info!("server config:");
+    info!("  stores              {:?}", args.stores.as_deref());
+    info!("  groups              {:?}", args.groups.as_deref());
+    info!("  replica             {}", args.replica);
+    info!("  ports               {:?}", args.ports.as_deref());
+    info!("  management_addr     {}", args.management_addr);
+    info!("  management_port     {}", args.management_port);
+    info!("  election_profile    {}", args.election_profile);
+    info!("  kv_backend          {}", args.kv_backend);
+    info!("  wal_backend         {}", args.wal_backend);
+    info!("  max_inflight        {}", args.max_inflight);
+    info!("  coalesce_max_keys   {:?}", args.coalesce_max_keys);
+    info!("  coalesce_drain_threshold {:?}", args.coalesce_drain_threshold);
+    info!("  peer_pool_size      {}", args.peer_pool_size);
+    info!("  event_write         {}", args.event_write);
+    info!("  enable_nagle        {}", args.enable_nagle);
+    info!("  quickack            {}", args.quickack);
+    info!("  send_queue_capacity {}", args.send_queue_capacity);
+    info!("  rpc_workers         {}", args.rpc_workers);
+    info!("  no_fsync            {}", args.no_fsync);
 
     let bootstrap = parse_and_validate_cli_args(&args);
 
@@ -297,6 +323,7 @@ async fn main() {
             crowdb_kv_server::binding_monitor_wiring::spawn_chunkdb_binding_monitor(
                 &registry,
                 group0_ep,
+                format!("http://{display_addr}"),
                 args.binding_monitor_interval,
             ),
         )
@@ -341,12 +368,17 @@ async fn main() {
 
 /// Create a metrics runner if interval > 0, else None. Does NOT start
 /// the runner — call `start()` after wiring collectors.
-fn create_metrics_runner(interval_secs: u64, max_file_mb: usize, max_files: usize) -> Option<MetricsRunner> {
+fn create_metrics_runner(
+    interval_secs: u64,
+    log_dir: &str,
+    max_file_mb: usize,
+    max_files: usize,
+) -> Option<MetricsRunner> {
     if interval_secs == 0 {
         return None;
     }
     let metrics_file =
-        crowdb_kv::common::logging::open_metrics_log("log", "crowdb-kv-server", max_file_mb, max_files)
+        crowdb_kv::common::logging::open_metrics_log(log_dir, "crowdb-kv-server", max_file_mb, max_files)
             .expect("failed to open metrics log file");
     let runner = MetricsRunner::new(metrics_file, interval_secs);
     Some(runner)
@@ -442,7 +474,7 @@ async fn create_and_start_stores(
     for (i, &store_id) in store_ids.iter().enumerate() {
         // Port priority: explicit CLI port > persisted config file > OS-assigned (0).
         let port = if ports[i] > 0 {
-            ports[i]
+            registry.next_port().unwrap_or(ports[i])
         } else {
             persisted_port_for_store(&registry.config.config_root, store_id)
                 .await

@@ -24,6 +24,7 @@ dirs = "5"
 russh = "0.45"
 async-trait = "0.1"
 crowdb-protocol = { path = "../crowdb-protocol" }
+crowdb-kv-client = { path = "../crowdb-kv-client" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }
@@ -33,4 +34,4 @@ axum = "0.7"
 # `crowdb-kv-client` crate end-to-end instead).
 crowdb-kv-client = { path = "../crowdb-kv-client" }
 crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi", features = ["test-util"] }
-crowdb-test-harness = { path = "../crowdb-test-harness" }
+crowdb-test-harness = { path = "../crowdb-test-harness", features = ["kv-client"] }

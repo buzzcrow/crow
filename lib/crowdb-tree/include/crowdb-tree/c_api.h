@@ -132,6 +132,7 @@ void      ct_flush_logging();
 void      ct_shutdown_logging();
 ct_status ct_snapshot(ct_tree *t, uint64_t *out_last_applied);
 uint64_t  ct_last_applied_slot(const ct_tree *t);
+size_t    ct_frozen_table_count(const ct_tree *t);
 // gc_slot = min(snapshot_slot, safe_slot); see crowdb::tree::set_gc_watermark.
 void ct_set_gc_watermark(ct_tree *t, uint64_t snapshot_slot, uint64_t safe_slot);
 // Explicit in-memory tombstone-retention sweep (crowdb::tree::collect_garbage);

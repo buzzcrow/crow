@@ -77,12 +77,93 @@ async fn prepare_rejection_blocks_low_ballot_until_retry_uses_higher_ballot() {
     cluster.shutdown().await;
 }
 
-// The unary `Accept` boundary-rejection test relied on the retired
-// tonic `PxService::accept` RPC returning `tonic::Code::Unimplemented`.
-// Unary Accept is gone (proposers use the LearnerStream bidi path), and
-// the tonic client no longer exists, so this needs a crowdb-rpc rewrite
-// against the bidi stream's `handle_accept_inner` validation. Tracked
-// for a follow-up migration.
+// R120: The server's `PxRpcService::handle_accept` rejects malformed
+// `EAcceptRequest` frames with `FBKvRetCode::InvalidArgument` via
+// `submit_error`. Two rejection paths exist: (1) the flatbuffer root
+// parse fails (`flatbuffers::root::<FBAcceptRequest>` returns Err), and
+// (2) the `value` field is missing (`fb_req.value()` returns None). This
+// test exercises both paths and asserts the server returns an error
+// response without panicking.
 #[tokio::test]
-#[ignore = "needs migration to crowdb-rpc LearnerStream accept path"]
-async fn malformed_accept_request_is_rejected_by_rpc_boundary() {}
+async fn malformed_accept_request_is_rejected_by_rpc_boundary() {
+    use crowdb_protocol::fb_wrappers::kv_consensus::FBAcceptedResponseRef;
+    use crowdb_protocol::kv_consensus_fb::{
+        FBAcceptRequest, FBAcceptRequestArgs, FBKvRetCode, FBPrepareRequest, FBPrepareRequestArgs,
+    };
+    use flatbuffers::FlatBufferBuilder;
+
+    let cluster = start_cluster(&[0, 1], 0).await;
+    let leader = cluster.leader();
+    let client = cluster.px_client(leader).await;
+
+    // 1. Wrong table type: build a valid `FBPrepareRequest` flatbuffer
+    //    and send it with `msg_type = EAcceptRequest`. The handler's
+    //    `flatbuffers::root::<FBAcceptRequest>` verification fails because
+    //    the vtable layout doesn't match.
+    let mut builder = FlatBufferBuilder::new();
+    let args = FBPrepareRequestArgs {
+        id: 1,
+        rpc_create_nano: 0,
+        version: 1,
+        slot: 1,
+        round: 1,
+        leader_id: 0,
+        term: 0,
+        group_id: 1,
+        membership_epoch: 0,
+    };
+    let req = FBPrepareRequest::create(&mut builder, &args);
+    builder.finish(req, None);
+    let wrong_type_bytes = builder.finished_data().to_vec();
+
+    let resp = client
+        .send_raw_accept(wrong_type_bytes)
+        .await
+        .expect("raw accept RPC should complete (server must not panic)");
+
+    let r = FBAcceptedResponseRef::new(&resp);
+    assert!(
+        !r.valid() || r.ret_code() != FBKvRetCode::Success,
+        "server must reject wrong-type Accept frame, got valid={} ret_code={:?}",
+        r.valid(),
+        r.ret_code()
+    );
+
+    // 2. Missing required field: build a valid `FBAcceptRequest` with
+    //    `value = None`. The handler parses it successfully but rejects
+    //    it at the `fb_req.value()` guard with `InvalidArgument`.
+    let mut builder = FlatBufferBuilder::new();
+    let args = FBAcceptRequestArgs {
+        id: 2,
+        rpc_create_nano: 0,
+        version: 1,
+        slot: 1,
+        round: 1,
+        leader_id: 0,
+        term: 0,
+        value: None,
+        client_id: 0,
+        seq: 0,
+        group_id: 1,
+        membership_epoch: 0,
+        dedup_tags: None,
+    };
+    let req = FBAcceptRequest::create(&mut builder, &args);
+    builder.finish(req, None);
+    let missing_value_bytes = builder.finished_data().to_vec();
+
+    let resp = client
+        .send_raw_accept(missing_value_bytes)
+        .await
+        .expect("raw accept RPC should complete (server must not panic)");
+
+    let r = FBAcceptedResponseRef::new(&resp);
+    assert!(
+        !r.valid() || r.ret_code() != FBKvRetCode::Success,
+        "server must reject missing-value Accept frame, got valid={} ret_code={:?}",
+        r.valid(),
+        r.ret_code()
+    );
+
+    cluster.shutdown().await;
+}

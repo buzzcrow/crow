@@ -8,7 +8,6 @@ export { AddGroupDialog } from './AddGroupDialog';
 export { AddReplicaDialog } from './AddReplicaDialog';
 export { AddDiskGroupDialog } from './AddDiskGroupDialog';
 export { AddDiskDialog } from './AddDiskDialog';
-export { MoveDiskDialog } from './MoveDiskDialog';
 export { AssignDiskGroupDialog } from './AssignDiskGroupDialog';
 export { DeployServerDialog } from './DeployServerDialog';
 export { DeployDiskdbDialog } from './DeployDiskdbDialog';

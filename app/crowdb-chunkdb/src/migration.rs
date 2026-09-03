@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crowdb_kv_client::{CrowdbClient, ReadMode, ScanOutcome};
+use crowdb_kv_client::{CrowdbKvClient, ReadMode, ScanOutcome};
 use crowdb_protocol::common::ChunkId;
 
 use crate::routing::{BindingCache, BucketBinding, MigrationState};
@@ -22,7 +22,7 @@ use crate::routing::{BindingCache, BucketBinding, MigrationState};
 /// Migration task — copies chunk records from old KV group to new
 /// KV group for a migrating bucket range.
 pub struct MigrationTask {
-    kv: Arc<CrowdbClient>,
+    kv: Arc<CrowdbKvClient>,
     binding: BucketBinding,
     /// Dwell time after copy completes before cleanup.
     dwell: Duration,
@@ -30,7 +30,7 @@ pub struct MigrationTask {
 
 impl MigrationTask {
     #[must_use]
-    pub fn new(kv: Arc<CrowdbClient>, binding: BucketBinding, dwell: Duration) -> Self {
+    pub fn new(kv: Arc<CrowdbKvClient>, binding: BucketBinding, dwell: Duration) -> Self {
         Self { kv, binding, dwell }
     }
 

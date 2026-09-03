@@ -424,8 +424,8 @@ impl PxGroup {
         }
 
         let read_state = self.read_handles.get().map(|h| ReadStateView {
-            lease_valid: h.lease_valid.snapshot(),
-            contiguous_applied: h.contiguous_applied.snapshot(),
+            lease_valid: u64::from(self.local_replica.lease_read_valid(std::time::Instant::now())),
+            contiguous_applied: self.local_replica.contiguous_applied(),
             safe_slot: h.safe_slot.snapshot(),
         });
 

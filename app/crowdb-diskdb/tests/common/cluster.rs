@@ -16,7 +16,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crowdb_diskdb::ddb_kv_client::DdbKvClient;
-use crowdb_kv_client::{ClientConfig, CrowdbClient, HardwareClient, RetryConfig, ServiceRegistryClient};
+use crowdb_kv_client::{ClientConfig, CrowdbKvClient, HardwareClient, RetryConfig, ServiceRegistryClient};
+use crowdb_protocol::port_alloc;
+use crowdb_protocol::ServicePort;
 use serde_json::Value;
 
 // ── process management ──────────────────────────────────────────
@@ -268,7 +270,7 @@ impl KvCluster {
     /// recover if the leader changes.
     #[must_use]
     pub fn make_ddb_kv_client(&self) -> DdbKvClient {
-        let kv = CrowdbClient::new(test_client_config(self.mgmt_endpoints.clone()));
+        let kv = CrowdbKvClient::new(test_client_config(self.mgmt_endpoints.clone()));
         kv.seed_leader(0, 1, self.group1_leader_endpoint.clone());
         DdbKvClient::new(kv)
     }
@@ -276,7 +278,7 @@ impl KvCluster {
     /// Build a `HardwareClient` seeded with the group-0 leader endpoint.
     #[must_use]
     pub fn make_hardware_client(&self) -> HardwareClient {
-        let kv = CrowdbClient::new(test_client_config(self.mgmt_endpoints.clone()));
+        let kv = CrowdbKvClient::new(test_client_config(self.mgmt_endpoints.clone()));
         kv.seed_leader(0, 0, self.group0_leader_endpoint.clone());
         HardwareClient::new(kv)
     }
@@ -284,7 +286,7 @@ impl KvCluster {
     /// Build a `ServiceRegistryClient` seeded with the group-0 leader.
     #[must_use]
     pub fn make_service_registry_client(&self) -> ServiceRegistryClient {
-        let kv = CrowdbClient::new(test_client_config(self.mgmt_endpoints.clone()));
+        let kv = CrowdbKvClient::new(test_client_config(self.mgmt_endpoints.clone()));
         kv.seed_leader(0, 0, self.group0_leader_endpoint.clone());
         ServiceRegistryClient::new(kv)
     }
@@ -316,6 +318,8 @@ async fn start_kv_node_with_groups(
     let bin = crowdb_kv_server_bin().ok_or_else(|| {
         std_io::Error::new(std_io::ErrorKind::NotFound, "crowdb-kv-server binary not found")
     })?;
+    let mgmt_port = port_alloc::alloc_test_port(ServicePort::KvServerMgmt);
+    let listen_port = port_alloc::alloc_test_port(ServicePort::KvServerListen);
     let mut cmd = Command::new(bin);
     cmd.args([
         "--root",
@@ -329,7 +333,9 @@ async fn start_kv_node_with_groups(
         "--management-addr",
         "127.0.0.1",
         "--management-port",
-        "0",
+        &mgmt_port.to_string(),
+        "--ports",
+        &listen_port.to_string(),
         "--election-profile",
         "e2e",
     ])

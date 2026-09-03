@@ -167,6 +167,21 @@ existing consensus logic on `PxLocalReplica`, and builds the response
 flatbuffer via `FlatBufferBuilder`. The response is submitted via
 `server.submit_response(conn_handle, &ctrl, None, msg_type, req_id)`.
 
+**Malformed-frame rejection:** when `flatbuffers::root` fails (wrong
+table type, corrupted bytes) or a required field is missing (e.g.
+`FBAcceptRequest.value` is `None`), the handler calls `submit_error`
+with `FBKvRetCode::InvalidArgument` before any consensus logic runs.
+`submit_error` builds a `FBPromiseResponse` buffer (shared by all error
+paths) and submits it with the response `msg_type`. The client's
+`send_*` method parses the response as the expected `FB<Type>ResponseRef`;
+since `FBPromiseResponse` has a different vtable layout, `valid()`
+returns `false` and the client maps it to
+`PxReplicaError::Internal("response malformed")`. Test coverage:
+`malformed_accept_request_is_rejected_by_rpc_boundary` in
+`paxos_error_test.rs` exercises both rejection paths (wrong table type +
+missing `value`) via the `test-util`-gated `send_raw_request` on
+`PxRpcTransport`.
+
 ---
 
 ## 5. Client-Side Transport (PxRpcTransport)
@@ -488,7 +503,7 @@ payload contract, out of scope).
   stream ordering
 - `design-crowdb-kv-slot.md` §5 — pipelined fanout and per-peer flow control
 - `design-crowdb-kv-observability.md` — write-path phase metrics
-  (`write.propose_e2e.l`, `write.prepare_phase.l`, `write.accept_phase.l`,
-  `write.accept_quorum_rpc.l`, `write.engine_apply.l`)
+  (`paxos.propose.e2e.l`, `paxos.classic.prepare.l`,
+  `paxos.accept.quorum_rpc.l`, `paxos.learn.apply.l`)
 - `design-crowdb-rpc.md` §6 — Flatbuffer Wrapper Convention
 - `design-crowdb-rpc-diskdb-migration.md` — R115's proven migration pattern

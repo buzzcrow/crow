@@ -2,13 +2,13 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { Suspense, useState, useCallback, useMemo, lazy, useEffect, useRef, type ReactNode } from 'react';
-import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive, Boxes, Move, CheckCircle2, XCircle, PowerOff, Wrench, AlertTriangle, EyeOff, HelpCircle } from 'lucide-react';
+import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive, Boxes, CheckCircle2, XCircle, PowerOff, Wrench, AlertTriangle, EyeOff, HelpCircle } from 'lucide-react';
 import type { CenterPanelMode } from './shell/Header';
-import { ViewModeProvider, useViewMode } from './contexts/ViewModeContext';
+import { DomainProvider, useDomain } from './contexts/DomainContext';
 import { SelectionProvider, useSelection } from './contexts/SelectionContext';
 import { ToastProvider, useToast } from './contexts/ToastContext';
 import { ActivityProvider, useActivity } from './contexts/ActivityContext';
-import { usePhysicalTree } from './data/usePhysicalTree';
+import { useClusterTree } from './data/useClusterTree';
 import { useLogicalTree } from './data/useLogicalTree';
 import { useCapacityTree } from './data/useCapacityTree';
 import { Header, ClusterHealth } from './shell/Header';
@@ -16,6 +16,7 @@ import { Sidebar } from './shell/Sidebar';
 import { ToastContainer } from './components/ToastContainer';
 import { TreeNode } from './components/Tree';
 import { ContextMenu, useContextMenu, MenuItemOrSeparator } from './components/ContextMenu';
+import { cn } from './utils/cn';
 import type { MenuTarget } from './topology/TopologyCanvas';
 import {
   AddRackDialog,
@@ -25,7 +26,6 @@ import {
   AddReplicaDialog,
   AddDiskGroupDialog,
   AddDiskDialog,
-  MoveDiskDialog,
   AssignDiskGroupDialog,
   DeployServerDialog,
   DeployDiskdbDialog,
@@ -33,7 +33,7 @@ import {
   InitClusterDialog,
   ZoneSelectDialog,
 } from './components/dialogs';
-import { ViewMode } from './types';
+import { Domain } from './types';
 import {
   removeRack,
   removeNode,
@@ -68,7 +68,6 @@ const TopologyCanvas = lazy(() =>
   import('./topology/TopologyCanvas').then((m) => ({ default: m.TopologyCanvas })),
 );
 const Inspector = lazy(() => import('./shell/Inspector').then((m) => ({ default: m.Inspector })));
-const SwaggerPanel = lazy(() => import('./panels/SwaggerPanel').then((m) => ({ default: m.SwaggerPanel })));
 const KvOperatorPanel = lazy(() => import('./panels/KvOperatorPanel').then((m) => ({ default: m.KvOperatorPanel })));
 const CapacityPanel = lazy(() => import('./panels/CapacityPanel').then((m) => ({ default: m.CapacityPanel })));
 
@@ -80,17 +79,15 @@ export interface CrowdbConsoleProps {
   /** Hide all mutating controls. */
   readonly?: boolean;
   /** Opt feature areas in/out. */
-  modules?: Partial<Record<'racks' | 'nodes' | 'stores' | 'groups' | 'replicas' | 'kv' | 'swagger' | 'activity', boolean>>;
-  /** Initial view mode (default Physical). */
-  initialViewMode?: ViewMode;
-  /** Pre-select a node for the Swagger panel. */
-  initialNodeId?: string;
+  modules?: Partial<Record<'racks' | 'nodes' | 'stores' | 'groups' | 'replicas' | 'kv' | 'activity', boolean>>;
+  /** Initial domain (default Cluster). */
+  initialDomain?: Domain;
   /** Structured event callback for host integration. */
   onEvent?: (event: { type: string; payload?: unknown }) => void;
 }
 
-function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNodeId = '', onEvent }: CrowdbConsoleProps) {
-  const { viewMode } = useViewMode();
+function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: CrowdbConsoleProps) {
+  const { domain } = useDomain();
   const { selectedEntity } = useSelection();
   const { success, error } = useToast();
   const { log } = useActivity();
@@ -120,7 +117,6 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     addReplica?: { storeId: string; groupId: string };
     addDiskGroup?: { nodeId: number };
     addDisk?: { nodeId: number; dgId: number };
-    moveDisk?: { diskId: string; rackId: number; nodeId: number; dgId: number };
     assignDiskGroup?: { rackId: number; nodeId: number; dgId: number; dgName?: string };
     deployServer?: { nodeId: number };
     deployDiskdb?: { nodeId: number } | null;
@@ -132,9 +128,9 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
 
   const { menuState, openMenu, closeMenu } = useContextMenu();
 
-  const physicalActive = viewMode === ViewMode.Physical;
-  const capacityActive = viewMode === ViewMode.Capacity;
-  const { racks, nodes, nodeStores, nodeHealthById, loading: physLoading, error: physError, refresh: refreshPhysical } = usePhysicalTree({
+  const physicalActive = domain === Domain.Cluster;
+  const capacityActive = domain === Domain.Chunk;
+  const { racks, nodes, nodeStores, nodeHealthById, nodeDiskGroups: clusterDiskGroups, loading: physLoading, error: physError, refresh: refreshPhysical } = useClusterTree({
     enabled: true,
     recursive: 2,
     pollIntervalActive: 1000,
@@ -146,11 +142,24 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     pollIntervalActive: 1000,
     pollIntervalInactive: 30000,
   });
-  const { instances: diskdbInstances, usage: capacityUsage, hardwareCapacity, scanStatus: capacityScanStatus, loading: capLoading, error: capError, refresh: refreshCapacity, nodeDiskGroups, fetchNodeDiskGroups } = useCapacityTree({
-    enabled: viewMode === ViewMode.Capacity || viewMode === ViewMode.Physical,
+  const { instances: diskdbInstances, usage: capacityUsage, hardwareCapacity, scanStatus: capacityScanStatus, loading: capLoading, error: capError, refresh: refreshCapacity, nodeDiskGroups: capNodeDiskGroups, fetchNodeDiskGroups } = useCapacityTree({
+    enabled: domain === Domain.Chunk || domain === Domain.Cluster,
     pollIntervalActive: 5000,
     pollIntervalInactive: 30000,
   });
+
+  // Merge disk-group maps: prefer cluster tree (fresh, all nodes), fall
+  // back to capacity tree (on-demand fetch for the Capacity panel).
+  const nodeDiskGroups = useMemo(() => {
+    const merged: Record<number, import('./data/useClusterTree').NodeDiskGroups> = {};
+    for (const [id, ndg] of Object.entries(capNodeDiskGroups)) {
+      merged[Number(id)] = ndg;
+    }
+    for (const [id, ndg] of Object.entries(clusterDiskGroups)) {
+      merged[Number(id)] = ndg;
+    }
+    return merged;
+  }, [capNodeDiskGroups, clusterDiskGroups]);
 
   const loading = physLoading || logLoading || capLoading;
   const dataError = physError || logError || capError;
@@ -383,11 +392,18 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             label: 'Delete Node',
             icon: <Trash2 className="tw-h-4 tw-w-4" />,
             destructive: true,
-            // Cascade: stop + remove all services before deleting the node.
+            // Cascade: the backend's DELETE /api/nodes/:id handler
+            // (http_remove_node) calls stop_and_remove_server_for_node
+            // which stops the KV process, removes the server entry, and
+            // purges topology — all before removing the node. Calling
+            // removeServer separately here would hit check_require_empty
+            // (which refuses if the node hosts group-0 replicas), blocking
+            // the cascade. So we only remove diskdb explicitly (no
+            // check_require_empty gate) and let removeNode handle the KV
+            // cascade.
             onSelect: () => requestDelete('Node', nodeId, async () => {
               await runMutation('Delete Node', t.label || t.id, async () => {
                 if (hasDiskdb) await removeDiskdb(nodeId);
-                if (hasServer) await removeServer(nodeId);
                 await removeNode(nodeId);
               });
             }),
@@ -445,7 +461,57 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           }
         }
       } else {
-        if (t.type === 'Store' && modules?.groups !== false) {
+        if (t.type === 'Server') {
+          // KV-domain server context menu: restart, stop, delete.
+          const nodeId = Number(p.node_id);
+          if (t.serviceType === 'diskdb') {
+            items.push({
+              id: 'ddb-restart',
+              label: 'Restart DiskDB',
+              icon: <RotateCw className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Restart DiskDB', t.label || t.id, () => restartDiskdb(nodeId)),
+            });
+            items.push({
+              id: 'ddb-stop',
+              label: 'Stop DiskDB',
+              icon: <Square className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Stop DiskDB', t.label || t.id, () => stopDiskdb(nodeId)),
+            });
+            items.push({ id: 's1', separator: true });
+            items.push({
+              id: 'del-ddb',
+              label: 'Delete DiskDB',
+              icon: <Trash2 className="tw-h-4 tw-w-4" />,
+              destructive: true,
+              onSelect: () => requestDelete('DiskDB', t.label || t.id, async () => {
+                await runMutation('Delete DiskDB', t.label || t.id, () => removeDiskdb(nodeId));
+              }),
+            });
+          } else {
+            items.push({
+              id: 'restart',
+              label: 'Restart CrowDB Storage',
+              icon: <RotateCw className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Restart CrowDB Storage', t.label || t.id, () => restartServer(nodeId)),
+            });
+            items.push({
+              id: 'stop',
+              label: 'Stop CrowDB Storage',
+              icon: <Square className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Stop CrowDB Storage', t.label || t.id, () => stopServer(nodeId)),
+            });
+            items.push({ id: 's1', separator: true });
+            items.push({
+              id: 'del-service',
+              label: 'Delete CrowDB Storage',
+              icon: <Trash2 className="tw-h-4 tw-w-4" />,
+              destructive: true,
+              onSelect: () => requestDelete('CrowDB Storage', t.label || t.id, async () => {
+                await runMutation('Delete CrowDB Storage', t.label || t.id, () => removeServer(nodeId));
+              }),
+            });
+          }
+        } else if (t.type === 'Store' && modules?.groups !== false) {
           items.push({
             id: 'add-group',
             label: 'Add Group',
@@ -549,6 +615,31 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             onSelect: () => setDialog((d) => ({ ...d, deployDiskdb: { nodeId } })),
           });
         }
+      } else if (t.type === 'Server') {
+        // Chunk-domain DDB server context menu: restart, stop, delete.
+        const nodeId = Number(p.node_id);
+        items.push({
+          id: 'ddb-restart',
+          label: 'Restart DiskDB',
+          icon: <RotateCw className="tw-h-4 tw-w-4" />,
+          onSelect: () => runMutation('Restart DiskDB', t.label || t.id, () => restartDiskdb(nodeId)),
+        });
+        items.push({
+          id: 'ddb-stop',
+          label: 'Stop DiskDB',
+          icon: <Square className="tw-h-4 tw-w-4" />,
+          onSelect: () => runMutation('Stop DiskDB', t.label || t.id, () => stopDiskdb(nodeId)),
+        });
+        items.push({ id: 's1', separator: true });
+        items.push({
+          id: 'del-ddb',
+          label: 'Delete DiskDB',
+          icon: <Trash2 className="tw-h-4 tw-w-4" />,
+          destructive: true,
+          onSelect: () => requestDelete('DiskDB', t.label || t.id, async () => {
+            await runMutation('Delete DiskDB', t.label || t.id, () => removeDiskdb(nodeId));
+          }),
+        });
       } else if (t.type === 'DiskGroup') {
         const dgId = Number(t.rawId);
         const dgNodeId = Number(p.node_id);
@@ -626,12 +717,6 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         });
         items.push({ id: 's3', separator: true });
         items.push({
-          id: 'move-disk',
-          label: 'Move Disk',
-          icon: <Move className="tw-h-4 tw-w-4" />,
-          onSelect: () => setDialog((d) => ({ ...d, moveDisk: { diskId, rackId: Number(p.rack_id), nodeId: diskNodeId, dgId: diskDgId } })),
-        });
-        items.push({
           id: 'del-disk',
           label: 'Delete Disk',
           icon: <Trash2 className="tw-h-4 tw-w-4" />,
@@ -683,19 +768,10 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
 
   const closeDialogs = useCallback(() => setDialog({}), []);
 
-  const swaggerEnabled = modules?.swagger !== false;
   const kvEnabled = modules?.kv !== false;
 
   const rackIds = useMemo(() => racks.map((r) => r.id), [racks]);
   const nodeIds = useMemo(() => nodes.map((n) => n.id), [nodes]);
-  const serverBackedNodeIds = useMemo(() => new Set(serverNodeIds), [serverNodeIds]);
-  const apiTargetNodeId = useMemo(() => {
-    if (selectedEntity?.type === 'Node' && serverBackedNodeIds.has(Number(selectedEntity.id))) return Number(selectedEntity.id);
-    const selectedParentNodeId = selectedEntity?.parentIds?.node_id;
-    if (selectedParentNodeId != null && serverBackedNodeIds.has(Number(selectedParentNodeId))) return Number(selectedParentNodeId);
-    if (initialNodeId && serverBackedNodeIds.has(Number(initialNodeId))) return Number(initialNodeId);
-    return servers[0]?.node_id ?? 0;
-  }, [initialNodeId, selectedEntity, serverBackedNodeIds, servers]);
 
   const defaultAddNodeRackId = useMemo(() => {
     if (dialog.addNode?.rackId) return dialog.addNode.rackId;
@@ -824,15 +900,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         clusterHealth={clusterHealth}
         onRefresh={handleRefresh}
         refreshing={refreshing}
-        apiTargetNodeId={String(apiTargetNodeId)}
-        showSwagger={swaggerEnabled}
-        swaggerActive={centerPanel === 'swagger'}
-        onToggleSwagger={() => setCenterPanel((p) => (p === 'swagger' ? 'topology' : 'swagger'))}
-        showKV={kvEnabled}
-        kvActive={centerPanel === 'kv'}
-        onToggleKV={() => setCenterPanel((p) => (p === 'kv' ? 'topology' : 'kv'))}
-        centerPanel={centerPanel}
         onShowTopology={() => setCenterPanel('topology')}
+        onShowCapacity={() => setCenterPanel('capacity')}
         onResetCluster={readonly ? undefined : handleResetCluster}
       />
 
@@ -880,12 +949,61 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           marginRight: selectedEntity ? inspectorWidth : 0,
         }}
       >
+        {/* Per-domain center-panel tab bar / toggle */}
+        {domain === Domain.KV && kvEnabled && (
+          <div className="tw-flex tw-items-center tw-gap-1 tw-px-4 tw-py-1.5 tw-border-b tw-border-border tw-bg-panel">
+            <button
+              data-testid="kv-tab-cluster"
+              onClick={() => setCenterPanel('topology')}
+              className={cn(
+                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
+                centerPanel === 'topology' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+              )}
+              aria-pressed={centerPanel === 'topology'}
+            >
+              Cluster
+            </button>
+            <button
+              data-testid="kv-tab-kv"
+              onClick={() => setCenterPanel('kv')}
+              className={cn(
+                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
+                centerPanel === 'kv' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+              )}
+              aria-pressed={centerPanel === 'kv'}
+            >
+              KV
+            </button>
+          </div>
+        )}
+        {domain === Domain.Chunk && (
+          <div className="tw-flex tw-items-center tw-gap-1 tw-px-4 tw-py-1.5 tw-border-b tw-border-border tw-bg-panel">
+            <button
+              data-testid="chunk-tab-capacity"
+              onClick={() => setCenterPanel('capacity')}
+              className={cn(
+                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
+                centerPanel === 'capacity' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+              )}
+              aria-pressed={centerPanel === 'capacity'}
+            >
+              Capacity
+            </button>
+            <button
+              data-testid="chunk-tab-chunk"
+              onClick={() => setCenterPanel('chunk')}
+              className={cn(
+                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
+                centerPanel === 'chunk' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+              )}
+              aria-pressed={centerPanel === 'chunk'}
+            >
+              Chunk
+            </button>
+          </div>
+        )}
         <Suspense fallback={<BodyFallback />}>
-          {centerPanel === 'swagger' && swaggerEnabled ? (
-            <SwaggerPanel nodeId={apiTargetNodeId} apiPrefix={apiPrefix} servers={servers} />
-          ) : centerPanel === 'kv' && kvEnabled ? (
-            <KvOperatorPanel stores={stores} selectedEntity={selectedEntity} readonly={readonly} backendError={!!dataError} loading={loading} />
-          ) : capacityActive ? (
+          {domain === Domain.Chunk && centerPanel === 'capacity' ? (
             <CapacityPanel
               instances={diskdbInstances}
               usage={capacityUsage}
@@ -896,6 +1014,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
               onRefresh={refreshCapacity}
               selectedEntity={selectedEntity}
             />
+          ) : domain === Domain.KV && centerPanel === 'kv' && kvEnabled ? (
+            <KvOperatorPanel stores={stores} selectedEntity={selectedEntity} readonly={readonly} backendError={!!dataError} loading={loading} />
           ) : (
             <TopologyCanvas
               racks={racks}
@@ -906,6 +1026,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
               nodeHealthById={nodeHealthById}
               diskdbNodeIds={diskdbNodeIds}
               diskdbInstances={diskdbInstances}
+              nodeDiskGroups={nodeDiskGroups}
               refreshToken={lastRefreshTime.getTime()}
               focusRequest={canvasFocusRequest}
               onEntityContextMenu={onCanvasContextMenu}
@@ -1042,21 +1163,6 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           onSuccess={handleRefresh}
         />
       )}
-      {dialog.moveDisk && (
-        <MoveDiskDialog
-          isOpen
-          onClose={closeDialogs}
-          diskId={dialog.moveDisk.diskId}
-          currentRackId={dialog.moveDisk.rackId}
-          currentNodeId={dialog.moveDisk.nodeId}
-          currentDgId={dialog.moveDisk.dgId}
-          racks={racks}
-          diskGroupsByNode={Object.fromEntries(
-            Object.entries(nodeDiskGroups).map(([k, v]) => [Number(k), v.diskGroups])
-          )}
-          onSuccess={handleRefresh}
-        />
-      )}
       {dialog.assignDiskGroup && (
         <AssignDiskGroupDialog
           isOpen
@@ -1134,7 +1240,7 @@ function BodyFallback() {
 
 export default function App(props: CrowdbConsoleProps = {}) {
   return (
-    <ViewModeProvider initialViewMode={props.initialViewMode}>
+    <DomainProvider initialDomain={props.initialDomain}>
       <SelectionProvider>
         <ToastProvider>
           <ActivityProvider>
@@ -1142,6 +1248,6 @@ export default function App(props: CrowdbConsoleProps = {}) {
           </ActivityProvider>
         </ToastProvider>
       </SelectionProvider>
-    </ViewModeProvider>
+    </DomainProvider>
   );
 }

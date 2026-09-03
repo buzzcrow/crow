@@ -66,7 +66,7 @@ impl PxGroup {
     /// exercise engine-snapshot / GC-watermark / WAL-GC wiring
     /// deterministically.
     pub async fn run_maintenance_pass_for_tests(&self) {
-        crate::cluster::group_maintenance::run_pass(self).await;
+        crate::cluster::group_maintenance::run_pass(self, true).await;
     }
 
     /// Install a one-shot gate that holds the next `ReadIndex` heartbeat

@@ -398,6 +398,11 @@ uint64_t ct_last_applied_slot(const ct_tree *t)
     return t == nullptr ? 0 : t->tree->last_applied_slot();
 }
 
+size_t ct_frozen_table_count(const ct_tree *t)
+{
+    return t == nullptr ? 0 : t->tree->frozen_table_count();
+}
+
 void ct_set_gc_watermark(ct_tree *t, uint64_t snapshot_slot, uint64_t safe_slot)
 {
     if (t != nullptr) {
@@ -504,9 +509,9 @@ void ct_negotiate_widths(const ct_tree *t, ct_column_widths input, ct_column_wid
     if (out == nullptr) {
         return;
     }
-    // C++ preferred column widths: count=5, tps=7.
+    // C++ preferred column widths: count=7, tps=7.
     // If t is null or no registry, just echo back C++ defaults.
-    out->count_w = 5;
+    out->count_w = 7;
     out->tps_w   = 7;
     (void)t;
     (void)input;

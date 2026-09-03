@@ -5,7 +5,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import { cn } from '../utils/cn';
 import { useSelection } from '../contexts/SelectionContext';
-import { useViewMode } from '../contexts/ViewModeContext';
+import { useDomain } from '../contexts/DomainContext';
 import { HealthBadge, RoleBadge, HwStatusBadge } from './ui/Badge';
 
 export interface TreeNode {
@@ -52,15 +52,15 @@ function TreeNodeComponent({
   onNodeContextMenu,
 }: TreeNodeProps) {
   const { isSelected, selectEntity } = useSelection();
-  const { viewMode } = useViewMode();
+  const { domain } = useDomain();
   const hasChildren = !!node.children && node.children.length > 0;
   const isExpanded = expandedIds.has(node.id);
   const entityId = node.rawId ?? node.id;
   const isNodeSelected = isSelected(String(entityId));
 
   const select = useCallback(() => {
-    selectEntity({ type: node.type, id: String(entityId), name: node.label, parentIds: node.parentIds, viewMode, serviceType: node.serviceType });
-  }, [node, entityId, selectEntity, viewMode]);
+    selectEntity({ type: node.type, id: String(entityId), name: node.label, parentIds: node.parentIds, domain, serviceType: node.serviceType });
+  }, [node, entityId, selectEntity, domain]);
 
   const handleSelectClick = useCallback(() => {
     select();

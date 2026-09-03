@@ -13,12 +13,15 @@
 
 mod buffer;
 mod client;
+pub mod co_bench;
+mod cpp_global_metrics;
 pub mod logging;
 mod server;
 pub mod sys;
 
 pub use buffer::{Buffer, BufferPool};
 pub use client::{noop_completion, CallFuture, ClientRequest, Response, RpcClient};
+pub use cpp_global_metrics::{cpp_global_metrics_max_name_len, flush_cpp_global_metrics};
 pub use logging::{
     add_log_stderr, flush_logging, init_logging, init_test_logging, metrics_start, metrics_stop,
     shutdown_logging,

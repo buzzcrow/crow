@@ -42,6 +42,12 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
   const [loadingMore, setLoadingMore] = useState(false);
   const [autoScanned, setAutoScanned] = useState(false);
   const [scanDone, setScanDone] = useState(false);
+  // Tracks whether the user explicitly selected a store/group (vs
+  // the auto-selection on initial mount). The auto-scan effect only
+  // fires for user-initiated selections, not for the initial auto-
+  // selection — preventing a race where the auto-scan's HTTP response
+  // is caught by a waitForResponse set up for an explicit Scan click.
+  const userSelectedRef = useRef(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [getKey, setGetKey] = useState('');
@@ -97,7 +103,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
   }, [groupIdsInStore, groupId, storeId]);
 
   useEffect(() => {
-    if (selectedEntity?.type === 'Group' && selectedEntity.viewMode === 'Logical') {
+    if (selectedEntity?.type === 'Group' && selectedEntity.domain === 'KV') {
       const sid = selectedEntity.parentIds?.store_id;
       const gid = selectedEntity.id;
       if (sid && stores.some((s) => String(s.store_id) === sid)) {
@@ -114,6 +120,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
   }, [selectedEntity, stores, storeId, groupId]);
 
   const handleStoreChange = useCallback((sid: string) => {
+    userSelectedRef.current = true;
     setStoreId(sid);
     setGroupId('');
     setScanRows([]);
@@ -124,6 +131,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
   }, []);
 
   const handleGroupChange = useCallback((gid: string) => {
+    userSelectedRef.current = true;
     setGroupId(gid);
     setScanRows([]);
     setAutoScanned(false);
@@ -197,11 +205,11 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
   useEffect(() => { handleScanRef.current = handleScan; }, [handleScan]);
 
   useEffect(() => {
-    if (storeId && groupId && !autoScanned && !scanLoading && scanRows.length === 0) {
+    if (storeId && groupId && autoScan && userSelectedRef.current && !autoScanned && !scanLoading && scanRows.length === 0) {
       setAutoScanned(true);
       handleScan();
     }
-  }, [storeId, groupId, autoScanned, scanLoading, scanRows.length, handleScan]);
+  }, [storeId, groupId, autoScan, autoScanned, scanLoading, scanRows.length, handleScan]);
 
   const handleLoadMore = useCallback(async () => {
     if (!storeId || !groupId || scanCursors.size === 0) return;
@@ -534,6 +542,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
             <label htmlFor="kv-store-select" className="tw-text-xs tw-text-muted">Store</label>
             <select
               id="kv-store-select"
+              data-testid="kv-store-select"
               aria-label="Store"
               value={storeId}
               onChange={(e) => handleStoreChange(e.target.value)}
@@ -548,6 +557,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
             <label htmlFor="kv-group-select" className="tw-text-xs tw-text-muted">Group</label>
             <select
               id="kv-group-select"
+              data-testid="kv-group-select"
               aria-label="Group"
               value={groupId}
               onChange={(e) => handleGroupChange(e.target.value)}

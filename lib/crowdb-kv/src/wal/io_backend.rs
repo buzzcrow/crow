@@ -230,4 +230,21 @@ impl IoBackend {
             Self::BlockDevice(disk) => disk.contains_path(path.as_ref()),
         }
     }
+
+    /// Remove a directory and all contents recursively. For `File` this is
+    /// `tokio::fs::remove_dir_all`. For `MemBlock` it clears all in-memory
+    /// segments + layouts under the prefix — without this, the mem-block
+    /// backend retains old WAL segments across `wipe_user_data` calls,
+    /// causing `create_group_with_wal` to replay stale records and stall
+    /// for seconds.
+    ///
+    /// # Errors
+    /// Returns `io::Error` from `tokio::fs::remove_dir_all` (`File` /
+    /// `BlockDevice`) or from the in-memory prefix clear (`MemBlock`).
+    pub async fn remove_dir_all(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        match self {
+            Self::MemBlock(disk) => disk.remove_prefix(path.as_ref()),
+            Self::File | Self::BlockDevice(_) => tokio::fs::remove_dir_all(path).await,
+        }
+    }
 }

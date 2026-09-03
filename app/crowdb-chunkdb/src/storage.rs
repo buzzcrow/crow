@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use tracing::warn;
 
-use crowdb_kv_client::{CrowdbClient, GetOutcome, ReadMode, ScanOutcome};
+use crowdb_kv_client::{CrowdbKvClient, GetOutcome, ReadMode, ScanOutcome};
 use crowdb_protocol::chunkdb::rpc::Chunk;
 use crowdb_protocol::common::ChunkId;
 
@@ -37,13 +37,13 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 
 /// Chunk metadata store — persists `Chunk` records to CROWDB KV.
 pub struct ChunkStore {
-    kv: Arc<CrowdbClient>,
+    kv: Arc<CrowdbKvClient>,
     bindings: BindingCache,
 }
 
 impl ChunkStore {
     #[must_use]
-    pub fn new(kv: Arc<CrowdbClient>, bindings: BindingCache) -> Self {
+    pub fn new(kv: Arc<CrowdbKvClient>, bindings: BindingCache) -> Self {
         Self { kv, bindings }
     }
 

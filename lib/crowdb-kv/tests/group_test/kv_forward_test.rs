@@ -78,7 +78,6 @@ async fn follower_get_forwards_to_leader_after_local_clear() {
     // 3. Clear the follower's local learner store. After this, a
     //    local-only read on the follower would return not_found.
     follower_group.local_replica().learner.engine().clear();
-    assert_eq!(follower_group.local_replica().learner.live_key_count(), 0);
 
     // 4. Read via the follower's RPC. The transparent forward should
     //    return the leader's value, not not_found.

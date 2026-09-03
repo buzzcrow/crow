@@ -32,15 +32,15 @@ app/crowdb-web/ui/e2e/log/
 # ── Runtime artifacts (WAL, config, logs) ───────────────────────
 # Top-level artifact dirs (anchored to repo root).
 /log/
-/runtime-data/ 
-# bench-runs/ holds datetime-stamped run dirs; ignore contents
-# but keep the directory itself in the repo.
-/bench-runs/*
+/runtime-data/
+# CLI local-deploy workspaces + CLI ops logs.
+/cli-deploy/
+/cli-log/
+# CLI --log-root used by regression scripts (per-run log folders).
+/bench-log/
 test-logs/
 test-data/
-crowdb-data/
-
-app/crowdb-cli/bench-runs/
+temp-data/
 
 # Per-crate runtime dirs — these names don't appear in source code,
 # so globbing is safe and avoids repeating per crate.
@@ -49,13 +49,12 @@ app/crowdb-cli/bench-runs/
 # Runtime config dirs (operator-supplied real configs, not tracked).
 # Tracked default configs live in app/<crate>/conf/*.json.
 app/crowdb-diskdb/conf/runtime/
-app/crowdb-kv-server/conf/runtime/
-lib/crowdb-console-shared/conf/
 
 # `log/` is dangerous as a glob — "log" is a common Rust module name.
 # List explicitly per crate to avoid ignoring source directories.
 app/crowdb-kv-server/log/
 app/crowdb-cli/log/
+app/crowdb-cli/cli-log/
 lib/crowdb-console-shared/log/
 app/crowdb-web/log/
 app/crowdb-diskdb/log/
@@ -68,6 +67,8 @@ lib/crowdb-diskio-client/log/
 doc/working/profile-*
 # bench sweep raw output (bench-write-*.tsv, bench-read-*.tsv, etc.)
 doc/working/bench-*.tsv
+# sanitize regression raw output (sanitize-regression.tsv)
+doc/working/sanitize-regression.tsv
 perf.data*
 perf-script.txt
 flamegraph.svg
@@ -88,3 +89,6 @@ app/crowdb-diskio/build/
 app/crowdb-diskio/build*/
 app/crowdb-diskio/.cache/
 lib/crowdb-chunk-client/log/
+
+# port allocator claim files (runtime-generated)
+.crowdb-port-alloc/

@@ -20,7 +20,7 @@ use crowdb_protocol::common_type::InstanceId;
 use crowdb_protocol::key::InstanceKey;
 
 use crate::client::GetOutcome;
-use crate::{CrowdbClient, Error, Result};
+use crate::{CrowdbKvClient, Error, Result};
 
 const G0_STORE: u64 = 0;
 const G0_GROUP: u64 = 0;
@@ -36,29 +36,29 @@ fn now_ms() -> u64 {
 
 /// Client for the service instance registry in group 0.
 ///
-/// All methods target store 0, group 0. The wrapped `CrowdbClient`
+/// All methods target store 0, group 0. The wrapped `CrowdbKvClient`
 /// must have its topology seeded with a group-0 leader endpoint.
 #[derive(Clone)]
 pub struct ServiceRegistryClient {
-    kv: Arc<CrowdbClient>,
+    kv: Arc<CrowdbKvClient>,
 }
 
 impl ServiceRegistryClient {
-    /// Wrap a `CrowdbClient` for group-0 service registry access.
+    /// Wrap a `CrowdbKvClient` for group-0 service registry access.
     #[must_use]
-    pub fn new(kv: CrowdbClient) -> Self {
+    pub fn new(kv: CrowdbKvClient) -> Self {
         Self { kv: Arc::new(kv) }
     }
 
-    /// Wrap an already-shared `CrowdbClient` for group-0 service registry access.
+    /// Wrap an already-shared `CrowdbKvClient` for group-0 service registry access.
     #[must_use]
-    pub fn from_shared(kv: Arc<CrowdbClient>) -> Self {
+    pub fn from_shared(kv: Arc<CrowdbKvClient>) -> Self {
         Self { kv }
     }
 
-    /// Access the underlying `CrowdbClient`.
+    /// Access the underlying `CrowdbKvClient`.
     #[must_use]
-    pub fn kv(&self) -> &CrowdbClient {
+    pub fn kv(&self) -> &CrowdbKvClient {
         &self.kv
     }
 

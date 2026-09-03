@@ -72,7 +72,7 @@ impl CrowdbTreeEngine {
         self.inner.handle().stats()
     }
 
-    /// Flush C++ metrics into a formatted string for the `[cpp-metrics]`
+    /// Flush C++ metrics into a formatted string for the `cpp-tree`
     /// log section. Delegates to `crowdb_tree_ffi::Crowdbtree::flush_metrics_str`.
     #[must_use]
     #[allow(dead_code)]
@@ -251,16 +251,6 @@ impl KVEngine for CrowdbTreeEngine {
         }
     }
 
-    fn live_key_count(&self) -> usize {
-        // No dedicated count primitive in the C API; a full unlimited scan
-        // already excludes tombstones server-side, matching InMemKV's own
-        // O(n) linear-scan cost for this method.
-        self.inner
-            .handle()
-            .scan(b"", b"", b"", 0, 0, false, 0, false)
-            .map_or(0, |(entries, _)| entries.len())
-    }
-
     fn clear(&self) {
         // `Crowdbtree::clear` (crowdb-tree/ffi) wraps the new `ct_clear` C API
         // entry point, which duplicates the same wipe sequence (epoch-safe
@@ -292,7 +282,26 @@ impl KVEngine for CrowdbTreeEngine {
     }
 
     fn flush(&self) {
-        let _ = self.inner.handle().flush();
+        // Gap 3: log flush errors instead of silently swallowing. flush()
+        // is in-memory (L0→L1 drain) so it can't hit I/O errors, but
+        // internal tree errors (corruption, assertion failures) should be
+        // visible. The `io_failed` flag is set by the C++ engine on
+        // demand-load faults, not by flush — `is_healthy()` catches that.
+        if let Err(e) = self.inner.handle().flush() {
+            tracing::error!("flush failed: {:?}", e);
+        }
+    }
+
+    fn noop(&self, slot: u64) {
+        self.inner.handle().force_advance_slot(slot);
+    }
+
+    fn flush_pending(&self) -> bool {
+        // Gap 5 step 2: check if any frozen memtables are waiting to be
+        // drained. `frozen_table_count()` returns the current queue depth;
+        // after `flush()` drains them all, it returns 0. This is a cheap
+        // shared-lock read, safe to poll after every maintenance pass.
+        self.inner.handle().frozen_table_count() > 0
     }
 
     fn resume_from_slot(&self) -> u64 {
@@ -310,15 +319,23 @@ impl KVEngine for CrowdbTreeEngine {
     }
 
     fn persist_snapshot(&self) -> u64 {
-        // `Crowdbtree::snapshot` persists dirty *L1* pages + a fresh
-        // superblock recording `last_applied_slot` -- but it doesn't drain
-        // L0 itself (that's `flush`'s job; `snapshot` only walks the
-        // already-durable-tree side). Flush first so a snapshot taken right
-        // after a burst of `apply` calls captures them, instead of
-        // silently persisting only whatever an earlier `flush` already
-        // moved into L1.
-        let _ = self.inner.handle().flush();
-        self.inner.handle().snapshot().unwrap_or(0)
+        // O7: callers must flush() before calling persist_snapshot() so L0
+        // is already drained into L1. The maintenance loop flushes in step 1
+        // before calling this in step 2; the shutdown path
+        // (local_replica.rs) also flushes first. This avoids a redundant
+        // write_mutex_ acquire inside persist_snapshot when the caller
+        // already flushed — the snapshot path itself does NOT hold
+        // write_mutex_ (it walks L1 pages which are immutable once
+        // published), so pipelining is possible: the next tick's flush can
+        // overlap with this snapshot's disk I/O.
+        let snap_t0 = std::time::Instant::now();
+        let snap_result = self.inner.handle().snapshot();
+        let snap_ms = snap_t0.elapsed().as_millis();
+        match &snap_result {
+            Ok(slot) => tracing::info!("persist_snapshot: snapshot_ms={} snapshot_slot={}", snap_ms, slot),
+            Err(e) => tracing::error!("persist_snapshot FAILED: snapshot_ms={} err={:?}", snap_ms, e),
+        }
+        snap_result.unwrap_or(0)
     }
 
     fn set_gc_watermark(&self, snapshot_slot: u64, safe_slot: u64) {

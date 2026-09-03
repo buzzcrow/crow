@@ -39,8 +39,11 @@ fn count(reg: &Arc<Mutex<MetricsRegistry>>, suffix: &str) -> u64 {
         .snapshot("s.0.g.1.read.")
         .iter()
         .find(|(n, _)| n.ends_with(suffix))
-        .and_then(|(_, v)| v.strip_prefix("c:"))
-        .and_then(|v| v.split(':').next())
+        .and_then(|(_, v)| {
+            // Strip "c:" (counter) or "l:" (summary) prefix.
+            let rest = v.strip_prefix("c:").or_else(|| v.strip_prefix("l:"))?;
+            rest.split(':').next()
+        })
         .and_then(|n| n.parse::<u64>().ok())
         .unwrap_or(0)
 }
@@ -68,8 +71,7 @@ async fn await_batch(group: &Arc<PxGroup>, waiters: usize) {
 
 /// N concurrent linearizable reads with an expired lease, gated round →
 /// all served by one `ReadIndex` round, all returning the same
-/// `read_slot`, with `readindex_rounds.c == 1` and `readindex_path.c
-/// == N`.
+/// `read_slot`, with `read.barrier.l` count == N.
 #[tokio::test]
 async fn readindex_batch_serves_n_reads_with_one_round() {
     const N: usize = 4;
@@ -122,16 +124,11 @@ async fn readindex_batch_serves_n_reads_with_one_round() {
         );
     }
 
-    // One round served all N reads.
+    // One round served all N reads — barrier summary count = N.
     assert_eq!(
-        count(&registry, "read.readindex_rounds.c"),
-        1,
-        "one heartbeat round for the batch"
-    );
-    assert_eq!(
-        count(&registry, "read.readindex_path.c"),
+        count(&registry, "read.barrier.l"),
         N as u64,
-        "all {N} reads took the ReadIndex path"
+        "barrier count={N} (all reads took the ReadIndex path)"
     );
 }
 
@@ -180,8 +177,8 @@ async fn readindex_batch_propagates_no_quorum_to_all_waiters() {
     }
 
     assert_eq!(
-        count(&registry, "read.readindex_rounds.c"),
-        1,
-        "one (failed) heartbeat round for the batch"
+        count(&registry, "read.barrier.l"),
+        N as u64,
+        "barrier count={N} (one failed round, all waiters resolved)"
     );
 }

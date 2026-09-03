@@ -16,7 +16,12 @@
 //!    makes [`KVEngine::resume_from_slot`](crate::kv::KVEngine::resume_from_slot)
 //!    non-zero on a real restart. Purely local: every replica (leader or
 //!    follower) does this independently of group-wide agreement.
-//! 3. Advances the engine's GC retention watermark and sweeps it
+//! 3. Conditionally forces a durable WAL flush via
+//!    [`WalEngine::flush_all`] — only when
+//!    `time-since-last-wal-flush >= wal_flush_interval_ms`, so WAL data
+//!    is persisted even with `--no-fsync`. `0` disables (WAL is still
+//!    flushed on shutdown).
+//! 4. Advances the engine's GC retention watermark and sweeps it
 //!    ([`KVEngine::set_gc_watermark`](crate::kv::KVEngine::set_gc_watermark)/
 //!    [`collect_garbage`](crate::kv::KVEngine::collect_garbage)), and runs a
 //!    WAL segment GC pass ([`crate::wal::gc::run_gc_with_watermark`]) --
@@ -78,13 +83,29 @@ pub(crate) fn spawn(group: Weak<PxGroup>, tick: Duration, cancel: CancellationTo
 }
 
 async fn maintenance_loop(group: Weak<PxGroup>, tick: Duration, cancel: CancellationToken) {
+    let mut last_flush = std::time::Instant::now();
     loop {
-        tokio::select! {
-            () = cancel.cancelled() => return,
-            () = tokio::time::sleep(tick) => {}
-        }
         let Some(g) = group.upgrade() else { return };
-        run_pass(&g).await;
+        // Gap 5 step 2: wait for either a flush signal (memtable froze),
+        // the tick timeout (watchdog), or cancellation. The flush signal
+        // makes drain rate track write rate; the tick is now a safety net
+        // for idle/low-write tails, not the primary flush trigger.
+        let by_notify = tokio::select! {
+            () = cancel.cancelled() => return,
+            () = g.flush_notify.notified() => true,
+            () = tokio::time::sleep(tick) => false,
+        };
+        // On tick: skip flush if we recently flushed via notify (proactive).
+        // The tick is a safety net for idle periods — if writes are active,
+        // flush_notify already drains small batches promptly. Skipping the
+        // tick flush avoids force-freezing the active table and draining a
+        // large batch, which would create big per-leaf deltas and trigger
+        // excessive consolidation.
+        let do_flush = by_notify || last_flush.elapsed() >= tick;
+        run_pass(&g, do_flush).await;
+        if do_flush {
+            last_flush = std::time::Instant::now();
+        }
     }
 }
 
@@ -130,22 +151,39 @@ async fn persist_snapshot_blocking(
             "maintenance: persist_snapshot completed on blocking thread"
         );
     }
-    group
-        .last_snapshot_slot
-        .store(at, std::sync::atomic::Ordering::Release);
-    *group.last_snapshot_time.lock() = std::time::Instant::now();
-    debug!(
-        group_id = group.group_id(),
-        replica_id = group.local_replica().id,
-        snapshot_slot = at,
-        "maintenance: snapshot persisted"
-    );
+    // Gap 4: only advance watermarks if the snapshot actually succeeded
+    // (at > 0). A failed snapshot (at == 0) must NOT update
+    // `last_snapshot_slot` or `last_snapshot_time` — otherwise the next
+    // pass thinks a snapshot at slot 0 happened, messing up the threshold
+    // check and potentially advancing the GC watermark incorrectly.
+    if at > 0 {
+        group
+            .last_snapshot_slot
+            .store(at, std::sync::atomic::Ordering::Release);
+        *group.last_snapshot_time.lock() = std::time::Instant::now();
+        debug!(
+            group_id = group.group_id(),
+            replica_id = group.local_replica().id,
+            snapshot_slot = at,
+            "maintenance: snapshot persisted"
+        );
+    } else {
+        warn!(
+            group_id = group.group_id(),
+            replica_id = group.local_replica().id,
+            "maintenance: persist_snapshot returned 0 — snapshot failed or nothing to persist; \
+             watermarks not advanced"
+        );
+    }
     at
 }
 
 /// Run one maintenance pass. Exposed `pub(crate)` so tests can drive a
 /// single deterministic pass without waiting on the periodic loop's timer.
-pub(crate) async fn run_pass(group: &PxGroup) {
+/// `do_flush`: when false, skip the flush phase (tick woke the loop but a
+/// recent proactive flush already drained — only check snapshot/WAL).
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
     let engine = group.local_replica().learner.engine();
     if !engine.is_healthy() {
         error!(
@@ -158,22 +196,40 @@ pub(crate) async fn run_pass(group: &PxGroup) {
         );
     }
 
-    // 1. Flush every tick: drain L0 memtable into L1 in memory (cheap no-op
-    //    when L0 is empty). Advances last_applied_slot in memory only.
+    // 1. Flush: drain L0 memtable into L1 in memory (cheap no-op when L0
+    //    is empty). Advances last_applied_slot in memory only. Skipped on
+    //    tick wakes when a recent proactive flush already drained — avoids
+    //    force-freezing the active table and draining a large batch.
     // Runs on a blocking thread because flush holds the C++ write_mutex_.
-    let engine_arc = group.local_replica().learner.engine_arc();
-    tokio::task::spawn_blocking(move || engine_arc.flush())
-        .await
-        .unwrap_or_else(|e| {
-            error!(
-                group_id = group.group_id(),
-                error = %e,
-                "maintenance: flush blocking task panicked"
-            );
-        });
+    if do_flush {
+        let flush_start = std::time::Instant::now();
+        let engine_arc = group.local_replica().learner.engine_arc();
+        let group_id = group.group_id();
+        tokio::task::spawn_blocking(move || engine_arc.flush())
+            .await
+            .unwrap_or_else(|e| {
+                error!(
+                    group_id,
+                    error = %e,
+                    "maintenance: flush blocking task panicked"
+                );
+            });
+        debug!(
+            group_id = group.group_id(),
+            replica_id = group.local_replica().id,
+            elapsed_ms = u64::try_from(flush_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "maintenance: flush phase complete"
+        );
+
+        // Gap 5 step 4: increment flush counter for the snapshot trigger.
+        group
+            .flushes_since_snapshot
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // 2. Conditionally persist a durable snapshot to disk (expensive: sync +
-    //    page writes). Only when the slot advance or time threshold is met.
+    //    page writes). Three triggers: slot advance, time elapsed, or
+    //    flush-count since last snapshot (Gap 5 step 4).
     let contiguous = group.local_replica().contiguous_applied();
     let last_snap_slot = group
         .last_snapshot_slot
@@ -183,22 +239,90 @@ pub(crate) async fn run_pass(group: &PxGroup) {
         let prev = *group.last_snapshot_time.lock();
         std::time::Instant::now().duration_since(prev)
     };
+    let flush_count = group
+        .flushes_since_snapshot
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let flush_threshold = group.config.election.snapshot_flush_count_threshold;
     let should_snapshot = slot_advance >= group.config.election.snapshot_slot_threshold
-        || time_elapsed >= Duration::from_millis(group.config.election.snapshot_time_threshold_ms);
+        || time_elapsed >= Duration::from_millis(group.config.election.snapshot_time_threshold_ms)
+        || (flush_threshold > 0 && flush_count >= flush_threshold);
+    if should_snapshot {
+        let trigger = if slot_advance >= group.config.election.snapshot_slot_threshold {
+            "slot"
+        } else if time_elapsed >= Duration::from_millis(group.config.election.snapshot_time_threshold_ms) {
+            "time"
+        } else {
+            "flush_count"
+        };
+        info!(
+            group_id = group.group_id(),
+            replica_id = group.local_replica().id,
+            trigger,
+            slot_advance,
+            time_elapsed_ms = u64::try_from(time_elapsed.as_millis()).unwrap_or(u64::MAX),
+            flush_count,
+            "maintenance: snapshot triggered"
+        );
+    }
 
     let engine_snapshot_at = if should_snapshot {
-        persist_snapshot_blocking(group, contiguous, slot_advance, time_elapsed).await
+        let at = persist_snapshot_blocking(group, contiguous, slot_advance, time_elapsed).await;
+        // Gap 5 step 4: reset the flush counter on a successful snapshot.
+        if at > 0 {
+            group
+                .flushes_since_snapshot
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        at
     } else {
         0
     };
 
-    // 3. GC: set watermark + sweep every tick. The B-tree's own
+    // 3. Conditionally force a durable WAL flush (real fsync, even with
+    //    --no-fsync). Gated on wal_flush_interval_ms so we don't fsync
+    //    every tick. The WAL writer's own pipeline mutex serializes
+    //    flush commands against appends — no extra lock needed here.
+    let wal_interval = group.config.election.wal_flush_interval_ms;
+    if wal_interval > 0 {
+        let elapsed = {
+            let prev = *group.last_wal_flush_time.lock();
+            std::time::Instant::now().duration_since(prev)
+        };
+        if elapsed >= Duration::from_millis(wal_interval) {
+            if let Some(wal) = group.local_replica().wal() {
+                let wal_start = std::time::Instant::now();
+                match wal.flush_all().await {
+                    Ok(()) => {
+                        *group.last_wal_flush_time.lock() = std::time::Instant::now();
+                        debug!(
+                            group_id = group.group_id(),
+                            replica_id = group.local_replica().id,
+                            elapsed_ms = u64::try_from(wal_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                            "maintenance: WAL flush phase complete"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            group_id = group.group_id(),
+                            replica_id = group.local_replica().id,
+                            elapsed_ms = u64::try_from(wal_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                            error = %e,
+                            "maintenance: WAL flush_all failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. GC: set watermark + sweep every tick. The B-tree's own
     //    dropped-count check makes a no-op tick cheap.
     // `set_gc_watermark` is a cheap atomic store and stays inline;
     // `collect_garbage` holds the C++ write_mutex_ and runs on a blocking thread.
     let safe_slot = group.group_safe_slot();
     let snapshot_slot = group.group_snapshot_slot();
     engine.set_gc_watermark(snapshot_slot, safe_slot);
+    let gc_start = std::time::Instant::now();
     let engine_arc = group.local_replica().learner.engine_arc();
     tokio::task::spawn_blocking(move || engine_arc.collect_garbage())
         .await
@@ -209,8 +333,14 @@ pub(crate) async fn run_pass(group: &PxGroup) {
                 "maintenance: collect_garbage blocking task panicked"
             );
         });
+    debug!(
+        group_id = group.group_id(),
+        replica_id = group.local_replica().id,
+        elapsed_ms = u64::try_from(gc_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "maintenance: GC phase complete"
+    );
 
-    // 4. WAL GC: only advance snapshot_slot when we actually persisted.
+    // 5. WAL GC: only advance snapshot_slot when we actually persisted.
     let Some(wal) = group.local_replica().wal() else {
         return;
     };

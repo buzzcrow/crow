@@ -19,9 +19,10 @@ import { step } from '../fixtures/stepTimer';
 
 async function openKvPanel(page: any, storeId: string, groupId: string) {
   await step('inspector: goto', () => page.goto('/'));
-  await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
-  await page.getByLabel('Store').selectOption(storeId);
-  await page.getByLabel('Group').selectOption(groupId);
+  await page.getByTestId('domain-kv').click();
+  await page.getByTestId('kv-tab-kv').click();
+  await page.getByTestId('kv-store-select').selectOption(storeId);
+  await page.getByTestId('kv-group-select').selectOption(groupId);
 }
 
 async function putKey(page: any, key: string, value: string) {
@@ -54,7 +55,7 @@ test.describe('inspector · activity log', () => {
       await putKey(page, 'activity-key', 'activity-val');
 
       // Select a node in the tree to make the inspector visible
-      await page.getByRole('button', { name: 'Physical' }).click();
+      await page.getByTestId('domain-cluster').click();
 
       // Try to find and click the node — rack may already be expanded
       const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-32' });
@@ -97,7 +98,7 @@ test.describe('inspector · activity log', () => {
 
     try {
       await step('inspector: goto', () => page.goto('/'));
-      await page.getByRole('button', { name: 'Physical' }).click();
+      await page.getByTestId('domain-cluster').click();
       const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-47' });
       await expect(nodeItem).toBeVisible({ timeout: 10_000 });
 
@@ -110,7 +111,9 @@ test.describe('inspector · activity log', () => {
       const pingToast = page.getByRole('alert').filter({ hasText: /ping/i });
       await expect(pingToast).toBeVisible({ timeout: 10_000 });
 
-      // Restart and Stop are on the server (KV) context menu.
+      // Restart and Stop are on the server (KV) context menu. KV-xxx
+      // tree items are in the KV domain, not the Cluster domain.
+      await page.getByTestId('domain-kv').click();
       const serverItem = page.getByRole('treeitem').filter({ hasText: 'KV-47' });
       await expect(serverItem).toBeVisible({ timeout: 5_000 });
 
@@ -136,7 +139,9 @@ test.describe('inspector · activity log', () => {
       const stopToast = page.getByRole('alert').filter({ hasText: /stop/i });
       await expect(stopToast).toBeVisible({ timeout: 10_000 });
 
-      // Verify all three operations appear in the activity log
+      // Verify all three operations appear in the activity log.
+      // Switch back to Cluster domain to select the node.
+      await page.getByTestId('domain-cluster').click();
       await nodeItem.getByRole('button', { name: 'N-47' }).click();
       const inspector = page.locator('aside[aria-label="Entity inspector"]');
       await expect(inspector).toBeVisible({ timeout: 10_000 });

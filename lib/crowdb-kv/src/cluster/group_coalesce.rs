@@ -49,22 +49,26 @@ impl PxGroup {
                     if now.saturating_sub(last) < WATCHDOG_US {
                         continue;
                     }
-                    // No activity for WATCHDOG_US — check for stuck batch.
-                    let batch = group.coalescer.lock().take();
-                    let Some(mut batch) = batch else {
-                        continue;
+                    // No activity for WATCHDOG_US — atomically swap the
+                    // batch for a fresh empty one so no op can sneak in
+                    // and start a 1-op round during the swap.
+                    let batch = {
+                        let mut guard = group.coalescer.lock();
+                        let taken = guard.take();
+                        if taken.is_some() {
+                            *guard = Some(PendingBatch::default());
+                        }
+                        taken
                     };
-                    if let Some(timer) = batch.timer.take() {
-                        timer.abort();
-                    }
+                    let Some(batch) = batch else { continue };
                     if batch.op_count > 0 {
-                        tracing::warn!(
+                        tracing::error!(
                             group_id = group.group_id,
                             op_count = batch.op_count,
-                            "coalescer: watchdog flushing stuck batch"
+                            "coalescer: watchdog flushing stuck batch — ops delayed >1s"
                         );
                         group.coalesce_touch_activity();
-                        group.coalesce_flush_batch(batch);
+                        group.coalesce_spawn_round(batch);
                     }
                     // Empty batch — just drop it (go idle).
                 }
@@ -72,21 +76,17 @@ impl PxGroup {
         });
     }
 
-    /// Flush a pending batch as a Paxos round. Opens a fresh pending
-    /// batch for ops arriving during this round.
-    fn coalesce_flush_batch(&self, batch: PendingBatch) {
+    /// Spawn a Paxos round for the given batch. The caller must have
+    /// already swapped in a fresh `PendingBatch` to the coalescer (so
+    /// new ops accumulate for the next round). This function only
+    /// builds the payload and spawns the round task.
+    fn coalesce_spawn_round(&self, batch: PendingBatch) {
         let mut payload = Vec::with_capacity(2 + batch.op_bodies.len());
         payload.extend_from_slice(&batch.op_count.to_le_bytes());
         payload.extend_from_slice(&batch.op_bodies);
         let payload = bytes::Bytes::from(payload);
         let tags = batch.tags;
         let waiters = batch.waiters;
-        // Open a fresh pending batch for the next round.
-        let new_batch = PendingBatch::default();
-        let mut guard = self.coalescer.lock();
-        if guard.is_none() {
-            *guard = Some(new_batch);
-        }
         let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
             return;
         };
@@ -152,9 +152,6 @@ impl PxGroup {
                         let mut p = Vec::with_capacity(2 + taken.op_bodies.len());
                         p.extend_from_slice(&taken.op_count.to_le_bytes());
                         p.extend_from_slice(&taken.op_bodies);
-                        if let Some(t) = taken.timer {
-                            t.abort();
-                        }
                         Some((p, taken.tags, taken.waiters))
                     } else {
                         None
@@ -206,25 +203,37 @@ impl PxGroup {
     /// slot-tasks racing to take one shared batch). The permit is
     /// already released before this call, so the last finisher always
     /// sees a count below threshold and takes the batch.
+    ///
+    /// The swap is atomic: the old batch is taken and a fresh empty
+    /// batch is put back in a single locked section, so no concurrent
+    /// `coalesce_enqueue` can see `None` and start a 1-op round that
+    /// would fragment the batch.
     fn coalesce_drain_after_round(&self) {
         self.coalesce_touch_activity();
         let threshold = self.config.paxos.coalesce_drain_threshold;
         if threshold > 0 && self.inflight.occupied() >= u64::try_from(threshold).unwrap_or(u64::MAX) {
             return;
         }
-        let batch = self.coalescer.lock().take();
-        let Some(mut batch) = batch else {
-            return;
+        let batch = {
+            let mut guard = self.coalescer.lock();
+            let taken = guard.take();
+            if taken.is_some() {
+                *guard = Some(PendingBatch::default());
+            }
+            taken
         };
-        if let Some(timer) = batch.timer.take() {
-            timer.abort();
-        }
+        let Some(batch) = batch else { return };
         if batch.op_count == 0 {
-            // No ops arrived during the round — go idle.
+            // No ops arrived during the round — go idle. Reset the
+            // coalescer to None so the next op takes the idle path
+            // (starts a 1-op round) instead of joining an empty batch
+            // and waiting for the watchdog.
+            let mut guard = self.coalescer.lock();
+            *guard = None;
             return;
         }
         // Flush the accumulated batch as the next round immediately.
-        self.coalesce_flush_batch(batch);
+        self.coalesce_spawn_round(batch);
     }
 
     /// Test-only: await the coalesce round gate if set. Consumed by the

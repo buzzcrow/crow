@@ -37,6 +37,7 @@ namespace crowdb::tree
 // references compile unchanged. (Not a `namespace crowdb::tree =
 // crowdb::common::metrics;` alias — only the specific types are bridged.)
 using crowdb::common::metrics::Bandwidth;
+using crowdb::common::metrics::CallbackGauge;
 using crowdb::common::metrics::Counter;
 using crowdb::common::metrics::Gauge;
 using crowdb::common::metrics::LatencySummary;
@@ -205,8 +206,7 @@ struct GcStats
 // cheap (O(1)) internal counter worth exposing to an operator into one
 // struct, so a caller/FFI/console poll costs one call instead of many
 // small ones. Deliberately excludes anything that requires walking the
-// tree (height()/leaf_count()) or the full keyspace (live key count,
-// already exposed separately via KVEngine::live_key_count) -- every field
+// tree (height()/leaf_count()) or the full keyspace -- every field
 // here is already an atomic counter or BufferPool::stats(), also O(1).
 struct EngineStats
 {
@@ -230,13 +230,15 @@ struct EngineStats
     uint64_t mt_upsert_total     = 0; // apply() writes into L0
     uint64_t mt_get_total        = 0; // get() lookups in L0
     uint64_t mt_get_hit_total    = 0; // L0 lookups that found a cell
-    uint64_t flush_drain_total   = 0; // drain_memtable_into_l1 calls
+    uint64_t flush_drain_total   = 0; // drain_all_frozen_locked calls
     uint64_t flush_entries_total = 0; // entries drained from L0 to L1
     uint64_t snapshot_total      = 0; // snapshot() calls (durable checkpoints)
     uint64_t l1_get_total        = 0; // get() lookups that descended to L1
     uint64_t l1_get_hit_total    = 0; // L1 lookups that found a cell
     uint64_t map_lookup_total    = 0; // mapping table lookups
     uint64_t demand_load_total   = 0; // demand-load page faults
+    uint64_t leaf_count          = 0; // live leaf pages (O(1) atomic)
+    uint64_t inner_count         = 0; // live inner pages (O(1) atomic)
 };
 
 // Per-step scan profile: each step's aggregate over the window since the last
@@ -244,14 +246,8 @@ struct EngineStats
 // this is a destructive read -- the window resets on each call). `count` is the
 // number of scans in the window; `entries` is the total entries returned. Each
 // step's `sum_ns` / `max_ns` cover only that step; `avg_ns` is sum_ns / count.
-// Steps: l0_snapshot (MemTable::snapshot copy), l0_skip (upper_bound pass),
-// l1_descent (find_leaf_page_id), l1_resolve (per-leaf LeafChainCursor setup +
-// cursor seek, summed across all leaves touched), merge (min-key select +
-// winner + per-entry cursor step + consider/decode, excluding l1_resolve),
-// total (whole scan). The per-entry leaf work is lazy, so it is
-// counted under merge -- timing each cursor step would cost more than the step
-// itself; l1_resolve is now per-leaf setup only and scales with leaves
-// touched, not entries per leaf.
+// Steps: l1 (B-tree descent + per-leaf resolve), merge (L0+L1 advance +
+// winner + decode), total (whole scan).
 struct ScanProfile
 {
     uint64_t count   = 0; // scans in the window
@@ -264,10 +260,8 @@ struct ScanProfile
         uint64_t avg_ns = 0; // sum_ns / count (filled by scan_profile)
     };
 
-    Step l0_snapshot;
-    Step l0_skip;
-    Step l1_descent;
-    Step l1_resolve;
+    Step l0;
+    Step l1;
     Step merge;
     Step total;
 };
@@ -513,6 +507,14 @@ class Crowdbtree
     // buffering. Non-contiguous leftovers (slot above the current contiguous
     // frontier) are relocated onto the live active_ MemTable rather than
     // lost -- see the active_/frozen_ member comment for the full design.
+    //
+    // Re-check loop: after each k-way merge drain pass, re-swaps frozen_ and
+    // drains again if new memtables froze during the prior pass (apply() on
+    // other threads keeps writing and may trip the freeze threshold mid-
+    // drain). This catches the backlog in one flush() call instead of leaving
+    // it for the next maintenance tick. Capped at max_memtable_count
+    // iterations; remaining tables (if any) stay in frozen_ for the next
+    // flush().
     Status flush();
 
     // Async twin of flush(). flush() only drains
@@ -697,6 +699,11 @@ class Crowdbtree
     // not-yet-drained frozen_ buffers), not just active_.
     [[nodiscard]] size_t memtable_count() const;
 
+    // Gap 5 step 2: number of frozen memtables waiting to be drained.
+    // The maintenance loop polls this to decide whether to flush
+    // immediately or sleep until the next tick.
+    [[nodiscard]] size_t frozen_table_count() const;
+
     MappingTable &mapping()
     {
         return mapping_;
@@ -715,6 +722,19 @@ class Crowdbtree
 
     [[nodiscard]] int    height() const;     // 1 = single-leaf root
     [[nodiscard]] size_t leaf_count() const; // live leaves reachable from the root
+
+    // O(1) atomic snapshot of the leaf/inner page counters (maintained at
+    // SMO sites, restored from the commit anchor on open()). For tests and
+    // metrics — prefer these over leaf_count() (which walks the tree).
+    [[nodiscard]] uint64_t leaf_count_atomic() const
+    {
+        return leaf_count_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] uint64_t inner_count_atomic() const
+    {
+        return inner_count_.load(std::memory_order_relaxed);
+    }
 
     // # of base pages physically written by the most recent snapshot (the rest
     // were clean and retained their durable addr). For incremental-snapshot tests.
@@ -746,7 +766,7 @@ class Crowdbtree
 
     // Create the internal MetricsRegistry and register all handles
     // using the provided name prefix (e.g. "s.1.g.0"). Called from open().
-    void init_metrics(const std::string &prefix);
+    void init_metrics(const std::string &prefix, const std::string &backend_label);
 
     // Flush all C++ metrics into a formatted string (for FFI return to
     // Rust). Uses open_memstream internally. `width` overrides the
@@ -812,23 +832,43 @@ class Crowdbtree
     // apply()/force_advance_slot(). Draining is the separate, explicit job
     // of flush() (background thread or caller-invoked).
     void maybe_swap_active();
-    // Drain `mt`'s slot <= cs eligible entries into L1 via the normal
-    // per-leaf delta-append path (same mechanism regardless of which
-    // MemTable -- active_ or a frozen_ entry -- they came from). Returns
-    // true if anything was written. Caller holds write_mutex_.
-    bool drain_memtable_into_l1_locked(MemTable *mt, uint64_t cs);
+    // Drain all frozen memtables in one k-way sorted merge (O5) with
+    // sort-aware descent (O1). Replaces the per-memtable drain loop in
+    // flush(). Returns true if any entries were written to L1. Caller
+    // holds write_mutex_.
+    bool drain_all_frozen_locked(std::deque<std::shared_ptr<MemTable>> &to_drain, std::shared_ptr<MemTable> &active,
+                                 uint64_t cs);
+    // Publish a group of sorted leaf entries to `page_id` via the delta
+    // path (in-frame or heap BatchDelta). Returns true if a consolidate
+    // fired (caller should invalidate cached leaf info). Caller holds
+    // write_mutex_.
+    bool publish_group_to_leaf_locked(uint64_t page_id, uint64_t cs, std::vector<leaf_entry> group);
     // Snapshot import (install_snapshot): drop every live MemTable's content
     // and install one fresh, empty active_. Caller holds write_mutex_.
     void reset_memtables_locked();
 
     void consolidate_locked(uint64_t page_id);          // caller holds write_mutex_
     void maybe_split_or_merge_locked(uint64_t page_id); // dispatch on leaf size
+    // O4: set parent_page_id on all children of the inner page at `page_id`.
+    // Caller holds write_mutex_.
+    void set_children_parent_locked(uint64_t page_id, uint64_t parent_page_id);
+    // O4: store `new_page` at `page_id`, preserving parent_page_id from the
+    // old page. Caller holds write_mutex_.
+    void store_preserving_parent_locked(uint64_t page_id, PageBase *new_page);
+    // Sync the leaf/inner gauge handles to the atomic counters (no-op when
+    // metrics aren't registered). Called after every SMO counter update.
+    void sync_page_count_gauges();
     // Inner PIDs from root down to (but excluding) the leaf `target_page_id`.
     std::vector<uint64_t> path_to_page_id_locked(uint64_t target_page_id) const;
-    void                  split_leaf_locked(uint64_t leaf_page_id, std::vector<uint64_t> path);
-    void                  propagate_split_locked(std::vector<uint64_t> path, uint64_t child_page_id, std::string sep,
-                                                 uint64_t right_page_id);
-    void                  try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<uint64_t> &path);
+    // Iteratively 2-way split a leaf (and its resulting halves) until every
+    // leaf fits under leaf_split_bytes. Needed because consolidation can fold
+    // a large delta chain into a leaf many times the threshold. Caller holds
+    // write_mutex_.
+    void split_leaf_to_threshold_locked(uint64_t leaf_page_id);
+    void split_leaf_locked(uint64_t leaf_page_id, std::vector<uint64_t> path);
+    void propagate_split_locked(std::vector<uint64_t> path, uint64_t child_page_id, std::string sep,
+                                uint64_t right_page_id);
+    void try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<uint64_t> &path);
     // Merge an underfull non-root inner page with its left sibling (mirrors leaf
     // merge), recursing up; collapses the root when it drops to a single child.
     // `path` is the inner PIDs from root down to (but excluding) `inner_page_id`.
@@ -1100,7 +1140,11 @@ class Crowdbtree
     // flush() call) but can hold up to (opt_.max_memtable_count - 1) if
     // writes keep tripping the threshold faster than flush() (explicit call
     // or the background thread) drains them -- see max_memtable_count's
-    // comment in options.h for the capacity/back-pressure behavior.
+    // comment in options.h for the capacity/back-pressure behavior. flush()
+    // uses a re-check loop that drains frozen_ to empty (modulo the
+    // max_memtable_count iteration cap) in one call, so tables that freeze
+    // during a drain pass are caught in the same flush() rather than left
+    // for the next tick.
     //
     // Both members are guarded by memtable_mutex_, but *only* for the
     // pointer/queue values themselves -- MemTable has its own internal
@@ -1125,7 +1169,7 @@ class Crowdbtree
     // already folded into L1), so a hit in any live table never needs an L1
     // fallback.
     //
-    // Write-side correctness (flush()/drain_memtable_into_l1_locked()): a
+    // Write-side correctness (flush()/drain_all_frozen_locked()): a
     // drained key is appended to its target leaf's delta chain, never
     // written in place, and every reader of that chain (resolve_chain /
     // resolve_chain_sorted) resolves highest-slot-wins across the *whole*
@@ -1170,6 +1214,7 @@ class Crowdbtree
     std::atomic<uint64_t>     last_applied_slot_{0};
     std::atomic<uint64_t>     version_{0};
     std::atomic<uint64_t>     gc_floor_{0};
+    std::atomic<uint64_t>     last_gc_floor_{0};             // gc_floor_ at the last collect_garbage sweep
     std::atomic<uint64_t>     snapshot_pages_written_{0};    // pages written by last snapshot
     std::atomic<uint64_t>     snapshot_pages_total_{0};      // cumulative pages written across all snapshots
     std::atomic<uint64_t>     snapshot_segments_written_{0}; // segment images written by last snapshot
@@ -1180,13 +1225,19 @@ class Crowdbtree
     mutable std::atomic<uint64_t> mt_upsert_total_{0};     // apply() writes into L0
     mutable std::atomic<uint64_t> mt_get_total_{0};        // get() lookups in L0
     mutable std::atomic<uint64_t> mt_get_hit_total_{0};    // L0 lookups that found a cell
-    mutable std::atomic<uint64_t> flush_drain_total_{0};   // drain_memtable_into_l1 calls
+    mutable std::atomic<uint64_t> flush_drain_total_{0};   // drain_all_frozen_locked calls
     mutable std::atomic<uint64_t> flush_entries_total_{0}; // entries drained from L0 to L1
     mutable std::atomic<uint64_t> snapshot_total_{0};      // snapshot() calls (durable checkpoints)
     mutable std::atomic<uint64_t> l1_get_total_{0};        // get() lookups that descended to L1
     mutable std::atomic<uint64_t> l1_get_hit_total_{0};    // L1 lookups that found a cell
     mutable std::atomic<uint64_t> map_lookup_total_{0};    // mapping table lookups (find_leaf_page_id / resident)
     mutable std::atomic<uint64_t> demand_load_total_{0};   // demand-load page faults
+
+    // Live leaf/inner page counts (O(1) gauges, maintained at SMO sites and
+    // restored from the commit anchor on open()). See leaf_count_atomic() /
+    // inner_count_atomic(). An empty tree starts at leaf=1 (root leaf), inner=0.
+    std::atomic<uint64_t> leaf_count_{1};
+    std::atomic<uint64_t> inner_count_{0};
 
     // Logical clock for CLOCK-informed eviction ranking (plan-tree #17).
     // `resident()`'s hot path bumps this and stamps the touched page's own
@@ -1225,50 +1276,73 @@ class Crowdbtree
     // ── Metrics handles (registered in init_metrics) ──
     struct MetricsHandles
     {
-        Counter        *buf_hits       = nullptr;
-        Counter        *buf_misses     = nullptr;
-        Counter        *buf_evictions  = nullptr;
-        Counter        *buf_writebacks = nullptr;
-        Gauge          *buf_resident   = nullptr;
-        Gauge          *buf_dirty      = nullptr;
-        LatencySummary *apply_l        = nullptr;
-        LatencySummary *snapshot_l     = nullptr;
-        LatencySummary *flush_l        = nullptr;
-        // MemTable (L0) operation counters
-        Counter *mt_upsert_c  = nullptr;
-        Counter *mt_get_c     = nullptr;
-        Counter *mt_get_hit_c = nullptr;
-        // Flush (L0 → L1) counters
-        Counter *flush_drain_c   = nullptr;
-        Counter *flush_entries_c = nullptr;
-        // L1 (B-tree) query counters
-        Counter *l1_get_c     = nullptr;
-        Counter *l1_get_hit_c = nullptr;
-        // B+tree page mutation counters (during drain/split/merge/consolidate)
-        Counter        *page_write_c = nullptr;
-        LatencySummary *page_write_l = nullptr;
-        // Mapping table lookup counter
-        Counter *page_map_lookup_c = nullptr;
-        // Demand-load (page fault I/O) counter + latency
-        Counter        *demand_load_c = nullptr;
-        LatencySummary *demand_load_l = nullptr;
-        // Snapshot sub-metrics (new)
-        LatencySummary *snapshot_apply_l            = nullptr; // prepare_snapshot_locked latency
-        LatencySummary *snapshot_page_write_l       = nullptr; // per-page write_at latency
-        Counter        *snapshot_page_write_cache_c = nullptr; // clean pages (no write)
-        Bandwidth      *snapshot_page_write_bw      = nullptr; // per-page write bytes
-        Bandwidth      *snapshot_meta_write_bw      = nullptr; // metadata write bytes (seg+dir+anchor)
-        Bandwidth      *page_read_bw                = nullptr; // demand-load read bytes
-        Counter        *snapshot_pages_c            = nullptr; // cumulative pages written
-        // Scan per-step profile: counters + per-step LatencySummary.
-        Counter        *scan_c             = nullptr; // scan calls
-        Counter        *scan_entries_c     = nullptr; // entries returned
-        LatencySummary *scan_l             = nullptr; // total scan latency
-        LatencySummary *scan_l0_snapshot_l = nullptr;
-        LatencySummary *scan_l0_skip_l     = nullptr;
-        LatencySummary *scan_l1_descent_l  = nullptr;
-        LatencySummary *scan_l1_resolve_l  = nullptr;
-        LatencySummary *scan_merge_l       = nullptr;
+        // Buffer pool (backend I/O)
+        Counter *buf_evictions  = nullptr;
+        Counter *buf_writebacks = nullptr;
+        Gauge   *buf_resident   = nullptr;
+        Gauge   *buf_dirty      = nullptr;
+        // Flush (L0 → L1)
+        LatencySummary *flush_l         = nullptr;
+        Counter        *flush_drain_c   = nullptr;
+        Counter        *flush_entries_c = nullptr;
+        // MemTable (L0) operation latency
+        LatencySummary *mt_apply_l   = nullptr;
+        Counter        *mt_get_c     = nullptr;
+        Counter        *mt_get_hit_c = nullptr;
+        LatencySummary *mt_get_l     = nullptr;
+        CallbackGauge  *mt_frozen_g  = nullptr;
+        CallbackGauge  *mt_records_g = nullptr;
+        Counter        *mt_freeze_c  = nullptr;
+        // L1 (B-tree) query counters + latency
+        Counter        *l1_get_c     = nullptr;
+        Counter        *l1_get_hit_c = nullptr;
+        LatencySummary *l1_get_l     = nullptr;
+        // B+tree page mutation (during drain/split/merge/consolidate)
+        LatencySummary *page_write_l       = nullptr;
+        Counter        *page_split_c       = nullptr;
+        Counter        *page_merge_c       = nullptr;
+        Counter        *page_consolidate_c = nullptr;
+        // Tree structure
+        CallbackGauge *tree_height_g        = nullptr;
+        Gauge         *tree_leaf_count_g    = nullptr;
+        Gauge         *tree_inner_count_g   = nullptr;
+        CallbackGauge *tree_retired_count_g = nullptr;
+        // Mapping table
+        Counter       *page_find_c           = nullptr;
+        Counter       *page_map_alloc_c      = nullptr;
+        CallbackGauge *page_map_total_pids_g = nullptr;
+        CallbackGauge *page_map_segments_g   = nullptr;
+        // Demand-load (page fault I/O) latency
+        LatencySummary *page_load_l = nullptr;
+        // Page writeback (eviction I/O) latency
+        LatencySummary *page_writeback_l = nullptr;
+        // Page writeback bandwidth (eviction I/O, non-snapshot)
+        Bandwidth *page_writeback_bw = nullptr;
+        // fsync/barrier latency
+        LatencySummary *fsync_l = nullptr;
+        // Snapshot — logical (full snapshot wall time)
+        LatencySummary *snapshot_l = nullptr;
+        // Snapshot I/O sub-metrics (backend)
+        LatencySummary *snapshot_apply_l            = nullptr;
+        LatencySummary *snapshot_page_write_l       = nullptr;
+        Counter        *snapshot_page_write_cache_c = nullptr;
+        Bandwidth      *snapshot_page_write_bw      = nullptr;
+        Bandwidth      *snapshot_meta_write_bw      = nullptr;
+        Bandwidth      *page_read_bw                = nullptr;
+        Counter        *snapshot_pages_c            = nullptr;
+        // Scan
+        Counter        *scan_entries_c = nullptr;
+        LatencySummary *scan_l         = nullptr;
+        LatencySummary *scan_l0_l      = nullptr;
+        LatencySummary *scan_l1_l      = nullptr;
+        LatencySummary *scan_merge_l   = nullptr;
+        Counter        *scan_retry_c   = nullptr;
+        // GC
+        Counter        *gc_tombstones_c       = nullptr;
+        Counter        *gc_pages_c            = nullptr;
+        Counter        *gc_leaves_checked_c   = nullptr;
+        Counter        *gc_leaves_reclaimed_c = nullptr;
+        LatencySummary *gc_l                  = nullptr;
     };
 
     MetricsHandles metrics_;

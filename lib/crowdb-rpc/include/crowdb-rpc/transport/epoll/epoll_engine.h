@@ -32,6 +32,7 @@ class EpollEngine : public SocketEngine
     }
 
     void add_listen_fd(int fd) override;
+    void remove_listen_fd(int fd) override;
     void add_connection(int read_fd, int write_fd, Connection *conn) override;
     void remove_connection(int read_fd, int write_fd) override;
     void arm_read(int read_fd, Connection *conn) override;
@@ -47,6 +48,7 @@ class EpollEngine : public SocketEngine
     int               epoll_fd_  = -1;
     int               notify_fd_ = -1;    // eventfd
     int               timer_fd_  = -1;    // timerfd
+    int               listen_fd_ = -1;    // listen socket (for Accept events)
     bool              oneshot_   = false; // multi-worker safety
     std::atomic<bool> stop_notified_{false};
 

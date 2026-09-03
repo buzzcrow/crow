@@ -864,6 +864,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "crowdb-port-alloc"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "crowdb-protocol",
+]
+
+[[package]]
 name = "crowdb-protocol"
 version = "0.1.0"
 dependencies = [
@@ -871,8 +879,10 @@ dependencies = [
  "bytes",
  "crc32fast",
  "flatbuffers",
+ "fs2",
  "getrandom 0.2.17",
  "serde",
+ "thiserror 2.0.18",
  "utoipa",
  "xxhash-rust",
 ]
@@ -1292,6 +1302,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

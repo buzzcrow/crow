@@ -309,6 +309,18 @@ pub struct PxElectionConfig {
     /// `persist_snapshot()` is called again, in milliseconds. Ensures a
     /// low-write-rate replica still checkpoints periodically.
     pub snapshot_time_threshold_ms: u64,
+    /// Gap 5 step 4: number of flushes since the last durable snapshot
+    /// before `persist_snapshot()` is called, regardless of the slot/time
+    /// thresholds. Proxy for "enough new data has landed in L1 to be
+    /// worth persisting". At 16 MiB/flush × 10 = 160 MiB of new L1 data
+    /// before a snapshot. `0` disables the flush-count trigger.
+    pub snapshot_flush_count_threshold: u64,
+    /// Maximum wall-clock interval between WAL durable flushes, in
+    /// milliseconds. The maintenance loop forces `wal.flush_all()`
+    /// (real `fsync`) when this interval elapses, so WAL data is
+    /// persisted even with `--no-fsync`. `0` disables periodic WAL
+    /// flush (WAL is still flushed on shutdown).
+    pub wal_flush_interval_ms: u64,
     /// Per-RPC deadline for unary `prepare`, the bidi `accept`
     /// learner-stream call, and the unary `heartbeat` RPC, in
     /// milliseconds. On expiry the caller gets a retryable
@@ -348,11 +360,16 @@ impl PxElectionConfig {
         election_driver_disabled: false,
         learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
             * Self::LEARNER_WINDOW_MULTIPLIER,
-        // Maintenance loop tick: flush L0→L1 + GC watermark check every
-        // tick; durable snapshot gated by thresholds above.
-        maintenance_tick_ms: 10_000,
+        // Maintenance loop tick: pure watchdog now that flush and snapshot
+        // are event-driven (auto-trigger on freeze / dirty-page count). Only
+        // catches idle/low-write tails — sub-threshold memtables and dirty
+        // pages that didn't trigger an auto-snapshot. 30s is a safe watchdog
+        // interval; throughput is not gated by this.
+        maintenance_tick_ms: 30_000,
         snapshot_slot_threshold: 100_000,
         snapshot_time_threshold_ms: 600_000,
+        snapshot_flush_count_threshold: 10,
+        wal_flush_interval_ms: 60_000,
         learner_stream_rpc_timeout_ms: 2000,
     };
 
@@ -377,6 +394,8 @@ impl PxElectionConfig {
             maintenance_tick_ms: 500,
             snapshot_slot_threshold: 1000,
             snapshot_time_threshold_ms: 1_000,
+            snapshot_flush_count_threshold: 2,
+            wal_flush_interval_ms: 0,
             learner_stream_rpc_timeout_ms: 500,
         }
     }
@@ -410,6 +429,8 @@ impl PxElectionConfig {
             maintenance_tick_ms: 3_000,
             snapshot_slot_threshold: 1_000_000,
             snapshot_time_threshold_ms: 9_000,
+            snapshot_flush_count_threshold: 0, // disabled for bench (slot threshold is high)
+            wal_flush_interval_ms: 0,
             learner_stream_rpc_timeout_ms: 1000,
         }
     }

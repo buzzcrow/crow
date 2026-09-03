@@ -10,7 +10,7 @@ use crowdb_protocol::common::{ChunkdbRangeBindingValue, InstanceValue, RangeStat
 use crowdb_protocol::key::{ChunkdbRangeBindingKey, TextKey};
 
 use crate::binding_framework::BindingStrategy;
-use crate::{CrowdbClient, Error, ReadMode, Result};
+use crate::{CrowdbKvClient, Error, ReadMode, Result};
 
 const G0_STORE: u64 = 0;
 const G0_GROUP: u64 = 0;
@@ -55,7 +55,7 @@ impl BindingStrategy for ChunkdbRangeStrategy {
         compute_sub_range_assignment(instances, self.sub_range_count)
     }
 
-    async fn write_bindings(&self, kv: &CrowdbClient, bindings: &[Self::Binding]) -> Result<()> {
+    async fn write_bindings(&self, kv: &CrowdbKvClient, bindings: &[Self::Binding]) -> Result<()> {
         // PUT each binding (idempotent overwrite). No delete-all — the
         // sub-range count is fixed, so the key set is stable; changed
         // entries are overwritten in place. This avoids the non-atomic
@@ -76,7 +76,7 @@ impl BindingStrategy for ChunkdbRangeStrategy {
         Ok(())
     }
 
-    async fn read_bindings(&self, kv: &CrowdbClient) -> Result<Vec<Self::Binding>> {
+    async fn read_bindings(&self, kv: &CrowdbKvClient) -> Result<Vec<Self::Binding>> {
         let prefix = ChunkdbRangeBindingKey::text_prefix_all();
         let mut bindings: Vec<ChunkdbRangeBindingValue> = Vec::new();
         let mut start_after: Vec<u8> = Vec::new();

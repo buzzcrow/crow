@@ -6,6 +6,9 @@
 # then runs crowdb-cli bench rpc against it for each config. The server is
 # restarted per config so its io_engines/io_workers match the client.
 #
+# Server lifecycle is managed by `cluster local-deploy -t rpc` / `cluster
+# reset` — the CLI handles spawn, readiness, PID tracking, and teardown.
+#
 # After a run, update doc/design/rpc/rpc-flow-analysis.md: add a
 # dated subsection under "Current Data" with the results table and
 # scaling analysis, plus a "History" entry. Always record the CPU model.
@@ -35,18 +38,21 @@
 # at high concurrency — bursty coroutine workloads are syscall-bound.
 # raggr/saggr columns dropped (frames_sent/frames_parsed moved to
 # crowdb-common metrics histograms); nagle column added.
+# Rows updated 2026-08-31 where strictly better (per-call control
+# flatbuffer fix — request_id now embedded in ConnectionPingRequest.id
+# per call, enabling correct slab slot correlation).
 # Coroutine (nagle off):
 #   Eng Wkr    T    C  ops/s        avg    p50    p99    p999   nagle  err
 #   1   1      1    1      52,759    17     17     25      31     0      0
-#   1   4     64    4    514,844   122    108    186     326     0      0
-#   1   8    512    8    820,424   621    612    842   1,181     0      0
-#   1  16  1,000   32  1,246,622   798    401  6,148  10,416     0      0
+#   1   4     64    4    517,687   122     94     96     260     0      0
+#   1   8    512    8    830,174   614    486    505   1,074     0      0
+#   1  16  1,000   32  1,307,488   762    302    324   9,645     0      0
 # Coroutine (nagle on):
 #   1   4     64    4    983,245    63     59    162     520     1      0
-#   1   8    512    8  1,744,728   291    261    540   5,248     1      0
-#   1  16  1,000   32  2,023,369   490    418  1,550   2,282     1      0
+#   1   8    512    8  1,869,083   271    209    219   3,993     1      0
+#   1  16  1,000   32  2,213,182   448    157    171   1,999     1      0
 # Tokio (nagle off):
-#   1   1      1    1      23,564    41     42     69     102     0      0
+#   1   1      1    1      29,367    32     24     25      71     0      0
 #   1   4     64    4    557,362   113    105    265     425     0      6
 #   1  16  1,000   32    849,575 1,156  1,063  2,652   3,838     0    591
 #
@@ -61,86 +67,65 @@
 #   1  16  1,000   32  1,206,111   825    420  5,844   9,600     0    1    0
 # Conclusion: nagle on, quickack off is optimal for RPC echo (-11% vs
 # nagle+quickack). QUICKACK is for Paxos (KV bench), not raw RPC echo.
+#
+# 2026-09-02 (same hw, +page-count metrics +flush re-check loop):
+#   RPC echo does not touch the storage engine — this run confirms the
+#   changes have no transport-level impact. Results are within noise
+#   (-1% to -5% vs 2026-08-31). p50/p99 use coarser histogram buckets
+#   (100/500/1000/5000us) — not directly comparable to 2026-08-31 exact
+#   values. Not strictly better — reference NOT updated per regression
+#   policy.
+#
+#   Wkr  Load       Mode       Nagle  ops/s        avg    p50    p99     p999   err
+#   1    1T:1C      coroutine  off    50,663       18     100    100     null   0
+#   4    64T:4C     coroutine  off    514,318      123    500    500     null   0
+#   8    512T:8C    coroutine  off    814,807      626    1000   1000    null   0
+#   16   1,000T:32C coroutine  off    1,271,548    783    500    10000   null   0
+#   4    64T:4C     coroutine  on     973,317      64     100    500     null   0
+#   8    512T:8C    coroutine  on     1,775,602    286    500    500     null   0
+#   16   1,000T:32C coroutine  on     2,130,032    466    500    5000    null   0
+#   1    1T:1C      tokio      off    28,062       34     100    100     null   0
+#   4    64T:4C     tokio      off    492,924      126    500    500     null   0
+#   16   1,000T:32C tokio      off    988,956      999    1000   5000    null   0
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RESULTS_FILE="doc/working/bench-rpc-regression.tsv"
 DURATION=20
 VALUE_SIZE=128
-SERVER_BIN="lib/crowdb-rpc/build/crowdb-rpc-fb-server"
-SERVER_LOG_DIR="/tmp/crowdb-rpc-bench-server"
-SERVER_PORT=18080
-SERVER_PID=""
+CONFIG_FILE="/tmp/bench-rpc-regression-$$.toml"
 
-# Start fb server with matching io_engines/io_workers/nagle.
-# Sets SERVER_PID and waits for "listening port=" on stdout.
+# Deploy a fresh fb-server via `cluster local-deploy -t rpc`.
+# Echoes the allocated port on stdout.
 start_server() {
     local io_engines="$1" io_workers="$2" nagle="$3"
-    rm -rf "$SERVER_LOG_DIR"
-    mkdir -p "$SERVER_LOG_DIR"
     local nagle_arg=""
     if [ "$nagle" = "1" ]; then
-        nagle_arg="--enable_nagle"
+        nagle_arg="--enable-nagle"
     fi
-    local cmd="pixi run -- $SERVER_BIN --port=$SERVER_PORT --io_engines=$io_engines --io_workers=$io_workers --logdir=$SERVER_LOG_DIR --metrics_interval=2 $nagle_arg"
-    echo "    [server] $cmd"
-    $cmd > "$SERVER_LOG_DIR/stdout.log" 2>&1 &
-    SERVER_PID=$!
-    # Wait for "listening port=" in stdout (up to 5s).
-    local deadline=$((SECONDS + 5))
-    while [ "$SECONDS" -lt "$deadline" ]; do
-        if grep -q 'listening port=' "$SERVER_LOG_DIR/stdout.log" 2>/dev/null; then
-            return 0
-        fi
-        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-            echo "    [server] ERROR: server exited early"
-            cat "$SERVER_LOG_DIR/stdout.log"
-            return 1
-        fi
-        sleep 0.1
-    done
-    echo "    [server] ERROR: server did not bind within 5s"
-    cat "$SERVER_LOG_DIR/stdout.log"
-    return 1
+    rm -f "$CONFIG_FILE"
+    echo "    [server] cluster local-deploy -t rpc --io-engines=$io_engines --io-workers=$io_workers $nagle_arg" >&2
+    local output
+    output=$(pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
+        cluster local-deploy -t rpc \
+        --io-engines "$io_engines" --io-workers "$io_workers" $nagle_arg 2>&1)
+    echo "$output" >&2
+    # Parse "port=NNNNN" from "local-deploy rpc: port=NNNNN, pid=...".
+    local port
+    port=$(echo "$output" | grep -oP 'port=\K[0-9]+' | head -1)
+    if [ -z "$port" ]; then
+        echo "    [server] ERROR: could not parse port from local-deploy output"
+        return 1
+    fi
+    echo "$port"
 }
 
-# Stop fb server (SIGTERM, wait up to 5s).
+# Stop the fb-server via `cluster destroy`.
 stop_server() {
-    if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        kill -TERM "$SERVER_PID" 2>/dev/null
-        local wait_deadline=$((SECONDS + 5))
-        while [ "$SECONDS" -lt "$wait_deadline" ]; do
-            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                break
-            fi
-            sleep 0.1
-        done
-        kill -KILL "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
+    if [ -f "$CONFIG_FILE" ]; then
+        pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
+            cluster destroy >&2 2>&1 || true
     fi
-    SERVER_PID=""
-}
-
-# Parse server metrics.log for cumulative totals. The `total` column is
-# cumulative since start, so we take the max across all blocks for each
-# metric (the last block containing that metric has the grand total).
-# The final shutdown block may only have connection-close events, so we
-# can't just take the last block — we scan all blocks.
-# Extracts: writev_total, read_total, submit_to_writev_count.
-# NOTE: frames_sent/frames_parsed are no longer emitted as raw counters
-# (moved to crowdb-common metrics histograms), so raggr/saggr cannot be
-# computed. These columns are dropped from the output.
-parse_server_totals() {
-    local metrics_log="$SERVER_LOG_DIR/metrics.log"
-    if [ ! -f "$metrics_log" ]; then
-        echo "0 0 0"
-        return
-    fi
-    local writev_total read_total sw_count
-    writev_total=$(awk '/^rpc\.transport\.writev /{if ($NF+0 > max) max=$NF+0} END{print max+0}' "$metrics_log")
-    read_total=$(awk '/^rpc\.transport\.read_handle /{if ($NF+0 > max) max=$NF+0} END{print max+0}' "$metrics_log")
-    sw_count=$(awk '/^rpc\.transport\.submit_to_writev /{if ($NF+0 > max) max=$NF+0} END{print max+0}' "$metrics_log")
-    echo "${writev_total:-0} ${read_total:-0} ${sw_count:-0}"
 }
 
 run_bench() {
@@ -148,10 +133,12 @@ run_bench() {
     echo ">>> $label (io_engines=$io_engines, io_workers=$wkr, mode=$mode, nagle=$nagle) ..."
 
     # Start fb server with matching config.
-    if ! start_server "$io_engines" "$wkr" "$nagle"; then
-        echo -e "$label\t$wkr\t0\t0\t0\t0\t0\t0\t$nagle\t1" >> "$RESULTS_FILE"
+    local server_port
+    server_port=$(start_server "$io_engines" "$wkr" "$nagle") || {
+        echo -e "$label\t$wkr\t0\t0\t0\t0\t0\t$nagle\t1" >> "$RESULTS_FILE"
         return
-    fi
+    }
+    echo "    [server] listening on port=$server_port"
 
     # Build and print the full client command.
     local nagle_flag=""
@@ -164,7 +151,7 @@ run_bench() {
         --value-size $VALUE_SIZE \
         --io-engines $io_engines --io-workers $wkr \
         --mode $mode \
-        --server-port $SERVER_PORT \
+        --server-port $server_port \
         $nagle_flag \
         --json"
     echo "    [client] $client_cmd"
@@ -174,7 +161,7 @@ run_bench() {
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
-        echo -e "$label\t$wkr\t0\t0\t0\t0\t0\t0\t$nagle\t1" >> "$RESULTS_FILE"
+        echo -e "$label\t$wkr\t0\t0\t0\t0\t0\t$nagle\t1" >> "$RESULTS_FILE"
         stop_server
         return
     fi
@@ -186,22 +173,15 @@ run_bench() {
     p999_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p999_us')
     errors=$(echo "$json" | jq -r '.total_errors')
 
-    # Stop server (triggers final stats flush to stdout + metrics.log).
+    # Stop server (triggers final stats flush).
     stop_server
 
-    # Parse server-side totals from metrics.log (last block = cumulative).
-    local srv_totals writev_total read_total sw_count
-    srv_totals=$(parse_server_totals)
-    writev_total=$(echo "$srv_totals" | awk '{print $1}')
-    read_total=$(echo "$srv_totals" | awk '{print $2}')
-    sw_count=$(echo "$srv_totals" | awk '{print $3}')
-
-    echo "    ops/s=$ops_s avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us err=$errors | srv: writev=$writev_total read=$read_total sw=$sw_count"
+    echo "    ops/s=$ops_s avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us err=$errors"
     echo -e "$label\t$wkr\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$nagle\t$errors" >> "$RESULTS_FILE"
 }
 
-# Cleanup on exit — kill server if still running.
-trap 'stop_server' EXIT
+# Cleanup on exit — stop server if still running.
+trap 'stop_server; rm -f "$CONFIG_FILE"' EXIT
 
 echo -e "label\twkr\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\tnagle\terrors" > "$RESULTS_FILE"
 

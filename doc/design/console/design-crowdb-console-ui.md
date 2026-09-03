@@ -23,36 +23,37 @@ what we chose and why. Requirements (the *what*) live in
   - [5.3 Interactions](#53-interactions)
 - [6. Inspector Panel](#6-inspector-panel)
 - [6.1 KV Operator Panel (center panel)](#61-kv-operator-panel-center-panel)
-- [7. Embedded Swagger Panel](#7-embedded-swagger-panel)
-- [8. Embedding Contract](#8-embedding-contract)
-- [9. Data & Polling Strategy](#9-data--polling-strategy)
-- [10. Module Layout](#10-module-layout)
-- [11. Accessibility](#11-accessibility)
-- [12. Testing](#12-testing)
-- [13. View-Mode Restructure: Physical / Capacity / KV](#13-view-mode-restructure-physical--capacity--kv)
-  - [13.1 Three view-modes](#131-three-view-modes)
-  - [13.2 Physical view: DiskDB Server sub-tree](#132-physical-view-diskdb-server-sub-tree)
-  - [13.3 Capacity view sidebar + dialogs](#133-capacity-view-sidebar--dialogs)
-  - [13.4 Batch Add Disk](#134-batch-add-disk)
-- [14. DiskDB Server Deploy / Restart / Stop](#14-diskdb-server-deploy--restart--stop)
-- [15. REST Proxy for DiskDB Runtime](#15-rest-proxy-for-diskdb-runtime)
-- [16. Capacity Panel (Canvas Visualization)](#16-capacity-panel-canvas-visualization)
-  - [16.1 Rendering](#161-rendering)
-  - [16.2 Color encoding](#162-color-encoding)
-  - [16.3 Polling](#163-polling)
-  - [16.4 Scope dispatch and module structure](#164-scope-dispatch-and-module-structure)
-- [17. Console-Shared DiskDB Client + CLI](#17-console-shared-diskdb-client--cli)
-  - [17.1 Console-shared client](#171-console-shared-client)
-  - [17.2 CLI subcommands](#172-cli-subcommands)
+- [7. Embedding Contract](#7-embedding-contract)
+- [8. Data & Polling Strategy](#8-data--polling-strategy)
+- [9. Module Layout](#9-module-layout)
+- [10. Accessibility](#10-accessibility)
+- [11. Testing](#11-testing)
+- [12. Domain Restructure: Cluster / KV / Chunk](#12-domain-restructure-cluster--kv--chunk)
+  - [12.1 Three domains](#121-three-domains)
+  - [12.2 Why three domains (not view-modes)](#122-why-three-domains-not-view-modes)
+  - [12.3 Swagger UI removal](#123-swagger-ui-removal)
+  - [12.4 Batch Add Disk](#124-batch-add-disk)
+- [13. DiskDB Server Deploy / Restart / Stop](#13-diskdb-server-deploy--restart--stop)
+- [14. REST Proxy for DiskDB Runtime](#14-rest-proxy-for-diskdb-runtime)
+- [15. Capacity Panel (Canvas Visualization)](#15-capacity-panel-canvas-visualization)
+  - [15.1 Rendering](#151-rendering)
+  - [15.2 Color encoding](#152-color-encoding)
+  - [15.3 Polling](#153-polling)
+  - [15.4 Scope dispatch and module structure](#154-scope-dispatch-and-module-structure)
+- [16. Console-Shared DiskDB Client + CLI](#16-console-shared-diskdb-client--cli)
+  - [16.1 Console-shared client](#161-console-shared-client)
+  - [16.2 CLI subcommands](#162-cli-subcommands)
 
 ## 1. Goals (recap)
 
 - Single page, no full-page navigation.
-- Three first-class hierarchy views (Physical / Capacity / KV) that
-  drive the sidebar tree, the topology canvas, and the inspector
-  together.
+- Three first-class **domains** (Cluster / KV / Chunk) that drive the
+  sidebar tree, the topology canvas, and the inspector together. The
+  domain split aligns the web UI with the CLI's four-domain structure
+  (Cluster / KV / Chunk / Bench — Bench is CLI-only).
 - Full operator surface: rack/node/server lifecycle, store/group/replica
-  CRUD, KV data plane, embedded Swagger.
+  CRUD, KV data plane, disk-group/disk lifecycle, capacity
+  visualization.
 - Offline-capable: no third-party CDN at runtime.
 - Lean: minimal dependencies, no feature the requirement does not mandate.
 
@@ -63,7 +64,7 @@ what we chose and why. Requirements (the *what*) live in
 - **React Flow for topology** — slim usage only (custom nodes, pan, click
   select). Deliberately no minimap, zoom toolbar, layout selector, or edge
   labels. The canvas is a navigation aid, not an analytics surface.
-- **React Context for state** — view-mode, selection, toasts, activity.
+- **React Context for state** — domain, selection, toasts, activity.
   No Redux; the state surface is small enough that Context + local hooks
   suffice.
 - **No client-side routing** — the SPA mounts at the document root;
@@ -74,55 +75,51 @@ what we chose and why. Requirements (the *what*) live in
 
 ## 3. Information Architecture
 
-A fixed three-pane shell. A single root-level **view-mode** (Physical /
-Capacity / KV) selects which hierarchy every pane renders.
+A fixed three-pane shell. A single root-level **domain** (Cluster / KV
+/ Chunk) selects which hierarchy every pane renders. The domain
+replaces the former view-mode (Physical / Capacity / KV) and aligns
+the web UI with the CLI's domain structure. The per-domain sidebar +
+center panel layouts are detailed in §12.1.
 
 ```
 ┌─ Header ───────────────────────────────────────────────────────────┐
-│ brand · health pill · view toggle (Physical/Logical) · last refresh │
-│ · refresh · node selector (Swagger only) · KV / API panel toggles   │
+│ brand · health pill · domain toggle (Cluster/KV/Chunk) · refresh   │
 ├─ Sidebar ─────┬─ Center panel ─────────────┬─ Inspector ────────────┤
-│ filter input  │ Topology canvas (default)  │ Details (key/value)    │
-│ hierarchy     │ Swagger panel (API toggle) │ Activity (recent ops)  │
-│ tree of the   │ KV Operator panel (KV)     │                        │
-│ active view   │                            │                        │
-│ (+ context    │                            │                        │
-│  menu)        │                            │                        │
+│ (per-domain   │ (per-domain layout,        │ Details (key/value)    │
+│  tree, see    │  see §12.1)                │ Activity (recent ops)  │
+│  §12.1)       │                            │                        │
+│               │                            │ (unchanged — scoped    │
+│               │                            │  to current selection) │
 └───────────────┴────────────────────────────┴────────────────────────┘
 ```
 
-- **Header** (~56px): brand label, cluster health pill, Physical/Logical
-  toggle, last-refresh time, manual refresh button, node selector
-  (consumed only by the Swagger panel).
+- **Header** (~56px): brand label, cluster health pill, domain toggle
+  (Cluster / KV / Chunk), last-refresh time, manual refresh button.
 - **Sidebar** (~240px): a text filter plus the hierarchy tree for the
-  active view. Click selects; right-click opens the per-layer context
+  active domain. Click selects; right-click opens the per-layer context
   menu. No favorites, no recent, no saved presets.
-- **Canvas**: React Flow rendering the active view's hierarchy. Drag pans,
-  wheel zooms (React Flow default), click selects. Selection is shared
-  with the sidebar and inspector via `SelectionContext`. No floating
-  toolbar.
-- **Center panel**: one of three modes, toggled from the header:
-  Topology canvas (default), Swagger panel, or KV Operator panel. The
-  KV and Swagger toggles are mutually exclusive with the topology view;
-  selecting one replaces the canvas.
+- **Center panel**: content depends on the active domain — Cluster
+  renders a hardware topology canvas; KV renders a tabbed logical
+  canvas + KV operator panel; Chunk renders a capacity visualization
+  panel. See §12.1 for the per-domain layouts.
 - **Inspector** (~320px, collapsible): tabs scoped to the selection:
   Details and Activity only. KV operations have moved to the center KV
   Operator panel (§6.1).
 
-Selection is held in one `SelectionContext`. The shell is rendered once;
-switching view-mode swaps the tree data and the canvas layout only.
+Selection is held in one `SelectionContext`. The shell is rendered
+once; switching domain swaps the tree data and the center panel only.
 
 ### 3.1 Selection & cross-jump
 
-Selection is `{ type, id, parentIds }` where `type ∈ { Rack, Node, Server,
-Store, Group, Replica }`. Clicking any tree row or canvas node sets it.
+Selection is `{ type, id, parentIds }` where `type ∈ { Rack, Node,
+Server, Store, Group, Replica, DiskGroup, Disk }`. Clicking any tree
+row or canvas node sets it.
 
 Cross-jump (one click) is supported for the common case only:
-- Logical `Replica` → "Show on node": switch to Physical, expand the
-  owning `Node → Server → Store → Group`, select the matching
-  `LocalReplica`.
-- Physical `LocalReplica`/`Group` → "Show in cluster": switch to Logical,
-  expand the owning `Store → Group`, select the unified row.
+- KV `Replica` → "Show on node": switch to Cluster, expand the owning
+  `Node`, select the matching server entry.
+- Cluster `Server`/`Group` → "Show in KV": switch to KV, expand the
+  owning `Store → Group`, select the unified row.
 
 No navigation stack / back button in v1.
 
@@ -141,7 +138,7 @@ Animations are minimal (selection/hover transitions); honor
 
 ## 5. Topology Canvas (React Flow, slim)
 
-One layout at a time, chosen by view-mode. Layout is computed by a small
+One layout at a time, chosen by domain. Layout is computed by a small
 deterministic tree-layout pass in `topology/layout.ts` (columns by depth,
 rows by sibling index). No dagre, no force simulation, no user-selectable
 layouts.
@@ -187,8 +184,8 @@ surface with store/group selectors, scan results, and an action bar.
 ## 6.1 KV Operator Panel (center panel)
 
 A full-width center panel for KV data-plane operations, toggled from the
-header via a "KV" button (mutually exclusive with Swagger and topology
-canvas). Replaces the former Inspector KV tab, which was too cramped at
+header via a "KV" button (mutually exclusive with the topology canvas).
+Replaces the former Inspector KV tab, which was too cramped at
 320px for comfortable key browsing.
 
 **Design choices:**
@@ -202,9 +199,8 @@ canvas). Replaces the former Inspector KV tab, which was too cramped at
   forcing the user to pick a group when they want a store-wide view.
 - **Auto-scan on first load** — when store and group are both set, the
   panel triggers a scan automatically so the user sees data immediately.
-- **Independent of ViewMode** — KV operations are always logical
-  (store/group), regardless of whether the topology canvas shows the
-  physical or logical view.
+- **Independent of domain** — KV operations are always logical
+  (store/group), regardless of which domain's canvas is active.
 
 **Scan pagination (`start_after` token):**
 
@@ -231,18 +227,10 @@ deletes with 16-way parallel `kvDelete`. If more than 1000 keys exist,
 scan+delete continues in batches after confirmation. The confirmation
 dialog shows "1000+" when the count may be higher.
 
-## 7. Embedded Swagger Panel
-
-- Lives inside the SPA; opening it does not navigate or open a new tab.
-- Hosts an `<iframe>` at `${apiPrefix}/swagger/?url=${apiPrefix}/nodes/:node_id/openapi.json`,
-  where `:node_id` is the header's node selector.
-- Switching the node reloads the iframe `url` only.
-- Loaded lazily (code-split) so initial page load is not blocked.
-
-## 8. Embedding Contract
+## 7. Embedding Contract
 
 The SPA is mountable as a sub-component with a minimal props interface
-(`apiPrefix`, `basePath`, `readonly`, `modules` opt-out, `initialViewMode`,
+(`apiPrefix`, `basePath`, `readonly`, `modules` opt-out, `initialDomain`,
 `onEvent` callback). Three isolation rules:
 
 - **Style isolation** — everything wraps in `.crowdb-console`; Tailwind
@@ -251,7 +239,13 @@ The SPA is mountable as a sub-component with a minimal props interface
 - **Standalone** — `index.html` mounts at the document root with defaults;
   `embed.ts` exports the component for hosts.
 
-## 9. Data & Polling Strategy
+The `initialDomain` prop (values: `Cluster | KV | Chunk`) replaces the
+former `initialViewMode`. The `modules` opt-out keys are
+`'racks' | 'nodes' | 'stores' | 'groups' | 'replicas' | 'kv' |
+'activity'` — the former `'swagger'` key is removed (Swagger UI is no
+longer embedded). The former `initialNodeId` prop is removed.
+
+## 8. Data & Polling Strategy
 
 - **Two-tree contract** — the SPA speaks physical (`/api/racks`,
   `/api/nodes`) and logical (`/api/stores`) trees per `design-crowdb-console.md`.
@@ -265,12 +259,12 @@ The SPA is mountable as a sub-component with a minimal props interface
   hand-edit cached data. This trades a round-trip for correctness
   simplicity.
 
-## 10. Module Layout
+## 9. Module Layout
 
 The source tree follows the pane structure: `shell/` (Header, Sidebar,
 Inspector), `topology/` (canvas + layout), `panels/` (KvOperatorPanel,
-SwaggerPanel, ActivityLog), `components/` (Dialog, ContextMenu, dialogs,
-UI primitives), and `contexts/` (ViewMode, Selection, Toast, Activity).
+ActivityLog), `components/` (Dialog, ContextMenu, dialogs,
+UI primitives), and `contexts/` (Domain, Selection, Toast, Activity).
 `api.ts` and `types/index.ts` are the single URL-builder and data-model
 modules respectively.
 
@@ -278,7 +272,7 @@ modules respectively.
 utils, bulk action dialog, metrics history, theme context. None are
 needed for the lean surface.
 
-## 11. Accessibility
+## 10. Accessibility
 
 - Keyboard reachable: Tab/Enter/Escape on tree rows, dialogs, and menus;
   context menus mirror to keyboard-activatable buttons where practical.
@@ -286,7 +280,7 @@ needed for the lean surface.
 - Strings go through a single `t(key)` helper (English only) so a future
   locale pack needs no source changes. (Optional for v1; may inline.)
 
-## 12. Testing
+## 11. Testing
 
 - Existing Vitest unit tests for dialog request bodies and `listRacks`
   envelope handling are **retained** (they pin the backend contract).
@@ -296,158 +290,153 @@ needed for the lean surface.
 
 ---
 
-## 13. View-Mode Restructure: Physical / Capacity / KV
+## 12. Domain Restructure: Cluster / KV / Chunk
 
-The header view-toggle expanded from two modes (Physical | Logical) to
-three (Physical | Capacity / KV). This separation gives each view a
-single responsibility: Physical handles infrastructure + service
-management, Capacity handles disk-group/disk lifecycle + capacity
-visualization, and KV handles KV data-plane operations. Disk lifecycle
-actions (Add Disk Group, Add Disk) do not belong on the Physical view's
-Node context menu. They are capacity concerns, not infrastructure
-concerns. Splitting them into a dedicated Capacity view also lets the
-Capacity center panel render capacity visualization without competing
-with the topology canvas.
+The header toggle evolved from two view-modes (Physical | Logical) to
+three view-modes (Physical | Capacity | KV) and then to three
+**domains** (Cluster / KV / Chunk). The domain split aligns the web
+UI with the CLI's four-domain structure (Cluster / KV / Chunk / Bench
+— Bench is CLI-only). Each domain owns a single responsibility and a
+self-contained sidebar + center panel.
 
-### 13.1 Three view-modes
+### 12.1 Three domains
 
-- **Physical** — rack → node → server(s) → (KV: store → group;
-  DiskDB: disk-group → disk). Infrastructure + service management
-  only. Read-only resource listing under each server. Context menus:
-  - Rack: Add Node, Delete Rack.
-  - Node: Ping, Delete Node. No Add Disk Group / Add Disk.
-  - Server (KV or DiskDB): Restart, Stop, (if no server: Deploy).
-  - Server sub-tree (store/group/disk-group/disk): read-only, no
-    context menu.
-- **Capacity** — rack → node → disk-group → disk (no server nodes —
-  infrastructure is visible in Physical). The only place to
-  add/remove/move/set-status disk groups and disks. Center panel
-  renders capacity visualization (§16). Context menus:
-  - Node: Add Disk Group.
-  - DiskGroup: Add Disk (batch), Remove Disk Group, Set Status.
-  - Disk: Remove Disk, Move Disk, Set Disk Status.
-- **KV** (renamed from "Logical") — cluster → store → group →
-  replica. KV data-plane operations via the KV Operator panel (§6.1).
-  Unchanged from the former Logical view except the name.
+The shell keeps the same three-pane structure (sidebar / center /
+inspector). The header's domain toggle switches between three
+domains; `bench` is CLI-only (load injection is not a UI workflow).
+The inspector is unchanged across all domains — Details + Activity
+scoped to the current selection.
 
-`ViewModeContext` expanded from `Physical | Logical` to
-`Physical | Capacity | KV`. The sidebar tree data hook switches on
-the active mode; the center panel mode set changes per mode (Physical
-→ topology canvas; Capacity → capacity panel; KV → KV operator
-panel).
-
-### 13.2 Physical view: DiskDB Server sub-tree
-
-The Physical view's `Server` tree node renders both server types
-under a Node:
-
-- `KV-${nodeId}` — existing; children `Store → Group → Replica`.
-- `DDB-${nodeId}` — new; children `DiskGroup → Disk` (read-only,
-  fetched from `GET /api/nodes/:id/disk-groups` +
-  `GET /api/nodes/:id/disk-groups/:dg_id/disks`).
-
-`TreeNode.type` gains `'DiskGroup' | 'Disk'` variants. The
-`serverByNodeId` lookup is extended to a `servicesByNodeId` map that
-returns both KV and DiskDB server entries; each renders as a separate
-`Server`-typed child with a distinguishing icon (Cog for KV, HardDrive
-for DiskDB).
-
-Context menu on a `Server` node: Restart →
-`POST /api/nodes/:id/server/restart` (KV) or
-`POST /api/nodes/:id/diskdb/restart` (DiskDB, §14). Stop →
-`POST /api/nodes/:id/server/stop` (KV) or
-`POST /api/nodes/:id/diskdb/stop` (DiskDB, §14). Labeled "Stop" not
-"Delete". It stops the process but keeps the deployment record so
-Restart/Deploy can bring it back. If no server deployed: Deploy →
-opens `DeployServerDialog` (existing for KV) or `DeployDiskdbDialog`
-(new, §14).
-
-The Restart/Stop items on the Node menu are removed. Server-process
-ops belong on the Server node, not the Node. Node menu keeps only
-Ping + Delete Node (+ Deploy if no server).
-
-Edge cases:
-- Node with KV deployed but no DiskDB → only `KV-${nodeId}` child
-  renders; no `DDB-${nodeId}` node.
-- DiskDB deployed but owns zero disk-groups → `DDB-${nodeId}` renders
-  with empty children (leaf with no expand arrow).
-- KV server stopped (pid cleared) but entry persisted → still renders
-  in the tree; Restart available, health = Unknown.
-
-### 13.3 Capacity view sidebar + dialogs
-
-The Capacity view sidebar renders rack → node → disk-group → disk
-(no server nodes; infrastructure is visible in Physical). Disk
-lifecycle dialogs (Add Disk Group, Add Disk, Remove, Move, Set Status)
-are only accessible here.
-
-Sidebar tree for Capacity mode:
-- Rack → Node → DiskGroup → Disk, fetched from
-  `GET /api/nodes/:id/disk-groups` + `.../disks`.
-- `TreeNode.type` variants `'DiskGroup' | 'Disk'` (from §13.2).
-- Disk rows show two status columns: "Group-0" (from
-  `HardwareClient.get_disk` via
-  `GET /api/nodes/:id/disk-groups/:dg_id/disks/:disk_id`) and
-  "Runtime" (from `QueryCapacityStats` via `/api/diskdb/usage`).
-  Both use the existing `toUiHealth`-style mapping over `HwStatus`.
-
-Context menus (Capacity branch):
-- Node: Add Disk Group → `AddDiskGroupDialog`.
-- DiskGroup: Add Disk → `AddDiskDialog` (batch, §13.4); Remove Disk
-  Group; Set Status.
-- Disk: Remove Disk; Move Disk; Set Disk Status.
-
-Dialogs (follow `AddNodeDialog`/`ConfirmDeleteDialog` patterns):
-- `AddDiskGroupDialog` — id, name. Calls
-  `POST /api/nodes/:id/disk-groups`.
-- `AddDiskDialog` — batch (§13.4). Calls
-  `POST /api/nodes/:id/disk-groups/:dg_id/disks/batch`.
-- `RemoveDiskDialog` / `RemoveDiskGroupDialog` — confirm + cascade
-  warning. Calls `DELETE .../disks/:id` / `DELETE .../disk-groups/:id`.
-- `MoveDiskDialog` — target rack/node/disk-group. Calls
-  `PUT .../disks/:id/move`.
-- `SetDiskStatusDialog` — `HwStatus` enum dropdown. Calls
-  `PUT /api/disks/:id/status` (§15).
-
-### 13.4 Batch Add Disk
-
-A batch endpoint for atomic all-or-nothing disk creation:
-
-```rust
-pub struct AddDiskBatchBody {
-    disks: Vec<AddDiskItem>,
-}
-pub struct AddDiskItem {
-    disk_id: String,
-    disk_type: String,
-    capacity_bytes: u64,
-    zone_size_bytes: u64,
-    unit_size_bytes: u32,
-}
+```
+┌─ Header ───────────────────────────────────────────────────────────┐
+│ brand · health pill · domain toggle (Cluster/KV/Chunk) · refresh   │
+├─ Sidebar ─────┬─ Center panel ─────────────┬─ Inspector ────────────┤
+│ (per-domain   │ (per-domain layout,        │ Details (key/value)    │
+│  tree, see    │  see below)                │ Activity (recent ops)  │
+│  below)       │                            │                        │
+│               │                            │ (unchanged — scoped    │
+│               │                            │  to current selection) │
+└───────────────┴────────────────────────────┴────────────────────────┘
 ```
 
-Route: `POST /api/nodes/:id/disk-groups/:dg_id/disks/batch`.
+**Domain 1 — Cluster (hardware topology)**
+
+```
+┌─ Sidebar ─────┐┌─ Center: hierarchy chart ─────────────────────────┐
+│ ▾ Rack 1      ││  Rack 1                                           │
+│   ▾ Node 1    ││   ├─ Node 1                                       │
+│     ▾ DG-0    ││   │   └─ ┌─────────────────────────────┐          │
+│       • disk0 ││   │       │ DG-0                       │          │
+│       • disk1 ││   │       │  ⬢ a3f1  ⬢ b7c2  ⬢ e9d4   │          │
+│   ▸ Node 2    ││   │       └─────────────────────────────┘          │
+│ ▾ Rack 2      ││   └─ Node 2 ...                                   │
+│   ▸ Node 3    ││  Rack 2 ...                                       │
+└───────────────┘└───────────────────────────────────────────────────┘
+```
+
+Context menus: Rack (Add Node, Delete Rack) · Node (Ping, Delete
+Node, Deploy Server) · DiskGroup (Add Disk batch, Remove, Set Status)
+· Disk (Remove, Move, Set Status). Cluster-level ops (init / reset /
+clean) are triggered from the header or a toolbar above the canvas.
+
+**Domain 2 — KV (server lifecycle + logical + data-plane)**
+
+```
+┌─ Sidebar ─────┐┌─ Center: [Cluster] [KV] ──────────────────────────┐
+│ ▾ Rack 1      ││  Store 1                                          │
+│   ▾ Node 1    ││   ├─ Group 1                                      │
+│     ▸ kv-srv  ││   │   ├─ Replica 0 (node 1)                       │
+│   ▸ Node 2    ││   │   └─ Replica 1 (node 2)                       │
+│ ▾ Rack 2      ││   └─ Group 2 ...                                  │
+│   ▸ Node 3    ││  Store 2 ...                                      │
+│               ││  (Cluster tab shown — click [KV] for operator)    │
+└───────────────┘└───────────────────────────────────────────────────┘
+
+KV tab active:
+┌─ Sidebar ─────┐┌─ Center: [Cluster] [KV] ──────────────────────────┐
+│ ▾ Rack 1      ││  KV Operator: [store ▾] [group ▾]                 │
+│   ▾ Node 1    ││  key: [_______]  value: [_______]  [Put]          │
+│     ▸ kv-srv  ││  key: [_______]  [Get]  [Delete]                  │
+│   ▸ Node 2    ││  scan: [prefix___] [Scan]  results: ...           │
+│ ▾ Rack 2      ││                                                   │
+│   ▸ Node 3    ││                                                   │
+└───────────────┘└───────────────────────────────────────────────────┘
+```
+
+Context menus: Node (Deploy / Restart / Stop / Delete Server) · Store
+(Add Group, Delete) · Group (Add Replica, Delete) · Replica (Delete).
+Selection persists across tab switches — inspect a group in Cluster,
+switch to KV, operate on it without re-selecting.
+
+**Domain 3 — Chunk (chunkdb / diskdb / diskio management)**
+
+```
+┌─ Sidebar ─────┐┌─ Center: [Capacity] [Chunk] ──────────────────────┐
+│ ▾ Rack 1      ││  (Capacity sub-view shown by default)              │
+│   ▾ Node 1    ││                                                   │
+│     ▸ chunkdb ││  Rack 1 / Node 1 / DG-0                           │
+│     ▸ diskdb  ││   ┌─────────────────────────────────────┐         │
+│       ▸ DG-0  ││   │ ▓▓▓▓▓░░░░  ▓▓▓░░░░░░  ▓▓▓▓▓▓░░    │         │
+│         • d0  ││   │ disk a3f1   disk b7c2   disk e9d4   │         │
+│         • d1  ││   │ 78% used    42% used    88% used    │         │
+│     ▸ diskio  ││   └─────────────────────────────────────┘         │
+│   ▸ Node 2    ││                                                   │
+│ ▾ Rack 2      ││  Rack 1 / Node 2 / DG-1 ...                       │
+│   ▸ Node 3    ││                                                   │
+└───────────────┘└───────────────────────────────────────────────────┘
+```
+
+Disk-groups under a diskdb server are read-only (managed from
+Cluster). The Chunk sub-view is blank until `ops::chunk` is
+implemented — no placeholder text, so future content drops in without
+UI changes.
+
+`DomainContext` (renamed from `ViewModeContext`) holds the active
+domain. Selection is shared across all three domains via
+`SelectionContext` — clicking a node in Cluster, switching to KV,
+right-clicking shows the KV-server context menu for the same node.
+
+### 12.2 Why three domains (not view-modes)
+
+The former view-mode split (Physical / Capacity / KV) mixed
+infrastructure management (Physical) with disk lifecycle (Capacity)
+and KV operations (KV), but the CLI had already moved to a cleaner
+domain split (Cluster / KV / Chunk / Bench). The domain restructure
+unifies the two frontends:
+
+- **Cluster** merges the former Physical + Capacity views — hardware
+  topology and disk lifecycle are both infrastructure concerns and
+  belong together. The Capacity center panel moves under the Chunk
+  domain (capacity is a property of the chunk/disk storage layer).
+- **KV** keeps the logical KV layer + data-plane, now with server
+  lifecycle under each node (was a separate Physical concern).
+- **Chunk** is new — it hosts the chunk/disk storage layer (diskdb,
+  chunkdb, diskio) and the capacity visualization that belongs to
+  that layer. The Chunk center panel's Chunk sub-view is a placeholder
+  for future chunk-management features (`ops::chunk` is currently
+  stubs).
+
+### 12.3 Swagger UI removal
+
+The former Swagger API panel (embedded OpenAPI browser + per-node
+openapi.json proxy) is removed. The OpenAPI document remains served
+by `crowdb-kv-server` at `/openapi.json` for direct access; the
+console no longer embeds or proxies it. The `'swagger'` module opt-out
+key and `initialNodeId` prop are removed from the embedding contract.
+
+### 12.4 Batch Add Disk
+
+A batch endpoint for atomic all-or-nothing disk creation (unchanged
+from the former Capacity view, now accessed from the Cluster domain):
 
 - Validates all `disk_id` formats upfront; rejects the whole batch if
   any is malformed (atomic).
 - Writes all disks to config + group-0 sysdata in one transaction;
   if any write fails, rolls back (no partial success).
-- `AddDiskDialog` UI: a row-builder where each row auto-generates a
-  UUID (editable), disk_type dropdown, capacity (default 4 TiB),
-  zone_size (default 32 GiB), unit_size (fixed 1 MiB, disabled
-  input). "Add Row" / "Remove Row" buttons. Submit sends the whole
-  batch.
-- Defaults: `capacity_bytes = 4 * 1024^4`, `zone_size_bytes = 32 *
-  1024^3`, `unit_size_bytes = 1024^2` (locked).
 
-Edge cases:
-- Batch with duplicate disk_ids → 400, whole batch rejected.
-- Group-0 sysdata write fails for disk 3 of 5 → rollback all 5, 502.
-- Empty batch → 400.
+## 13. DiskDB Server Deploy / Restart / Stop
 
-## 14. DiskDB Server Deploy / Restart / Stop
-
-The Physical view's DiskDB Server node needs the same service-lifecycle
+The Chunk domain's DiskDB Server node needs the same service-lifecycle
 ops as KV Server (Restart, Stop, Deploy). The deploy/restart/stop
 handlers enable `AddNodeDialog` to auto-deploy DiskDB alongside KV,
 and the Server context menu works for both types.
@@ -509,7 +498,7 @@ Edge cases:
   as 502. The handler does not pre-check ports (best-effort, matches
   KV behavior).
 
-## 15. REST Proxy for DiskDB Runtime
+## 14. REST Proxy for DiskDB Runtime
 
 `crowdb-web` proxies diskdb runtime RPCs (`QueryCapacityStats` drill-down,
 scan, recalc, compact, rebuild) via REST endpoints under
@@ -566,15 +555,16 @@ Edge cases:
 - Scan already running → `trigger_scan` returns `scan_in_progress:
   true`; handler passes it through (no error).
 
-## 16. Capacity Panel (Canvas Visualization)
+## 15. Capacity Panel (Canvas Visualization)
 
-The Capacity view center panel renders capacity visualization that
-scales to thousands of zones per disk and tens of thousands of blocks
-per zone. Canvas with offscreen double-buffering handles 84×84 zone
-grids and 181×181 bitmap grids without flicker. DOM/SVG rendering at
-that scale causes layout thrash and jank.
+The Chunk domain's Capacity sub-view renders capacity visualization
+that scales to thousands of zones per disk and tens of thousands of
+blocks per zone. Canvas with offscreen double-buffering handles 84×84
+zone grids and 181×181 bitmap grids without flicker. DOM/SVG
+rendering at that scale causes layout thrash and jank.
 
-`CapacityPanel.tsx` renders when `viewMode === Capacity`. The panel
+`CapacityPanel.tsx` renders when `domain === Chunk` and the Capacity
+sub-view is active. The panel
 content depends on the selected entity (from `SelectionContext`):
 
 - **Cluster (Datacenter or no selection)** — per-rack breakdown. One
@@ -614,7 +604,7 @@ content depends on the selected entity (from `SelectionContext`):
   `GET /api/diskdb/usage?dg=<id>&disk=<disk_id>&zone=<zi>` (full
   bitmap, on-demand only).
 
-### 16.1 Rendering
+### 15.1 Rendering
 
 Canvas, not SVG/DOM, for all levels:
 - Offscreen canvas double-buffering: draw to an offscreen canvas,
@@ -627,7 +617,7 @@ Canvas, not SVG/DOM, for all levels:
 - No DOM reflow. The canvas is a single element; only its bitmap
   content changes.
 
-### 16.2 Color encoding
+### 15.2 Color encoding
 
 Green (free) → amber → red (busy):
 - Zone/disk boxes: gradient fill based on `busy_blocks /
@@ -637,7 +627,7 @@ Green (free) → amber → red (busy):
   hover (zone id + usage %) or inline so the information is not
   color-only (color-blind friendly).
 
-### 16.3 Polling
+### 15.3 Polling
 
 3 s refresh of the currently focused visualization:
 - The poll refetches only the data for the selected entity level
@@ -661,7 +651,7 @@ Edge cases:
 - Poll response slower than 3 s → keep previous frame; next poll
   catches up. No spinner overlay (would flicker).
 
-### 16.4 Scope dispatch and module structure
+### 15.4 Scope dispatch and module structure
 
 `CapacityPanel` derives a `CapacityScope` (`Cluster | Rack | Node |
 DiskGroup | Disk`) from the selected entity and renders one branch per
@@ -687,9 +677,9 @@ Shared color/format utilities live in `utils/capacity.ts`:
 when a zone is clicked and caches the last result; the 3 s poll
 refetches the focused zone via its `refresh` callback.
 
-## 17. Console-Shared DiskDB Client + CLI
+## 16. Console-Shared DiskDB Client + CLI
 
-### 17.1 Console-shared client
+### 16.1 Console-shared client
 
 `ConsoleClient` in `crowdb-console-shared` is the typed REST client used
 by both the web UI (via `api.ts` wrappers) and `crowdb-cli`. It has
@@ -714,7 +704,7 @@ Serde model types (mirrors of the flatbuffer responses):
 `DiskUsage`, `ZoneUsage`, `ScanSummary`, `RecalcResult`,
 `CompactionResult`, `RebuildResult`, `UsageResponse`.
 
-### 17.2 CLI subcommands
+### 16.2 CLI subcommands
 
 Runtime queries (usage/zones/scan/recalc/compact/rebuild) are
 reachable from the command line via `crowdb diskdb` subcommands.

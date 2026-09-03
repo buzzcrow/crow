@@ -32,8 +32,16 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_retries: 3,
-            unknown_leader_wait: Duration::from_millis(100),
+            // `resolve_leader` uses `max_retries` + `unknown_leader_wait`
+            // to poll topology while an election is in progress. With the
+            // production election timeout of 1–2 s, 10 × 200 ms = 2 s
+            // covers one full election cycle; the E2E profile (300–600 ms
+            // election) is covered many times over. `put`/`get` retry
+            // loops also use this budget but exit early on success, so a
+            // larger budget only extends the worst-case wait, not the
+            // happy path.
+            max_retries: 10,
+            unknown_leader_wait: Duration::from_millis(200),
             backoff_base: Duration::from_millis(100),
             backoff_max: Duration::from_secs(5),
         }

@@ -19,6 +19,8 @@ Satisfies: [`design-crowdb-kv.md`](design-crowdb-kv.md) §15.2
   - [2.5 Group lifecycle](#25-group-lifecycle)
   - [2.6 Shutdown](#26-shutdown)
 - [3. Port Pool](#3-port-pool)
+- [4. Group/store cleanup on remove](#4-groupstore-cleanup-on-remove)
+- [5. Wipe user data](#5-wipe-user-data)
 
 ---
 
@@ -160,3 +162,31 @@ inclusive ranges (e.g. `28,40..50,59`). Duplicates are silently
 deduplicated. If `--stores` exceeds the port pool size, the server
 exits with an error. When `--ports` is omitted, ports are OS-assigned
 (zeros).
+
+## 4. Group/store cleanup on remove
+
+The `remove_group` and `remove_store` mgmt handlers delete the WAL +
+engine dirs and update `node-config.json` in addition to the
+in-memory `PxKvStore::remove_*`. The `node-config.json` update is the
+fence against resurrection on restart — without it, a removed group
+reappears from persisted config and collides with a new group at the
+same `(store_id, group_id)`.
+
+- **I1 — ID reuse safety**: After a group/store is removed, its ID
+  can be safely reused. The `node-config.json` update is the fence.
+
+## 5. Wipe user data
+
+`POST /stores/{sid}/groups/{gid}/wipe-user-data` drops and recreates
+WAL + engine user data for a group, preserving group0 sysdata +
+topology. Used by `cluster clean` to reset a cluster between
+write-regression sub-tests without a full redeploy. The handler
+steps down if leader, deletes the WAL + engine dirs, recreates the
+group via `create_group_with_wal` (replays empty WAL → fresh state),
+and does `remove_group` + `add_group` (remove-before-add is critical:
+`add_group` calls `inherit_local_state_from(prior)` which would
+`Arc::clone` the prior's engine + WAL, undoing the wipe).
+
+- **I2 — Wipe preserves group0**: `wipe-user-data` drops WAL + engine
+  user data only; group0 sysdata + `node-config.json` + topology are
+  untouched.

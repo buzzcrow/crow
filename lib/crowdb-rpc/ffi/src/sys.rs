@@ -54,6 +54,7 @@ pub struct CrowdbRpcTransportStats {
 #[derive(Default, Debug)]
 pub struct CrowdbRpcClientCounters {
     pub submit_fail: u64,
+    pub submit_retry: u64,
     pub resp_missed: u64,
     pub reaped: u64,
 }
@@ -145,6 +146,7 @@ extern "C" {
         io_workers: u32,
     ) -> crowdb_rpc_server_t;
     pub fn crowdb_rpc_server_destroy(server: crowdb_rpc_server_t);
+    pub fn crowdb_rpc_server_clear_handlers(server: crowdb_rpc_server_t);
     pub fn crowdb_rpc_server_listen(
         server: crowdb_rpc_server_t,
         addr: *const c_char,
@@ -176,6 +178,8 @@ extern "C" {
 
     pub fn crowdb_rpc_client_stop_reaper(client: crowdb_rpc_client_t);
 
+    pub fn crowdb_rpc_client_dump_pending(client: crowdb_rpc_client_t);
+
     pub fn crowdb_rpc_client_send(
         client: crowdb_rpc_client_t,
         server: crowdb_rpc_server_t,
@@ -205,6 +209,8 @@ extern "C" {
         addr: *const c_char,
         port: c_int,
     ) -> crowdb_rpc_conn_t;
+
+    pub fn crowdb_rpc_conn_destroy(conn: crowdb_rpc_conn_t);
 
     pub fn crowdb_rpc_server_register_echo_handler(server: crowdb_rpc_server_t, msg_type: u16);
 
@@ -244,6 +250,7 @@ extern "C" {
         callback: crowdb_rpc_handler_fn,
         user_data: *mut c_void,
     );
+    pub fn crowdb_rpc_client_clear_handlers(client: crowdb_rpc_client_t);
 
     pub fn crowdb_rpc_client_set_transport(client: crowdb_rpc_client_t, server: crowdb_rpc_server_t);
 
@@ -270,6 +277,18 @@ extern "C" {
     );
     pub fn crowdb_rpc_metrics_stop();
     pub fn crowdb_rpc_server_register_conn_count_gauge(server: crowdb_rpc_server_t, name: *const c_char);
+
+    // ── C++ global metrics registry (crowdb-common) ────────────────
+    pub fn crowdb_common_metrics_global_flush(
+        window_secs: f64,
+        timestamp: *const c_char,
+        section_label: *const c_char,
+        width: usize,
+        count_w: usize,
+        tps_w: usize,
+    ) -> *mut c_char;
+    pub fn crowdb_common_metrics_global_max_name_len() -> usize;
+    pub fn crowdb_common_metrics_global_free(s: *mut c_char);
 
     // ── Coroutine client (Option 3: C++ coroutine + Rust FFI) ────
     pub fn crowdb_rpc_co_spawn(

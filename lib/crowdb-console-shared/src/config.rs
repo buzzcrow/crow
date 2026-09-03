@@ -269,19 +269,23 @@ pub enum ServiceType {
     #[default]
     Kv,
     Diskdb,
+    /// Standalone crowdb-rpc-fb-server (C++ echo server for RPC bench).
+    /// Not a full KV server — no management port, no sysdata. Tracked
+    /// in config only for PID/port lifecycle via `cluster destroy`.
+    Rpc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerEntry {
     /// Console-side identifier; must be unique within the file.
     pub id: String,
-    /// `crowdb-kv-server` management base URL, e.g. `http://127.0.0.1:9910`.
+    /// `crowdb-kv-server` management base URL, e.g. `http://127.0.0.1:10000`.
     pub url: String,
     /// Owning node id; populated for console-deployed instances. `None`
     /// for plain "registered external server" entries from C2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<NodeId>,
-    /// crowdb-rpc base URL, e.g. `http://127.0.0.1:28001`. Populated for
+    /// crowdb-rpc base URL, e.g. `http://127.0.0.1:10100`. Populated for
     /// console-deployed instances.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpc_url: Option<String>,
@@ -295,7 +299,7 @@ pub struct ServerEntry {
     pub binary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub election_profile: Option<String>,
-    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     /// Service type discriminator (R77). Defaults to `Kv` for
     /// backward compatibility with pre-R77 persisted configs.
@@ -423,6 +427,8 @@ struct PersistedServerEntry {
     rpc_workers: Option<u32>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     no_fsync: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -763,6 +769,13 @@ impl ConsoleConfig {
             .find(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Kv)
     }
 
+    /// Look up the server deployed on a given node (mutable).
+    pub fn server_for_node_mut(&mut self, node_id: NodeId) -> Option<&mut ServerEntry> {
+        self.servers
+            .iter_mut()
+            .find(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Kv)
+    }
+
     /// Remove the KV server entry deployed on a given node.
     ///
     /// # Errors
@@ -949,6 +962,7 @@ impl ConsoleConfig {
                         service_type: entry.service_type,
                         rpc_workers: entry.rpc_workers,
                         no_fsync: entry.no_fsync,
+                        pid: entry.pid,
                     },
                 )
             })
@@ -1061,7 +1075,7 @@ impl ConsoleConfig {
                 auto_start: entry.auto_start,
                 binary: entry.binary,
                 election_profile: entry.election_profile,
-                pid: None,
+                pid: entry.pid,
                 service_type: entry.service_type,
                 rpc_workers: entry.rpc_workers,
                 no_fsync: entry.no_fsync,
@@ -1148,16 +1162,16 @@ mod tests {
         let path = dir.join("console.toml");
 
         let mut cfg = ConsoleConfig::default();
-        let mut a = ServerEntry::new("a", "http://127.0.0.1:9910");
+        let mut a = ServerEntry::new("a", "http://127.0.0.1:10000");
         a.node_id = Some(1);
         a.rpc_url = Some("http://127.0.0.1:9921".into());
-        a.rest_port = Some(9910);
+        a.rest_port = Some(10000);
         a.rpc_port = Some(9921);
         a.auto_start = true;
         a.election_profile = Some("test".into());
         a.pid = Some(12345);
         cfg.add_server(a).unwrap();
-        cfg.add_server(ServerEntry::new("b", "http://127.0.0.1:9911"))
+        cfg.add_server(ServerEntry::new("b", "http://127.0.0.1:10001"))
             .unwrap();
         cfg.stores.push(StoreEntry {
             store_id: 7,
@@ -1180,24 +1194,23 @@ mod tests {
 
         cfg.save(&path).unwrap();
         let loaded = ConsoleConfig::load(&path).unwrap();
-        let mut expected = cfg.clone();
-        expected.servers[0].pid = None;
+        let expected = cfg.clone();
         assert_eq!(expected, loaded);
     }
 
     #[test]
-    fn pid_is_not_persisted_to_disk() {
+    fn pid_is_persisted_to_disk() {
         let dir = tempdir();
         let path = dir.join("console.toml");
 
         let mut cfg = ConsoleConfig::default();
-        let mut entry = ServerEntry::new("a", "http://127.0.0.1:9910");
+        let mut entry = ServerEntry::new("a", "http://127.0.0.1:10000");
         entry.pid = Some(4242);
         cfg.add_server(entry).unwrap();
 
         cfg.save(&path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(!raw.contains("pid"), "runtime pid must not be persisted: {raw}");
+        assert!(raw.contains("pid = 4242"), "runtime pid must be persisted: {raw}");
     }
 
     #[test]
@@ -1215,7 +1228,7 @@ mod tests {
         let engine = TomlFileEngine::new(path.clone());
 
         let mut cfg = ConsoleConfig::default();
-        cfg.add_server(ServerEntry::new("a", "http://127.0.0.1:9910"))
+        cfg.add_server(ServerEntry::new("a", "http://127.0.0.1:10000"))
             .unwrap();
 
         cfg.save_with_engine(&engine).unwrap();

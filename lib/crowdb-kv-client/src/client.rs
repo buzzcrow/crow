@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! [`CrowdbClient`]: the C1-C3 client library (—
+//! [`CrowdbKvClient`]: the C1-C3 client library (—
 //! topology cache, retry/idempotency, and `ReadMode` routing on top of
 //! `crowdb_kv`'s generated `KvService` client.
 
@@ -156,7 +156,7 @@ impl Drop for InFlightGuard {
 /// API, per-group leader cache, retry loop reusing `(client_id, seq)` across
 /// retries of one logical write, and `ReadMode` routing including
 /// `MinSlot` client-side slot tracking.
-pub struct CrowdbClient {
+pub struct CrowdbKvClient {
     pub(crate) topology: TopologyCache,
     pub(crate) retry: RetryConfig,
     client_id: u64,
@@ -195,7 +195,7 @@ pub struct CrowdbClient {
     rpc_transport: Option<Arc<crate::kv_rpc_transport::KvRpcTransport>>,
 }
 
-impl CrowdbClient {
+impl CrowdbKvClient {
     #[must_use]
     pub fn new(config: ClientConfig) -> Self {
         Self::build(config, None)
@@ -211,6 +211,23 @@ impl CrowdbClient {
     }
 
     fn build(config: ClientConfig, transport: Option<Arc<crate::kv_rpc_transport::KvRpcTransport>>) -> Self {
+        // Log client creation so accidental instance proliferation
+        // (each with its own topology cache + connection pool) is
+        // visible in logs. Standalone clients (no shared transport)
+        // are warned at WARN level — they should be rare; repeated
+        // creation is a red flag that the shared client is not being
+        // reused. Shared clients are logged at INFO (file only).
+        if transport.is_none() {
+            tracing::warn!(
+                seed_count = config.mgmt_seeds.len(),
+                "CrowdbKvClient: new standalone instance created (no shared transport) — prefer from_shared() to reuse topology cache"
+            );
+        } else {
+            tracing::info!(
+                seed_count = config.mgmt_seeds.len(),
+                "CrowdbKvClient: new shared instance created"
+            );
+        }
         // The eviction hook removes stale `write_slot_highwater` entries
         // when a group disappears from the topology. The hook captures a
         // raw pointer pattern via `Arc<DashMap>` — we create the DashMap
@@ -274,6 +291,21 @@ impl CrowdbClient {
         self.rpc_transport.as_ref().map(|t| t.server().transport_stats())
     }
 
+    /// Dump all pending RPC request IDs + deadlines to the C++ log.
+    /// For diagnostics: call when the bench stops to see which requests
+    /// are still in-flight.
+    pub fn dump_pending_requests(&self) {
+        if let Some(t) = &self.rpc_transport {
+            t.rpc().dump_pending();
+        }
+    }
+
+    /// The next RPC request ID that will be allocated (for diagnostics).
+    #[must_use]
+    pub fn next_req_id(&self) -> u64 {
+        self.rpc_transport.as_ref().map_or(0, |t| t.next_req_id())
+    }
+
     /// This client session's opaque `client_id`.
     #[must_use]
     pub fn client_id(&self) -> u64 {
@@ -297,7 +329,7 @@ impl CrowdbClient {
     }
 
     /// Flush per-op-kind window latency histograms to `writer` in the
-    /// same column-aligned format as the server `[metrics]` log.
+    /// same column-aligned format as the server `rust` log.
     /// Takes a pre-drained `WindowLatencySnapshot` so the caller can
     /// also use it for cumulative accumulation.
     pub fn flush_latencies<W: std::fmt::Write>(
@@ -331,7 +363,7 @@ impl CrowdbClient {
     /// group, bypassing `/topology` discovery entirely. For callers that
     /// already resolved an endpoint through some other discovery path
     /// (e.g. `crowdb-console`'s own management API) and just want
-    /// `CrowdbClient`'s retry/pool machinery on top of it.
+    /// `CrowdbKvClient`'s retry/pool machinery on top of it.
     pub fn seed_leader(&self, store_id: u64, group_id: u64, endpoint: String) {
         self.topology.set_leader(store_id, group_id, endpoint);
     }
@@ -372,9 +404,19 @@ impl CrowdbClient {
             // yet (mid-election) are both just "leader unknown right now"
             // from the caller's perspective -- collapse them into the same
             // retry path instead of surfacing the transport error early.
+            // Exception: NoSeeds is a configuration error, not a transient
+            // failure — fail immediately so the caller sees a clear error
+            // instead of retrying for seconds.
             self.metrics.record_leader_query();
             self.metrics.record_topology_refresh();
-            let _ = self.topology.refresh().await;
+            if let Err(Error::NoSeeds) = self.topology.refresh().await {
+                tracing::warn!(
+                    store_id,
+                    group_id,
+                    "resolve_leader: no mgmt seeds configured — call set_mgmt_seeds before KV ops"
+                );
+                return Err(Error::NoSeeds);
+            }
             if let Some(ep) = self.topology.leader(store_id, group_id) {
                 return Ok(ep);
             }
@@ -664,6 +706,13 @@ impl CrowdbClient {
                 .map_err(|e| e.to_string());
             match send_result {
                 Ok(resp) => {
+                    let elapsed_ms = t0.elapsed().as_millis();
+                    if elapsed_ms > 500 {
+                        tracing::warn!(
+                            "kv get: slow response store={store_id} group={group_id} endpoint={endpoint} attempt={attempts} in {}ms",
+                            elapsed_ms
+                        );
+                    }
                     self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
                     // Follow a `NotLeaderHint` before checking `not_found`/`ok`:
                     // a linearizable read forwarded from a stale leader can
@@ -709,6 +758,10 @@ impl CrowdbClient {
                     }
                 }
                 Err(msg) => {
+                    tracing::warn!(
+                        "kv get: transport error store={store_id} group={group_id} endpoint={endpoint} attempt={attempts} err={msg} after {}ms",
+                        t0.elapsed().as_millis()
+                    );
                     self.metrics.record_get_error();
                     self.metrics.record_transport_error();
                     self.metrics.on_leader_error(store_id, group_id, &endpoint);
@@ -1089,6 +1142,12 @@ impl CrowdbClient {
                     }
                     self.metrics.record_scan_error();
                     attempts = self.count_other(attempts, &resp.error)?;
+                    if Self::is_unknown_leader(resp.error_code, &resp.error) {
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                        endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
+                        self.metrics
+                            .on_leader_resolved(store_id, group_id, &endpoint, "unknown_leader");
+                    }
                 }
                 Err(msg) => {
                     self.metrics.record_scan_error();
@@ -1188,6 +1247,12 @@ impl CrowdbClient {
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
+                    if Self::is_unknown_leader(resp.error_code, &resp.error) {
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                        endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
+                        self.metrics
+                            .on_leader_resolved(store_id, group_id, &endpoint, "unknown_leader");
+                    }
                 }
                 Err(msg) => {
                     self.metrics.record_scan_error();
@@ -1335,6 +1400,12 @@ impl CrowdbClient {
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
+                    if Self::is_unknown_leader(resp.error_code, &resp.error) {
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                        endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
+                        self.metrics
+                            .on_leader_resolved(store_id, group_id, &endpoint, "unknown_leader");
+                    }
                 }
                 Err(msg) => {
                     self.metrics.record_scan_error();

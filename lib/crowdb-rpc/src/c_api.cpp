@@ -10,6 +10,7 @@
 #include "crowdb-rpc/client/client.h"
 #include "crowdb-rpc/client/rpc_client_metrics.h"
 #include "crowdb-rpc/co_client.h"
+#include "crowdb-rpc/rpc_metrics.h"
 #include "crowdb-rpc/server/message.h"
 #include "crowdb-rpc/server/server.h"
 #include "crowdb-rpc/transport/socket_transport.h"
@@ -307,6 +308,18 @@ void crowdb_rpc_server_destroy(crowdb_rpc_server_t server)
     }
 }
 
+void crowdb_rpc_server_clear_handlers(crowdb_rpc_server_t server)
+{
+    try {
+        if (server == nullptr) {
+            return;
+        }
+        server->server->clear_handlers();
+    }
+    catch (...) {
+    }
+}
+
 static void copy_latency(crowdb_rpc_latency_stats_t *out, const crowdb::rpc::LatencyHistogram &h)
 {
     out->count  = h.count.load(std::memory_order_relaxed);
@@ -339,9 +352,10 @@ void crowdb_rpc_client_get_counters(crowdb_rpc_client_t /*client*/, crowdb_rpc_c
         if (out == nullptr) {
             return;
         }
-        out->submit_fail = crowdb::rpc::rpc_submit_fail().window();
-        out->resp_missed = crowdb::rpc::rpc_resp_missed().window();
-        out->reaped      = crowdb::rpc::rpc_reaped().window();
+        out->submit_fail  = crowdb::rpc::cnt_send_queue_full().window();
+        out->submit_retry = crowdb::rpc::rpc_submit_retry().window();
+        out->resp_missed  = crowdb::rpc::rpc_resp_missed().window();
+        out->reaped       = crowdb::rpc::rpc_reaped().window();
     }
     catch (...) {
     }
@@ -554,6 +568,18 @@ void crowdb_rpc_client_stop_reaper(crowdb_rpc_client_t client)
     }
 }
 
+void crowdb_rpc_client_dump_pending(crowdb_rpc_client_t client)
+{
+    try {
+        if (client == nullptr) {
+            return;
+        }
+        client->client->dump_pending();
+    }
+    catch (...) {
+    }
+}
+
 crowdb_rpc_status crowdb_rpc_client_send(crowdb_rpc_client_t client, crowdb_rpc_server_t server, crowdb_rpc_conn_t conn,
                                          uint64_t request_id, crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
                                          uint16_t msg_type, crowdb_rpc_on_complete on_complete, void *user_data)
@@ -650,6 +676,18 @@ crowdb_rpc_conn_t crowdb_rpc_connect(crowdb_rpc_server_t server, const char *add
     }
     catch (...) {
         return nullptr;
+    }
+}
+
+void crowdb_rpc_conn_destroy(crowdb_rpc_conn_t conn)
+{
+    try {
+        if (conn == nullptr) {
+            return;
+        }
+        delete conn;
+    }
+    catch (...) {
     }
 }
 
@@ -870,6 +908,18 @@ void crowdb_rpc_client_register_handler(crowdb_rpc_client_t client, uint16_t msg
     }
 }
 
+void crowdb_rpc_client_clear_handlers(crowdb_rpc_client_t client)
+{
+    try {
+        if (client == nullptr) {
+            return;
+        }
+        client->client->clear_handlers();
+    }
+    catch (...) {
+    }
+}
+
 void crowdb_rpc_client_set_transport(crowdb_rpc_client_t client, crowdb_rpc_server_t server)
 {
     try {
@@ -954,12 +1004,23 @@ void crowdb_rpc_server_register_conn_count_gauge(crowdb_rpc_server_t server, con
         if (server == nullptr || name == nullptr) {
             return;
         }
-        auto *transport = server->server->transport();
+        auto *srv       = server->server;
+        auto *transport = srv->transport();
         if (transport == nullptr) {
             return;
         }
+        // Capture the server's alive flag (shared_ptr) so the callback
+        // returns 0 after the server is destroyed (transport freed in
+        // ~RpcServer). The shared_ptr keeps the atomic alive even after
+        // the server is deleted.
+        auto alive = srv->alive_flag();
         crowdb::common::metrics::MetricsRegistry::global().register_callback_gauge(
-            std::string(name), [transport]() { return static_cast<uint64_t>(transport->connection_count()); });
+            std::string(name), [transport, alive]() {
+                if (!alive->load(std::memory_order_acquire)) {
+                    return uint64_t{0};
+                }
+                return static_cast<uint64_t>(transport->connection_count());
+            });
     }
     catch (...) {
     }

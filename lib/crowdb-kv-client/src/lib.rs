@@ -29,8 +29,10 @@ mod kv_cluster;
 mod kv_rpc_transport;
 mod metrics;
 mod range_binding;
+mod service_discovery;
 mod service_registry;
 mod space_usage;
+mod sysmd;
 mod topology;
 mod watch_notify;
 
@@ -44,7 +46,7 @@ pub use chunkdb_binding_strategy::{
     compute_sub_range_assignment, ChunkdbRangeStrategy, DEFAULT_SUB_RANGE_COUNT,
 };
 pub use client::{
-    new_client_id, BatchOp, CrowdbClient, GetOutcome, JournalOp, JournalScanOutcome, ScanOutcome,
+    new_client_id, BatchOp, CrowdbKvClient, GetOutcome, JournalOp, JournalScanOutcome, ScanOutcome,
     WriteOutcome,
 };
 pub use config::{ClientConfig, ReadEndpointPolicy, RetryConfig};
@@ -57,10 +59,15 @@ pub use kv_cluster::{KVClusterAdmin, KVClusterMetaClient};
 pub use kv_rpc_transport::KvRpcTransport;
 pub use metrics::{ClientMetrics, ClientMetricsSnapshot, LeaderChangeEpisode, WindowLatencySnapshot};
 pub use range_binding::{ChunkdbRangeBinding, RangeBindingClient, RangeRouteError, RouteWithFallback};
+pub use service_discovery::ServiceDiscoveryClient;
 pub use service_registry::ServiceRegistryClient;
 pub use space_usage::{ClusterUsage, NodeUsage, RackUsage, SpaceUsageClient};
+pub use sysmd::CrowdbSysmdClient;
 pub use watch_notify::{WatchNotify, WatchNotifyClient, WatchSubscription};
 
 /// Re-exported so callers don't need a direct `crowdb_kv` dependency just to
-/// pick a read mode.
+/// pick a read mode or use snapshot DTOs.
 pub use crowdb_kv::rpc::ReadMode;
+pub use crowdb_kv::rpc::{
+    CreateSnapshotResponse, ReleaseSnapshotResponse, SnapshotInfo, SnapshotScanResponse,
+};

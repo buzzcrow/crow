@@ -270,3 +270,140 @@ TEST(SplitMerge, ParityWithOracleUnderSplits)
         }
     }
 }
+
+// Regression: consolidation folds an entire delta chain into one leaf, which
+// can be many times larger than leaf_split_bytes (up to max_delta_bytes).
+// maybe_split_or_merge_locked must split iteratively until every child fits
+// under the threshold — a single halving leaves oversized leaves when the
+// consolidated leaf is > 2x the split threshold.
+TEST(SplitMerge, ConsolidationSplitsIterativelyToThreshold)
+{
+    Options opt;
+    opt.max_delta_len    = 0;   // consolidate on every flush
+    opt.leaf_split_bytes = 200; // small threshold so many splits are needed
+    opt.leaf_merge_bytes = 50;  // well below split to avoid merge-after-split
+    // Prevent auto-freeze so we control exactly when each flush runs.
+    opt.memtable_flush_bytes   = 1ULL << 40;
+    opt.memtable_flush_entries = 1U << 30;
+    Crowdbtree t(opt);
+
+    // Phase 1: write the highest key first and flush. With max_delta_len=0,
+    // the delta immediately consolidates into the base leaf, giving it
+    // high_key="key00999" so that subsequent (smaller) keys are grouped by
+    // sort-aware descent instead of published one-per-key (which happens
+    // when the base leaf is empty and high_key is an empty Slice).
+    ASSERT_TRUE(t.apply(1, put_one("key00999", "first")).ok());
+    ASSERT_TRUE(t.flush().ok());
+
+    // Phase 2: write 200 keys in one batch, all < "key00999". They're
+    // grouped into one delta and immediately consolidated (max_delta_len=0).
+    // The consolidated leaf has ~201 entries (~7000 bytes = ~35x the
+    // 200-byte split threshold).
+    Batch big;
+    for (int i = 0; i < 200; ++i) {
+        big.ops.push_back({.key = make_key(i), .kind = OpKind::kPut, .value = "val-" + std::to_string(i)});
+    }
+    ASSERT_TRUE(t.apply(2, std::move(big)).ok());
+    ASSERT_TRUE(t.flush().ok());
+
+    // With iterative splitting, ~7000 bytes / 200-byte threshold => ~35
+    // leaves. With the bug (single split), only 2 leaves of ~3500 bytes
+    // each remain.
+    EXPECT_GE(t.leaf_count(), 10U);
+
+    // All keys must be present and readable.
+    for (int i = 0; i < 200; ++i) {
+        std::string v;
+        uint64_t    s;
+        ASSERT_TRUE(t.get(Slice(make_key(i)), &s, &v)) << "missing " << make_key(i);
+        EXPECT_EQ(v, "val-" + std::to_string(i));
+    }
+    std::string v;
+    uint64_t    s;
+    ASSERT_TRUE(t.get(Slice("key00999"), &s, &v));
+    EXPECT_EQ(v, "first");
+}
+
+// Count the inner pages reachable from the root (test helper).
+static size_t inner_count_walk(Crowdbtree &t)
+{
+    std::function<size_t(uint64_t)> rec = [&](uint64_t page_id) -> size_t {
+        PageBase *head = t.mapping().get_resident(page_id);
+        if (head == nullptr) {
+            return 0;
+        }
+        PageBase *base = head;
+        while (base != nullptr && base->type == page_type::kBatchDelta) {
+            base = base->next;
+        }
+        if (base == nullptr || base->type == page_type::kLeafBase) {
+            return 0;
+        }
+        size_t n = 1;
+        for (uint64_t c : static_cast<InnerBase *>(base)->children()) {
+            n += rec(c);
+        }
+        return n;
+    };
+    return rec(t.root_page_id());
+}
+
+// O(1) atomic leaf/inner counters must match the tree walk after splits.
+TEST(SplitMerge, LeafInnerCountParityAfterSplits)
+{
+    Options opt;
+    opt.max_delta_len      = 1;   // consolidate aggressively
+    opt.leaf_split_bytes   = 200; // small leaves -> force splits
+    opt.max_memtable_count = 6;
+    Crowdbtree t(opt);
+
+    // Fresh tree: 1 leaf, 0 inner.
+    EXPECT_EQ(t.leaf_count_atomic(), 1U);
+    EXPECT_EQ(t.inner_count_atomic(), 0U);
+
+    const int N = 300;
+    for (int i = 0; i < N; ++i) {
+        ASSERT_TRUE(t.apply(static_cast<uint64_t>(i + 1), put_one(make_key(i), "val-" + std::to_string(i))).ok());
+        ASSERT_TRUE(t.flush().ok());
+    }
+    EXPECT_GT(t.height(), 1);
+    EXPECT_EQ(t.leaf_count_atomic(), t.leaf_count());
+    EXPECT_EQ(t.inner_count_atomic(), inner_count_walk(t));
+}
+
+// O(1) atomic leaf/inner counters must match the tree walk after merges
+// and root collapse.
+TEST(SplitMerge, LeafInnerCountParityAfterMerges)
+{
+    Options opt;
+    opt.max_delta_len      = 1;
+    opt.leaf_split_bytes   = 200;
+    opt.leaf_merge_bytes   = 40;
+    opt.max_memtable_count = 6;
+    Crowdbtree t(opt);
+
+    // Build a multi-level tree.
+    std::map<std::string, std::string> oracle;
+    uint64_t                           slot = 0;
+    for (int i = 0; i < 200; ++i) {
+        ++slot;
+        ASSERT_TRUE(t.apply(slot, put_one(make_key(i), "v" + std::to_string(slot))).ok());
+        oracle[make_key(i)] = "v" + std::to_string(slot);
+        ASSERT_TRUE(t.flush().ok());
+    }
+    ASSERT_GT(t.height(), 1);
+
+    // Delete half to trigger merges + root collapse.
+    int deleted = 0;
+    for (auto it = oracle.begin(); it != oracle.end() && deleted < 150; ++it, ++deleted) {
+        ++slot;
+        Batch del{{{.key = it->first, .kind = OpKind::kDelete, .value = ""}}};
+        ASSERT_TRUE(t.apply(slot, del).ok());
+        ASSERT_TRUE(t.flush().ok());
+    }
+
+    // Counters must match the walk regardless of how many merges/collapses
+    // happened.
+    EXPECT_EQ(t.leaf_count_atomic(), t.leaf_count());
+    EXPECT_EQ(t.inner_count_atomic(), inner_count_walk(t));
+}

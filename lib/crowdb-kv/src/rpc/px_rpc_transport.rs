@@ -150,7 +150,7 @@ impl PxRpcTransport {
     /// RPC fails with a retryable transport error (`SendQueueFull`,
     /// `ConnectionClosed`, etc.) — the cached connection is dead and
     /// must be replaced.
-    fn drop_endpoint(&self, rpc_endpoint: &str) {
+    pub(crate) fn drop_endpoint(&self, rpc_endpoint: &str) {
         let normalized = normalize_endpoint(rpc_endpoint);
         if let Some(mut entry) = self.connections.get_mut(&normalized) {
             entry.value_mut().clear();
@@ -717,6 +717,28 @@ impl PxRpcTransport {
     /// Allocate a new request ID (exposed for the `LearnerStream`).
     pub(crate) fn alloc_id(&self) -> u64 {
         self.next_id()
+    }
+
+    /// Test-only: send a frame with arbitrary control bytes and a
+    /// caller-chosen `msg_type`, bypassing the flatbuffer build step.
+    /// Returns the raw `Response` so the test can inspect the control
+    /// buffer. Used by R120 to verify the server's deserialization
+    /// guard rejects malformed `EAcceptRequest` frames.
+    #[cfg(feature = "test-util")]
+    pub async fn send_raw_request(
+        &self,
+        rpc_endpoint: &str,
+        msg_type: u16,
+        control: Buffer,
+    ) -> Result<crowdb_rpc_ffi::Response, PxReplicaError> {
+        let req_id = self.next_id();
+        let conn = self.conn_for(rpc_endpoint)?;
+        let fut = self
+            .rpc
+            .call(&self.server, &conn, req_id, control, None, msg_type)
+            .map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        let resp = fut.await.map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        Ok(resp)
     }
 }
 

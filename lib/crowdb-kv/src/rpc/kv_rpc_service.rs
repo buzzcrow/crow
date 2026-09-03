@@ -9,6 +9,7 @@
 #![allow(dead_code)] // Wired in Phase 9 (server wiring)
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::too_many_arguments)]
+#![allow(clippy::cast_possible_truncation)]
 
 //! crowdb-rpc handler set for the KV client-facing service (R117
 //! migration). Each handler dispatches by `msg_type` to the existing
@@ -32,6 +33,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use dashmap::DashMap;
 use flatbuffers::FlatBufferBuilder;
@@ -55,6 +57,7 @@ use crowdb_rpc_ffi::{noop_completion, Buffer, Connection, RpcClient, RpcError, R
 
 use crate::cluster::kv_store::KvStore;
 use crate::cluster::px_kv_store::PxKvStore;
+use crate::metrics::{LatencyHistogram, MetricsRegistry};
 use crate::rpc::{
     FBKvDeleteRequest, FBKvGetRequest, FBKvGetRequestArgs, FBKvSetRequest, KvBatchItem, ReadMode,
 };
@@ -274,11 +277,48 @@ pub struct KvRpcService {
     store: Arc<PxKvStore>,
     rt: Handle,
     forwarder: Arc<KvClientRpcForwarder>,
+    /// Per-request-type end-to-end latency histograms. `None` when
+    /// metrics are disabled (`--metrics-interval 0`).
+    latency: Option<RpcLatencyHandles>,
+}
+
+/// Per-op latency histograms for the client-facing RPC service.
+/// Names follow `s.{store_id}.rpc.<op>.lh` — store-level, not per-group,
+/// since the service dispatches across all groups.
+struct RpcLatencyHandles {
+    put: Arc<LatencyHistogram>,
+    get: Arc<LatencyHistogram>,
+    scan: Arc<LatencyHistogram>,
+    delete: Arc<LatencyHistogram>,
+    batch_write: Arc<LatencyHistogram>,
+}
+
+impl RpcLatencyHandles {
+    fn register(registry: &std::sync::Mutex<MetricsRegistry>, store_id: u64) -> Self {
+        let mut reg = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prefix = format!("s.{store_id}.rpc");
+        Self {
+            put: reg.register_histogram(format!("{prefix}.put.lh")),
+            get: reg.register_histogram(format!("{prefix}.get.lh")),
+            scan: reg.register_histogram(format!("{prefix}.scan.lh")),
+            delete: reg.register_histogram(format!("{prefix}.delete.lh")),
+            batch_write: reg.register_histogram(format!("{prefix}.batch_write.lh")),
+        }
+    }
 }
 
 impl KvRpcService {
     pub(crate) fn new(store: Arc<PxKvStore>, rt: Handle, forwarder: Arc<KvClientRpcForwarder>) -> Self {
-        Self { store, rt, forwarder }
+        let latency = store
+            .metrics_registry
+            .as_ref()
+            .map(|r| RpcLatencyHandles::register(r, store.store_id));
+        Self {
+            store,
+            rt,
+            forwarder,
+            latency,
+        }
     }
 
     /// Register all client-facing request handlers into the `RpcServer`.
@@ -362,7 +402,9 @@ impl KvRpcService {
 
         let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
+        let hist = self.latency.as_ref().map(|l| Arc::clone(&l.put));
         self.rt.spawn(async move {
+            let start = Instant::now();
             let Ok(fb_req) = flatbuffers::root::<FBKvSetRequest>(req.control()) else {
                 submit_kv_error(
                     &server,
@@ -401,6 +443,9 @@ impl KvRpcService {
                 msg_type,
                 req_id,
             );
+            if let Some(h) = hist {
+                h.observe(start.elapsed().as_nanos() as u64);
+            }
             // req dropped here, frame released
         });
     }
@@ -415,6 +460,7 @@ impl KvRpcService {
 
         let store = Arc::clone(&self.store);
         let server_clone = Arc::clone(server);
+        let hist = self.latency.as_ref().map(|l| Arc::clone(&l.get));
 
         // Transparent leader-forward (linearizable only, loop-guard via `forwarded`).
         // Parse the flatbuffer once to check forwarding, then move `req` into the
@@ -447,6 +493,7 @@ impl KvRpcService {
 
         let fwd = Arc::clone(&self.forwarder);
         self.rt.spawn(async move {
+            let start = Instant::now();
             let Ok(fb_req) = flatbuffers::root::<FBKvGetRequest>(req.control()) else {
                 // Should not happen — already validated above — but guard anyway.
                 submit_kv_error(
@@ -478,6 +525,9 @@ impl KvRpcService {
                             msg_type,
                             req_id,
                         );
+                        if let Some(h) = &hist {
+                            h.observe(start.elapsed().as_nanos() as u64);
+                        }
                         return;
                     }
                     Err(e) => {
@@ -497,6 +547,9 @@ impl KvRpcService {
                     msg_type,
                     req_id,
                 );
+                if let Some(h) = &hist {
+                    h.observe(start.elapsed().as_nanos() as u64);
+                }
                 return;
             }
 
@@ -525,6 +578,9 @@ impl KvRpcService {
                 msg_type,
                 req_id,
             );
+            if let Some(h) = &hist {
+                h.observe(start.elapsed().as_nanos() as u64);
+            }
             // req dropped here, frame released
         });
     }
@@ -539,7 +595,9 @@ impl KvRpcService {
 
         let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
+        let hist = self.latency.as_ref().map(|l| Arc::clone(&l.delete));
         self.rt.spawn(async move {
+            let start = Instant::now();
             let Ok(fb_req) = flatbuffers::root::<FBKvDeleteRequest>(req.control()) else {
                 submit_kv_error(
                     &server,
@@ -569,6 +627,9 @@ impl KvRpcService {
                 msg_type,
                 req_id,
             );
+            if let Some(h) = hist {
+                h.observe(start.elapsed().as_nanos() as u64);
+            }
             // req dropped here, frame released
         });
     }
@@ -583,7 +644,9 @@ impl KvRpcService {
 
         let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
+        let hist = self.latency.as_ref().map(|l| Arc::clone(&l.batch_write));
         self.rt.spawn(async move {
+            let start = Instant::now();
             let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBKvBatchWriteRequest>(req.control()) else {
                 submit_kv_error(
                     &server,
@@ -628,6 +691,9 @@ impl KvRpcService {
                 msg_type,
                 req_id,
             );
+            if let Some(h) = hist {
+                h.observe(start.elapsed().as_nanos() as u64);
+            }
             // req dropped here, frame released
         });
     }
@@ -642,6 +708,7 @@ impl KvRpcService {
 
         let store = Arc::clone(&self.store);
         let server_clone = Arc::clone(server);
+        let hist = self.latency.as_ref().map(|l| Arc::clone(&l.scan));
 
         // Determine forwarding decision up front (parses the flatbuffer once
         // on the dispatch thread), then move `req` into the async task for
@@ -674,6 +741,7 @@ impl KvRpcService {
 
         let fwd = Arc::clone(&self.forwarder);
         self.rt.spawn(async move {
+            let start = Instant::now();
             let Ok(fb_req) = flatbuffers::root::<FBKvScanRequest>(req.control()) else {
                 submit_scan_error(
                     &server_clone,
@@ -710,6 +778,9 @@ impl KvRpcService {
                             msg_type,
                             req_id,
                         );
+                        if let Some(h) = &hist {
+                            h.observe(start.elapsed().as_nanos() as u64);
+                        }
                         return;
                     }
                     Err(e) => {
@@ -729,6 +800,9 @@ impl KvRpcService {
                     msg_type,
                     req_id,
                 );
+                if let Some(h) = &hist {
+                    h.observe(start.elapsed().as_nanos() as u64);
+                }
                 return;
             }
 
@@ -763,6 +837,9 @@ impl KvRpcService {
                 msg_type,
                 req_id,
             );
+            if let Some(h) = &hist {
+                h.observe(start.elapsed().as_nanos() as u64);
+            }
             // req dropped here, frame released
         });
     }

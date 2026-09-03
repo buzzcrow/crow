@@ -37,27 +37,42 @@ pub(crate) async fn build_diskdb_client(state: &AppState) -> Option<DiskdbClient
     if snap.is_empty() {
         return None;
     }
-    for node_id in snap.keys() {
-        // Skip stopped servers — no runtime pid means the process is
-        // not running. Contacting it only wastes time on
-        // connection-refused.
-        if state.runtime_pid(*node_id).is_none() {
-            continue;
-        }
-        if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
-            let kv = crowdb_kv_client::CrowdbClient::new(crowdb_kv_client::ClientConfig::new(Vec::new()));
-            kv.seed_leader(0, 0, ep);
-            let svc = ServiceRegistryClient::new(kv);
-            let transport = std::sync::Arc::new(DiskdbRpcTransport::new());
-            let client = DiskdbClient::new(svc, transport);
-            if let Err(e) = client.refresh_endpoints().await {
-                warn!(error = %e, "build_diskdb_client: refresh_endpoints failed");
+    // Use the shared kv_client so topology discovery seeds are
+    // consistent with the rest of the web server. Creating a standalone
+    // client with empty seeds here caused "no seeds configured" errors
+    // when refresh_endpoints triggered a topology refresh.
+    let kv = state.kv_client().await;
+    // Prefer the live group-0 leader endpoint from the monitor cache
+    // (the actual crowdb-rpc listener for store 0 on the leader node).
+    // Fall back to per-node rpc_endpoint_for_node for any running node.
+    if let Some(ep) = state.monitor_cache.group0_leader_endpoint().await {
+        let bare = crate::mgmt::strip_scheme(crate::mgmt::remap_zero_host(&ep));
+        kv.seed_leader(0, 0, bare);
+    } else {
+        for node_id in snap.keys() {
+            // Skip stopped servers — no runtime pid means the process is
+            // not running. Contacting it only wastes time on
+            // connection-refused.
+            if state.runtime_pid(*node_id).is_none() {
+                continue;
             }
-            return Some(client);
+            if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
+                kv.seed_leader(0, 0, ep);
+                break;
+            }
         }
     }
-    warn!("build_diskdb_client: nodes exist but no group-0 endpoint found in monitor cache");
-    None
+    // Use the shared ServiceDiscoveryClient's ServiceRegistryClient so
+    // the discovery cache + connection pool are shared with the rest
+    // of the web server (R128).
+    let discovery = state.discovery_client().await;
+    let svc = discovery.registry().clone();
+    let transport = std::sync::Arc::new(DiskdbRpcTransport::new());
+    let client = DiskdbClient::new(svc, transport);
+    if let Err(e) = client.refresh_endpoints().await {
+        warn!(error = %e, "build_diskdb_client: refresh_endpoints failed");
+    }
+    Some(client)
 }
 
 /// Get or lazily init the `DiskdbClient` from `AppState`.

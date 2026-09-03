@@ -10,6 +10,7 @@
 
 use crowdb_kv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowdb_kv::cluster::replica::{ReplicaHandler, VoteRequestPayload};
+use crowdb_kv::kv::CrowdbTreeEngine;
 use crowdb_kv::paxos::learner::PxLearner;
 use crowdb_kv::paxos::roles::{Learner, PxAcceptReply, PxBallot, PxLogEntry};
 
@@ -27,9 +28,14 @@ fn noop_apply_path() {
         // reach the engine.
         payload: bytes::Bytes::new(),
     };
-    let before = learner.live_key_count();
+    let e = learner
+        .engine()
+        .as_any()
+        .downcast_ref::<CrowdbTreeEngine>()
+        .expect("default learner uses CrowdbTreeEngine");
+    let before = e.iter_all_for_tests();
     learner.learn(entry, &[]);
-    let after = learner.live_key_count();
+    let after = e.iter_all_for_tests();
     assert_eq!(before, after, "NoOp must not mutate the KV store");
     assert_eq!(
         learner.contiguous_chosen(),

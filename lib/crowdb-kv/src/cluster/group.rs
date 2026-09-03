@@ -39,7 +39,6 @@ pub(crate) use crate::cluster::group_prepare::PrepareAttempt;
 pub(crate) struct WriteRegistryHandles {
     pub(crate) propose_e2e: Arc<LatencySummary>,
     pub(crate) prepare_phase: Arc<LatencySummary>,
-    pub(crate) accept_phase: Arc<LatencySummary>,
     pub(crate) accept_quorum_rpc: Arc<LatencySummary>,
 }
 
@@ -48,16 +47,13 @@ pub(crate) struct WriteRegistryHandles {
 /// `OnceLock` for lock-free hot-path reads. Mirrors the pattern of
 /// `ElectionRegistryHandles` on `PxLocalReplica`.
 pub(crate) struct ReadRegistryHandles {
-    pub(crate) lease_path: Arc<Counter>,
-    pub(crate) readindex_path: Arc<Counter>,
-    pub(crate) readindex_rounds: Arc<Counter>,
     pub(crate) minslot_fallback: Arc<Counter>,
     pub(crate) barrier: Arc<LatencySummary>,
     pub(crate) engine_get: Arc<LatencySummary>,
     /// R35 apply-fence wait latency (fast path is a single atomic load).
     pub(crate) apply_fence: Arc<LatencySummary>,
-    pub(crate) lease_valid: Arc<Gauge>,
-    pub(crate) contiguous_applied: Arc<Gauge>,
+    /// End-to-end read latency: `resolve_read_point` + `engine_get`.
+    pub(crate) e2e: Arc<LatencySummary>,
     pub(crate) safe_slot: Arc<Gauge>,
 }
 
@@ -76,15 +72,13 @@ pub(crate) struct PendingReadBarrier {
 /// When the in-flight round completes, this batch is drained and
 /// becomes the next round (if non-empty). If it fills to `max_keys`
 /// before the round completes, it is flushed immediately as a
-/// concurrent round (the "multiple pipelines" path). The `timer` field
-/// is reserved for watchdog use (currently a no-op).
+/// concurrent round (the "multiple pipelines" path).
 #[derive(Default)]
 pub(crate) struct PendingBatch {
     pub(crate) op_bodies: Vec<u8>,
     pub(crate) op_count: u16,
     pub(crate) tags: Vec<DedupTag>,
     pub(crate) waiters: Vec<tokio::sync::oneshot::Sender<ProposeResult>>,
-    pub(crate) timer: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub struct PxGroup {
@@ -206,6 +200,20 @@ pub struct PxGroup {
     /// `run_pass` to gate expensive disk snapshots on a time threshold
     /// (`snapshot_time_threshold_ms`).
     pub(crate) last_snapshot_time: parking_lot::Mutex<std::time::Instant>,
+    /// Wall-clock time of the last `wal.flush_all()` call. Used by
+    /// `run_pass` to gate periodic WAL durable flushes on
+    /// `wal_flush_interval_ms`.
+    pub(crate) last_wal_flush_time: parking_lot::Mutex<std::time::Instant>,
+    /// Gap 5 step 2: notified when a memtable freeze happens in the C++
+    /// engine, so the maintenance loop can flush immediately instead of
+    /// waiting for the next tick. Shared with the learner's apply path
+    /// via `set_flush_signal` so `apply_entry` can call `notify_one()`.
+    pub(crate) flush_notify: Arc<tokio::sync::Notify>,
+    /// Gap 5 step 4: count of flushes since the last `persist_snapshot`.
+    /// When this reaches `snapshot_flush_count_threshold`, trigger a
+    /// snapshot regardless of the slot/time thresholds. This is a proxy
+    /// for "enough new data has landed in L1 to be worth persisting".
+    pub(crate) flushes_since_snapshot: AtomicU64,
     /// Optional registry handles for read-path metrics. Set via
     /// [`Self::set_metrics_registry`] when a registry is wired.
     /// `None` in tests / no-registry mode.
@@ -317,6 +325,9 @@ impl std::fmt::Debug for PxGroup {
 
 impl PxGroup {
     pub fn new(group_id: PxGroupId, local_replica: PxLocalReplica) -> Self {
+        // O6: capture replica_id before the move into the struct for the
+        // per-replica snapshot jitter below.
+        let replica_id = local_replica.id;
         let mut group = Self {
             group_id,
             cached_quorum: 0,
@@ -351,7 +362,19 @@ impl PxGroup {
             node_config_store: None,
             membership_epoch: AtomicU64::new(0),
             last_snapshot_slot: AtomicU64::new(0),
-            last_snapshot_time: parking_lot::Mutex::new(std::time::Instant::now()),
+            // O6: per-replica jitter to stagger snapshot timing. Offset the
+            // initial last_snapshot_time backward by replica_id * 200ms so
+            // each replica's time-threshold check fires at a different point
+            // in the tick cycle, avoiding synchronized I/O spikes across the
+            // cluster. Capped at 5s to avoid excessive delay for high IDs.
+            last_snapshot_time: parking_lot::Mutex::new(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_millis((replica_id * 200).min(5000)))
+                    .unwrap_or_else(std::time::Instant::now),
+            ),
+            last_wal_flush_time: parking_lot::Mutex::new(std::time::Instant::now()),
+            flush_notify: Arc::new(tokio::sync::Notify::new()),
+            flushes_since_snapshot: AtomicU64::new(0),
             read_handles: OnceLock::new(),
             write_handles: OnceLock::new(),
             pending_read_barrier: parking_lot::Mutex::new(None),
@@ -374,6 +397,12 @@ impl PxGroup {
             .local_replica
             .learner
             .set_watch_registry(group_id, Arc::clone(&group.watch_registry));
+        // Gap 5 step 2: wire the flush signal so the apply path can wake
+        // the maintenance loop when a memtable freeze happens.
+        group
+            .local_replica
+            .learner
+            .set_flush_signal(Arc::clone(&group.flush_notify));
         group.recompute_quorum();
         group
     }
@@ -554,23 +583,18 @@ impl PxGroup {
         };
         let _ = self.inflight.handles.set(inflight_handles);
         let read_handles = ReadRegistryHandles {
-            lease_path: r.register_counter(format!("{prefix}.read.lease_path.c")),
-            readindex_path: r.register_counter(format!("{prefix}.read.readindex_path.c")),
-            readindex_rounds: r.register_counter(format!("{prefix}.read.readindex_rounds.c")),
             minslot_fallback: r.register_counter(format!("{prefix}.read.minslot_fallback.c")),
             barrier: r.register_summary(format!("{prefix}.read.barrier.l")),
             engine_get: r.register_summary(format!("{prefix}.read.engine_get.l")),
             apply_fence: r.register_summary(format!("{prefix}.read.apply_fence.l")),
-            lease_valid: r.register_gauge(format!("{prefix}.read.lease_valid.g")),
-            contiguous_applied: r.register_gauge(format!("{prefix}.read.contiguous_applied.g")),
+            e2e: r.register_summary(format!("{prefix}.read.e2e.l")),
             safe_slot: r.register_gauge(format!("{prefix}.read.safe_slot.g")),
         };
         let _ = self.read_handles.set(read_handles);
         let write_handles = WriteRegistryHandles {
-            propose_e2e: r.register_summary(format!("{prefix}.write.propose_e2e.l")),
-            prepare_phase: r.register_summary(format!("{prefix}.write.prepare_phase.l")),
-            accept_phase: r.register_summary(format!("{prefix}.write.accept_phase.l")),
-            accept_quorum_rpc: r.register_summary(format!("{prefix}.write.accept_quorum_rpc.l")),
+            propose_e2e: r.register_summary(format!("{prefix}.paxos.propose.e2e.l")),
+            prepare_phase: r.register_summary(format!("{prefix}.paxos.classic.prepare.l")),
+            accept_quorum_rpc: r.register_summary(format!("{prefix}.paxos.accept.quorum_rpc.l")),
         };
         let _ = self.write_handles.set(write_handles);
     }

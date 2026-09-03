@@ -41,6 +41,19 @@ Do not jump to a fix — first identify exactly where the test diverges from exp
 
 Check Rust logs (`RUST_BACKTRACE=full`), C++ logs (`log_level="debug"`), WAL segments, and crowdb-tree files for `WARN`/`ERROR`, `panic`, or unexpected state.
 
+### Diagnostic Keywords (grep targets)
+
+When debugging slow E2E tests or KV client issues, grep the console-web log file (`~/.crowdb-kv/log/console-web-*.log`) and stderr for these keywords:
+
+- `CrowdbKvClient: new standalone instance created` — red flag: client not reusing shared transport
+- `resolve_leader: no mgmt seeds configured` — fail-fast on empty seeds
+- `kv_op_context: no KV servers deployed` — 502, cluster not initialized
+- `build_hardware_client: no rpc endpoint resolved` — no cached leader, next RPC will retry ~5s
+- `build_hardware_client: no group-0 endpoint found` — no running node hosts store 0
+- `list_node_disk_groups: group-0 query failed` — group-0 RPC failed, falling back to config
+- `topology refresh failed in handle_transport_err` — topology discovery failed
+- `topology discovery failed: http://...` — the failed seed URL; if it's a node's `rpc_url` instead of the store's `listen_addr`, the client is seeded wrong
+
 ## Step 3b — Crash Analysis
 
 If a process crashed or disappeared without a log line, **always** get the crash report and analyze the call stack before attempting any fix. Never skip to workarounds.
@@ -59,10 +72,21 @@ If existing logs don't reveal the gap, add targeted logs at decision points (`tr
 
 ## Anti-Patterns (never do)
 
-- **Increasing timeouts** to make a slow test pass — investigate why it's slow first.
+- **Increasing timeouts** to make a slow test pass — investigate why it's slow first. Timeout limits in `/console-ui-e2e` (3 s / 10 s) are hard caps.
 - **Ignoring errors** — log and surface every error.
 - **Weakening assertions** — fix the selector or the code, not the assertion.
-- **Downstream workarounds** — fix the upstream root cause.
+- **Downstream workarounds** — fix the upstream root cause. See "Banned Workarounds" below.
 - **Waiting on toasts** — never assert on `getByRole('alert')`. If a toast blocks a click, use `locator.evaluate((el) => el.click())`. See `/coding` E2E rules.
 - **Ignoring baseline timing** — if a test exceeds 2x its `// Baseline: Xs`, investigate the regression before accepting the run.
 - **Blocking on long-running test output** — use a short timeout (10–30s); if output shows repeat errors (same line 3+ times, no progress), investigate the log file directly — the test is stuck, not progressing.
+
+## Banned Workarounds (enforced — see also `/console-ui-e2e`)
+
+Fix the upstream root cause, not the test or caller. Banned:
+- Inflating timeouts beyond the 3 s / 10 s caps.
+- `waitForResponse`/`waitForTimeout` to mask backend slowness (only use `waitForResponse` when the test needs the response body).
+- `expect.poll` on an API to "wait for convergence" before a UI assertion — fix the backend or the UI's own polling.
+- Swapping `toBeVisible` for `boundingBox`/`count`/`innerText` to bypass a `hidden` element — fix the component.
+- Retry loops in tests — fix backend idempotency.
+- `if`/`try-catch` around assertions to silently skip flaky checks.
+- `let _ = ...` to suppress sysdata/config write errors — retry with backoff inside the op or return the error. If genuinely eventual-consistent, document why and expose a way to wait for convergence.

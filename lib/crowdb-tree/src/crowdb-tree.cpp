@@ -95,9 +95,9 @@ void collect_in_order(Resolve &&resolve, uint64_t root_page_id, uint64_t gc_floo
     }
 }
 
-// R58: uniform view over a merge source (L0 skip-list cursor or L1 leaf cursor)
-// for the loser tree. Wraps the two cursor types behind a common key/slot/advance
-// interface so the tree can compare them generically.
+// R58: uniform view over a merge source (L0 skip-list cursor, L1 leaf cursor,
+// or a drained vector) for the loser tree. Wraps the source types behind a
+// common key/slot/advance interface so the tree can compare them generically.
 struct MergeSource
 {
     enum Kind : uint8_t { kL0, kL1 };
@@ -108,12 +108,18 @@ struct MergeSource
 
     [[nodiscard]] bool valid() const
     {
-        return kind == kL0 ? (l0 != nullptr && l0->valid()) : (l1 != nullptr && l1->valid());
+        if (kind == kL0) {
+            return l0 != nullptr && l0->valid();
+        }
+        return l1 != nullptr && l1->valid();
     }
 
     [[nodiscard]] Slice key() const
     {
-        return kind == kL0 ? l0->key() : l1->key();
+        if (kind == kL0) {
+            return l0->key();
+        }
+        return l1->key();
     }
 
     [[nodiscard]] uint64_t slot() const
@@ -276,6 +282,16 @@ Crowdbtree::Crowdbtree(Options opt) : opt_(std::move(opt)), name_(opt_.name)
     root_page_id_.store(page_id);
 }
 
+void Crowdbtree::sync_page_count_gauges()
+{
+    if (metrics_.tree_leaf_count_g != nullptr) {
+        metrics_.tree_leaf_count_g->set(leaf_count_.load(std::memory_order_relaxed));
+    }
+    if (metrics_.tree_inner_count_g != nullptr) {
+        metrics_.tree_inner_count_g->set(inner_count_.load(std::memory_order_relaxed));
+    }
+}
+
 Crowdbtree::~Crowdbtree()
 {
     try {
@@ -308,8 +324,8 @@ void Crowdbtree::retire_orphaned_page(uint64_t page_id, PageBase *p)
 PageBase *Crowdbtree::resident(uint64_t page_id) const
 {
     map_lookup_total_.fetch_add(1, std::memory_order_relaxed);
-    if (metrics_.page_map_lookup_c != nullptr) {
-        metrics_.page_map_lookup_c->inc();
+    if (metrics_.page_find_c != nullptr) {
+        metrics_.page_find_c->inc();
     }
     uint64_t w = mapping_.get_word(page_id);
     if (slot_word::is_empty(w) || !slot_word::is_unloaded(w)) {
@@ -350,20 +366,20 @@ PageBase *Crowdbtree::resident(uint64_t page_id) const
         CRB_LOG_ERROR("[{}] demand-load I/O fault: pid={} addr={} len={} status={}", name_, page_id, addr, phys_len,
                       s.to_string());
         io_failed_.store(true);
-        if (metrics_.demand_load_l != nullptr) {
+        if (metrics_.page_load_l != nullptr) {
             auto ns =
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dl_t0).count();
-            metrics_.demand_load_l->observe(static_cast<uint64_t>(ns));
+            metrics_.page_load_l->observe(static_cast<uint64_t>(ns));
         }
         if (metrics_.page_read_bw != nullptr) {
             metrics_.page_read_bw->observe(blob.size());
         }
         return nullptr;
     }
-    if (metrics_.demand_load_l != nullptr) {
+    if (metrics_.page_load_l != nullptr) {
         auto ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dl_t0).count();
-        metrics_.demand_load_l->observe(static_cast<uint64_t>(ns));
+        metrics_.page_load_l->observe(static_cast<uint64_t>(ns));
     }
     if (metrics_.page_read_bw != nullptr) {
         metrics_.page_read_bw->observe(blob.size());
@@ -736,6 +752,7 @@ void Crowdbtree::apply_batch(uint64_t slot, const Batch &batch)
     if (batch.ops.empty()) {
         return;
     }
+    auto                          apply_t0 = std::chrono::steady_clock::now();
     std::map<std::string, buffer> latest; // key -> single-alloc encoded cell buffer
     for (const auto &op : batch.ops) {
         latest[op.key] = encode_cell_buf(slot, op.kind, Slice(op.value));
@@ -750,9 +767,11 @@ void Crowdbtree::apply_batch(uint64_t slot, const Batch &batch)
         auto node = latest.extract(latest.begin());
         active->upsert(Slice(node.key()), slot, std::move(node.mapped()));
         mt_upsert_total_.fetch_add(1, std::memory_order_relaxed);
-        if (metrics_.mt_upsert_c != nullptr) {
-            metrics_.mt_upsert_c->inc();
-        }
+    }
+    if (metrics_.mt_apply_l != nullptr) {
+        auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - apply_t0).count();
+        metrics_.mt_apply_l->observe(static_cast<uint64_t>(ns));
     }
 }
 
@@ -783,7 +802,6 @@ void Crowdbtree::note_applied_slot(uint64_t slot)
 
 Status Crowdbtree::apply(uint64_t slot, const Batch &batch)
 {
-    auto t0 = std::chrono::steady_clock::now();
     // Reject oversized keys before any state is mutated (plan-tree #15). A key
     // this large is assumed to be a caller bug; validating up front keeps apply
     // all-or-nothing.
@@ -796,10 +814,6 @@ Status Crowdbtree::apply(uint64_t slot, const Batch &batch)
     }
     apply_batch(slot, batch);
     note_applied_slot(slot);
-    if (metrics_.apply_l != nullptr) {
-        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
-        metrics_.apply_l->observe(static_cast<uint64_t>(ns));
-    }
     return Status::Ok();
 }
 
@@ -828,9 +842,6 @@ Status Crowdbtree::apply_encoded(uint64_t slot, std::vector<encoded_op> ops)
             auto node = latest.extract(latest.begin());
             active->upsert(Slice(node.key()), slot, std::move(node.mapped()));
             mt_upsert_total_.fetch_add(1, std::memory_order_relaxed);
-            if (metrics_.mt_upsert_c != nullptr) {
-                metrics_.mt_upsert_c->inc();
-            }
         }
     }
     note_applied_slot(slot);
@@ -860,9 +871,6 @@ Status Crowdbtree::apply_external(uint64_t slot, std::vector<external_op> ops)
             auto node = latest.extract(latest.begin());
             active->upsert_external(Slice(node.key()), slot, node.mapped().first, std::move(node.mapped().second));
             mt_upsert_total_.fetch_add(1, std::memory_order_relaxed);
-            if (metrics_.mt_upsert_c != nullptr) {
-                metrics_.mt_upsert_c->inc();
-            }
         }
     }
     note_applied_slot(slot);
@@ -894,9 +902,24 @@ void Crowdbtree::set_gc_watermark(uint64_t snapshot_slot, uint64_t safe_slot)
 
 GcStats Crowdbtree::collect_garbage()
 {
+    auto                        t0 = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(write_mutex_);
     GcStats                     stats;
     uint64_t                    gc = gc_floor_.load();
+
+    // Skip the full tree walk when gc_floor_ hasn't advanced since the last
+    // sweep — no tombstone can have become newly eligible, so the walk would
+    // visit every resident leaf only to find dropped== 0 on each. The floor
+    // advances only when set_gc_watermark raises it (snapshot_slot or
+    // safe_slot moved forward), so this gates the walk on actual progress.
+    if (gc <= last_gc_floor_.load(std::memory_order_relaxed)) {
+        if (metrics_.gc_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            metrics_.gc_l->observe(static_cast<uint64_t>(ns));
+        }
+        return stats;
+    }
 
     std::function<void(uint64_t)> walk = [&](uint64_t page_id) {
         // Peek without demand-loading (mapping_.get_word, not resident()): only
@@ -928,6 +951,9 @@ GcStats Crowdbtree::collect_garbage()
         // most sweeps have nothing to reclaim, and rebuilding unconditionally
         // would allocate + retire a fresh LeafBase for every resident leaf on
         // every sweep for no reason.
+        if (metrics_.gc_leaves_checked_c != nullptr) {
+            metrics_.gc_leaves_checked_c->inc();
+        }
         size_t                  dropped       = 0;
         size_t                  dropped_bytes = 0;
         std::vector<uint64_t>   dead_overflow;
@@ -936,9 +962,12 @@ GcStats Crowdbtree::collect_garbage()
         if (dropped == 0) {
             return;
         }
+        if (metrics_.gc_leaves_reclaimed_c != nullptr) {
+            metrics_.gc_leaves_reclaimed_c->inc();
+        }
         uint64_t  right    = static_cast<LeafBase *>(base)->right_sibling();
         LeafBase *new_leaf = build_leaf_spilling_locked(std::move(fresh), right);
-        mapping_.store(page_id, new_leaf);
+        store_preserving_parent_locked(page_id, new_leaf);
 
         uint64_t freed = 0;
         for (PageBase *n = head; n != nullptr;) {
@@ -957,6 +986,18 @@ GcStats Crowdbtree::collect_garbage()
     };
     if (root_page_id_.load() != kInvalidPageId) {
         walk(root_page_id_.load());
+    }
+    last_gc_floor_.store(gc, std::memory_order_relaxed);
+
+    if (metrics_.gc_tombstones_c != nullptr && stats.tombstones_dropped > 0) {
+        metrics_.gc_tombstones_c->inc_by(stats.tombstones_dropped);
+    }
+    if (metrics_.gc_pages_c != nullptr && stats.pages_freed > 0) {
+        metrics_.gc_pages_c->inc_by(stats.pages_freed);
+    }
+    if (metrics_.gc_l != nullptr) {
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        metrics_.gc_l->observe(static_cast<uint64_t>(ns));
     }
     return stats;
 }
@@ -1018,11 +1059,25 @@ bool Crowdbtree::maybe_freeze_active(bool force)
             // its threshold rather than stall the writer -- an explicit
             // flush()/the background thread is expected to drain a slot free
             // (documented in Options::max_memtable_count).
+            size_t frozen_entries = 0;
+            size_t frozen_bytes   = 0;
+            for (const auto &mt : frozen_) {
+                frozen_entries += mt->count();
+                frozen_bytes += mt->approx_bytes();
+            }
+            CRB_LOG_ERROR("[{}] maybe_freeze_active: frozen queue full ({}), active_ growing past threshold "
+                          "(entries={} bytes={}); frozen total: entries={} bytes={}; "
+                          "next step: flush() must catch up or OOM risk -- increase max_memtable_count",
+                          name_, frozen_.size(), active_->count(), active_->approx_bytes(), frozen_entries,
+                          frozen_bytes);
             return false;
         }
     }
     frozen_.push_back(active_);
     active_ = std::make_shared<MemTable>(memtable_next_id_.fetch_add(1, std::memory_order_relaxed), &epoch_);
+    if (metrics_.mt_freeze_c != nullptr) {
+        metrics_.mt_freeze_c->inc();
+    }
     // Propagate the known-durable floor to the fresh table immediately (not
     // just on its first flush()) so a stale re-apply landing in it before
     // its own first drain is still correctly rejected.
@@ -1051,80 +1106,189 @@ size_t Crowdbtree::memtable_count() const
     return n;
 }
 
-bool Crowdbtree::drain_memtable_into_l1_locked(MemTable *mt, uint64_t cs)
+size_t Crowdbtree::frozen_table_count() const
 {
-    // Reject further writes <= cs *before* draining so this table's cells
-    // stay strictly newer than L1 (correctness of L0-first reads).
-    mt->set_durable_floor(cs);
-    std::vector<mem_entry> drained = mt->drain_up_to(cs);
-    if (drained.empty()) {
+    std::shared_lock<std::shared_mutex> lk(memtable_mutex_);
+    return frozen_.size();
+}
+
+bool Crowdbtree::publish_group_to_leaf_locked(uint64_t page_id, uint64_t cs, std::vector<leaf_entry> group)
+{
+    PageBase *head = resident(page_id);
+    // In-frame delta fast path (PT12, opt-in): if the leaf is a bare base, try a
+    // cheap COW-append of this group as in-frame deltas instead of a heap delta
+    // node. Falls back to the heap path on no-room; folds at the delta cap.
+    if (opt_.inframe_delta && head != nullptr && head->type == page_type::kLeafBase) {
+        auto                *leaf  = static_cast<LeafBase *>(head);
+        uint32_t             cur   = leaf->view().delta_count();
+        uint32_t             after = cur + static_cast<uint32_t>(group.size());
+        std::vector<uint8_t> out(leaf->page_bytes());
+        if (after <= opt_.max_inframe_delta &&
+            leaf_frame_append_deltas(leaf->frame(), leaf->page_bytes(), group, out.data())) {
+            LeafBase *fresh = LeafBase::from_frame_copy(out.data(), leaf->page_bytes(), pool_, opt_.frame_bytes);
+            store_preserving_parent_locked(page_id, fresh);
+            retire_page(leaf);
+            if (after >= opt_.max_inframe_delta || fresh->data_bytes() > opt_.leaf_split_bytes) {
+                consolidate_locked(page_id);
+                return true;
+            }
+            return false;
+        }
+    }
+    BatchDelta *delta = BatchDelta::build(cs, std::move(group), head);
+    store_preserving_parent_locked(page_id, delta);
+    if (delta->delta_len > opt_.max_delta_len || delta->chain_bytes > opt_.max_delta_bytes) {
+        consolidate_locked(page_id);
+        return true;
+    }
+    return false;
+}
+
+bool Crowdbtree::drain_all_frozen_locked(std::deque<std::shared_ptr<MemTable>> &to_drain,
+                                         std::shared_ptr<MemTable> &active, uint64_t cs)
+{
+    // Phase 1: Open cursors on all frozen memtables for a non-destructive
+    // k-way merge read. Entries stay in L0 until Phase 3 (drain), so
+    // concurrent scans always see them in L0 or L1, never in neither.
+    std::vector<ConcurrentSkipList::Cursor> cursors;
+    cursors.reserve(to_drain.size());
+    bool has_any = false;
+    for (auto &mt : to_drain) {
+        cursors.push_back(mt->cursor(Slice()));
+        if (cursors.back().valid()) {
+            has_any = true;
+        }
+    }
+    if (!has_any) {
+        for (auto &mt : to_drain) {
+            mt->set_durable_floor(cs);
+            if (mt->empty()) {
+                continue;
+            }
+            for (auto &e : mt->drain_up_to(UINT64_MAX)) {
+                if (e.slot > cs) {
+                    active->upsert(Slice(e.key), e.slot, std::move(e.cell));
+                }
+            }
+        }
         return false;
     }
 
+    // Phase 2: K-way merge the cursors with highest-slot-wins dedup,
+    // feeding the merged stream to a sort-aware descent + publish loop (O1+O5).
+    // Only entries with slot <= cs are emitted; entries with slot > cs are
+    // skipped (they remain in L0 for a future flush).
+    std::vector<MergeSource> sources;
+    sources.reserve(cursors.size());
+    for (auto &c : cursors) {
+        sources.push_back({.kind = MergeSource::kL0, .l0 = &c, .l1 = nullptr});
+    }
+    LoserTree lt;
+    lt.init(sources.data(), static_cast<int>(sources.size()));
+
     flush_drain_total_.fetch_add(1, std::memory_order_relaxed);
-    flush_entries_total_.fetch_add(drained.size(), std::memory_order_relaxed);
     if (metrics_.flush_drain_c != nullptr) {
         metrics_.flush_drain_c->inc();
     }
-    if (metrics_.flush_entries_c != nullptr) {
-        metrics_.flush_entries_c->inc_by(drained.size());
-    }
-    size_t i = 0;
-    while (i < drained.size()) {
-        auto                    resolve = [this](uint64_t p) { return resident(p); };
-        uint64_t                page_id = find_leaf_page_id(resolve, root_page_id_.load(), Slice(drained[i].key));
-        std::vector<leaf_entry> group;
-        // Move the drained cell buffer straight into the leaf entry (no copy).
-        group.push_back({.key = drained[i].key, .cell = std::move(drained[i].cell)});
-        ++i;
 
-        while (i < drained.size() &&
-               find_leaf_page_id(resolve, root_page_id_.load(), Slice(drained[i].key)) == page_id) {
-            group.push_back({.key = drained[i].key, .cell = std::move(drained[i].cell)});
-            ++i;
+    auto                    resolve = [this](uint64_t p) { return resident(p); };
+    uint64_t                page_id = kInvalidPageId;
+    Slice                   high_key;
+    bool                    have_leaf         = false;
+    uint64_t                entries_published = 0;
+    std::vector<leaf_entry> group;
+    buffer                  materialized_cell;
+
+    while (lt.winner_valid()) {
+        int      w    = lt.winner();
+        Slice    key  = sources[w].key();
+        uint64_t slot = sources[w].slot();
+
+        if (slot > cs) {
+            // Not yet contiguous — skip (remains in L0 for a future flush).
+            lt.advance_winner();
+            continue;
         }
 
-        PageBase *head = resident(page_id);
-        // In-frame delta fast path (PT12, opt-in): if the leaf is a bare base, try a
-        // cheap COW-append of this group as in-frame deltas instead of a heap delta
-        // node. Falls back to the heap path on no-room; folds at the delta cap.
-        if (opt_.inframe_delta && head != nullptr && head->type == page_type::kLeafBase) {
-            auto                *leaf  = static_cast<LeafBase *>(head);
-            uint32_t             cur   = leaf->view().delta_count();
-            uint32_t             after = cur + static_cast<uint32_t>(group.size());
-            std::vector<uint8_t> out(leaf->page_bytes());
-            if (after <= opt_.max_inframe_delta &&
-                leaf_frame_append_deltas(leaf->frame(), leaf->page_bytes(), group, out.data())) {
-                LeafBase *fresh = LeafBase::from_frame_copy(out.data(), leaf->page_bytes(), pool_, opt_.frame_bytes);
-                mapping_.store(page_id, fresh);
-                retire_page(leaf);
-                // Fold (which folds the in-frame deltas into a fresh base and then may
-                // split/merge) at the delta cap OR once the leaf outgrows the split
-                // threshold, so an in-frame-delta leaf never lingers oversized.
-                if (after >= opt_.max_inframe_delta || fresh->data_bytes() > opt_.leaf_split_bytes) {
-                    consolidate_locked(page_id);
-                }
-                continue;
+        // Sort-aware descent (O1): reuse the cached leaf when the key is
+        // within its range (key <= high_key). Re-descend when crossing a
+        // leaf boundary. After a publish that triggers a consolidate (which
+        // may split), the cached high_key is stale — the next key > high_key
+        // check naturally re-descends.
+        if (!have_leaf || key.compare(high_key) > 0) {
+            if (!group.empty()) {
+                publish_group_to_leaf_locked(page_id, cs, std::move(group));
+                group.clear();
             }
-            // Did not fit / over cap: fall through to the heap-delta path over the same
-            // base (its in-frame deltas overlay correctly under the new heap delta).
-            // We must NOT fold-then-fall-through here, since a fold can split the leaf
-            // and leave `page_id` no longer covering this group's keys.
+            page_id        = find_leaf_page_id(resolve, root_page_id_.load(), key);
+            PageBase *head = resident(page_id);
+            LeafBase *leaf = chain_leaf_base(head);
+            high_key       = leaf != nullptr ? leaf->high_key() : Slice();
+            have_leaf      = true;
         }
-        BatchDelta *delta = BatchDelta::build(cs, std::move(group), head);
-        mapping_.store(page_id, delta);
-        if (delta->delta_len > opt_.max_delta_len || delta->chain_bytes > opt_.max_delta_bytes) {
-            consolidate_locked(page_id);
+
+        // Materialize the winning cell from the cursor's CellVersion.
+        const CellVersion *cv = sources[w].l0->cell_version();
+        if (cv != nullptr && cv->cell.ownership() != buffer::mode::kExternal) {
+            materialized_cell = cv->cell.clone();
+        }
+        else if (cv != nullptr) {
+            size_t vlen       = cv->cell.size();
+            materialized_cell = buffer::alloc(vlen, kCellHeaderSize);
+            uint8_t *p        = materialized_cell.data();
+            for (int i = 0; i < 8; ++i) {
+                p[i] = static_cast<uint8_t>((cv->slot >> (8 * i)) & 0xff);
+            }
+            p[8] = cv->flags;
+            if (vlen > 0) {
+                std::memcpy(p + kCellHeaderSize, cv->cell.data(), vlen);
+            }
+        }
+        else {
+            materialized_cell = buffer::alloc(0, kCellHeaderSize);
+        }
+        group.push_back({.key = key.to_string(), .cell = std::move(materialized_cell)});
+        ++entries_published;
+        lt.advance_winner();
+
+        // Collision drain: advance all other sources on the same key
+        // (duplicate — highest-slot-wins among <= cs already picked the winner).
+        while (lt.winner_valid() && sources[lt.winner()].key().compare(key) == 0) {
+            lt.drain_winner();
         }
     }
-    return true;
+
+    // Publish the last pending group.
+    if (!group.empty()) {
+        publish_group_to_leaf_locked(page_id, cs, std::move(group));
+    }
+
+    flush_entries_total_.fetch_add(entries_published, std::memory_order_relaxed);
+    if (metrics_.flush_entries_c != nullptr) {
+        metrics_.flush_entries_c->inc_by(entries_published);
+    }
+
+    // Phase 3: Drain published entries from L0 and relocate leftovers.
+    // Entries with slot <= cs are already in L1 (published in Phase 2);
+    // drain_up_to(cs) removes them from L0 (materialized cells discarded).
+    // Entries with slot > cs are relocated to active_.
+    for (auto &mt : to_drain) {
+        mt->set_durable_floor(cs);
+        (void)mt->drain_up_to(cs); // discard — already in L1
+        if (mt->empty()) {
+            continue;
+        }
+        for (auto &e : mt->drain_up_to(UINT64_MAX)) {
+            active->upsert(Slice(e.key), e.slot, std::move(e.cell));
+        }
+    }
+    return entries_published > 0;
 }
 
 Status Crowdbtree::flush()
 {
     auto                        t0 = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(write_mutex_);
-    uint64_t                    cs = contiguous_slot_.load();
 
     // Always freeze whatever is in active_ right now (even below threshold)
     // so an explicit flush() call (or the periodic background-thread tick)
@@ -1135,48 +1299,50 @@ Status Crowdbtree::flush()
     // is left in the live active_ table (a no-op if it's already empty).
     maybe_freeze_active(/*force=*/true);
 
-    // Move the frozen_ queue into a local variable under a brief exclusive
-    // lock, then process it lock-free from here on: this is what makes it
-    // safe to iterate/erase without racing a concurrent maybe_swap_active()
-    // (called from other threads' apply(), without write_mutex_) that only
-    // ever *pushes* onto the (now-empty) live frozen_ member from this point
-    // on -- flush() never touches the live frozen_ member again this call.
-    std::deque<std::shared_ptr<MemTable>> to_drain;
-    {
-        std::unique_lock<std::shared_mutex> mlk(memtable_mutex_);
-        to_drain.swap(frozen_);
-    }
+    uint64_t entries_before = flush_entries_total_.load(std::memory_order_relaxed);
+    size_t   total_tables   = 0;
+    bool     wrote_any      = false;
+    uint64_t final_cs       = contiguous_slot_.load();
 
-    std::shared_ptr<MemTable> active         = current_active();
-    bool                      wrote_any      = false;
-    uint64_t                  entries_before = flush_entries_total_.load(std::memory_order_relaxed);
-    for (auto &mt : to_drain) {
-        if (drain_memtable_into_l1_locked(mt.get(), cs)) {
+    // Re-check loop: drain all frozen memtables, then re-swap frozen_ and
+    // drain again if new tables froze during the previous pass (apply() on
+    // other threads keeps writing and may trip the threshold mid-drain).
+    // This catches the backlog in one flush() call instead of leaving it for
+    // the next maintenance tick. Capped at max_memtable_count iterations so
+    // a sustained write rate faster than drain throughput exits cleanly.
+    for (size_t iter = 0; iter < opt_.max_memtable_count; ++iter) {
+        std::deque<std::shared_ptr<MemTable>> to_drain;
+        {
+            std::unique_lock<std::shared_mutex> mlk(memtable_mutex_);
+            to_drain.swap(frozen_);
+        }
+        if (to_drain.empty()) {
+            break;
+        }
+        // Re-read cs each pass: apply() (no write_mutex_) may have advanced
+        // the contiguous frontier between drain passes, letting this pass
+        // drain entries that were non-contiguous leftovers in the prior pass.
+        uint64_t                  cs     = contiguous_slot_.load();
+        std::shared_ptr<MemTable> active = current_active();
+        total_tables += to_drain.size();
+        if (drain_all_frozen_locked(to_drain, active, cs)) {
             wrote_any = true;
         }
-        if (mt->empty()) {
-            continue;
-        }
-        // This table still holds entries with slot > cs: stuck behind a gap
-        // that hasn't become contiguous yet. Relocate the remainder onto the
-        // live active_ table (rather than leaving a half-drained table
-        // sitting around, or worse pushing it back onto frozen_ and risking
-        // an unbounded queue) -- see the active_/frozen_ member comment
-        // (plan-tree #3) for the full rationale. upsert()'s highest-slot-
-        // wins keeps this correct even if active_ has since received an
-        // independent write for the same key.
-        for (auto &e : mt->drain_up_to(UINT64_MAX)) {
-            active->upsert(Slice(e.key), e.slot, std::move(e.cell));
-        }
+        active->set_durable_floor(cs);
+        last_applied_slot_.store(cs);
+        version_.fetch_add(1);
+        final_cs = cs;
     }
-    // Keep the live active_ table's durable floor current even when nothing
-    // above needed freezing/draining (e.g. an idle background-timer tick).
-    active->set_durable_floor(cs);
+    size_t remaining = frozen_table_count();
+    if (remaining > 0) {
+        CRB_LOG_WARN("[{}] flush: hit iteration cap ({}), {} tables still frozen; next tick drains them", name_,
+                     opt_.max_memtable_count, remaining);
+    }
 
     if (!wrote_any) {
-        // Still advance the durable watermark/version so snapshots see progress.
-        if (cs > last_applied_slot_.load()) {
-            last_applied_slot_.store(cs);
+        // Still advance the durable watermark so snapshots see progress.
+        if (final_cs > last_applied_slot_.load()) {
+            last_applied_slot_.store(final_cs);
         }
         if (metrics_.flush_l != nullptr) {
             auto ns =
@@ -1186,11 +1352,9 @@ Status Crowdbtree::flush()
         return Status::Ok();
     }
 
-    last_applied_slot_.store(cs);
-    version_.fetch_add(1);
     maybe_evict_locked(); // keep cache bounded; only clean bases go
     uint64_t entries_drained = flush_entries_total_.load(std::memory_order_relaxed) - entries_before;
-    CRB_LOG_INFO("[{}] flush: tables={} entries={} contiguous_slot={}", name_, to_drain.size(), entries_drained, cs);
+    CRB_LOG_INFO("[{}] flush: tables={} entries={} contiguous_slot={}", name_, total_tables, entries_drained, final_cs);
     if (metrics_.flush_l != nullptr) {
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
         metrics_.flush_l->observe(static_cast<uint64_t>(ns));
@@ -1213,6 +1377,9 @@ void Crowdbtree::consolidate_locked(uint64_t page_id)
     if (head == nullptr) {
         return;
     }
+    if (metrics_.page_consolidate_c != nullptr) {
+        metrics_.page_consolidate_c->inc();
+    }
     // A bare leaf base with no in-frame deltas (PT12) has nothing to fold; a base
     // carrying in-frame deltas DOES (we fold them into a fresh sorted base).
     if (head->type == page_type::kLeafBase && static_cast<LeafBase *>(head)->view().delta_count() == 0) {
@@ -1228,7 +1395,7 @@ void Crowdbtree::consolidate_locked(uint64_t page_id)
     std::vector<uint64_t>   dead_overflow;
     std::vector<leaf_entry> entries = resolve_leaf_chain_for_rebuild(head, gc_floor_.load(), &dead_overflow);
     LeafBase               *fresh   = build_leaf_spilling_locked(std::move(entries), right);
-    mapping_.store(page_id, fresh);
+    store_preserving_parent_locked(page_id, fresh);
 
     // retire the old chain (deltas + old base).
     for (PageBase *node = head; node != nullptr;) {
@@ -1247,11 +1414,86 @@ void Crowdbtree::consolidate_locked(uint64_t page_id)
     }
 }
 
+void Crowdbtree::set_children_parent_locked(uint64_t page_id, uint64_t parent_page_id)
+{
+    PageBase *head = resident(page_id);
+    if (head == nullptr) {
+        return;
+    }
+    PageBase *base = head;
+    while (base != nullptr && base->type == page_type::kBatchDelta) {
+        base = base->next;
+    }
+    if (base == nullptr || base->type != page_type::kInnerBase) {
+        return;
+    }
+    for (uint64_t child : static_cast<InnerBase *>(base)->children()) {
+        PageBase *child_head = resident(child);
+        if (child_head != nullptr) {
+            child_head->parent_page_id = parent_page_id;
+        }
+    }
+}
+
+void Crowdbtree::store_preserving_parent_locked(uint64_t page_id, PageBase *new_page)
+{
+    PageBase *old = resident(page_id);
+    if (old != nullptr) {
+        new_page->parent_page_id = old->parent_page_id;
+    }
+    mapping_.store(page_id, new_page);
+}
+
 std::vector<uint64_t> Crowdbtree::path_to_page_id_locked(uint64_t target_page_id) const
 {
-    // DFS by PID (robust even for empty leaves with no routing key). O(tree size)
-    // per split/merge event; a parent-pointer optimization is deferred.
-    std::vector<uint64_t>         path;
+    // O4: parent-pointer walk — O(depth) instead of O(tree size) DFS. Walk
+    // from target up to the root via parent_page_id, then reverse. The root
+    // has parent_page_id == kInvalidPageId. All parent pointers are maintained
+    // under write_mutex_ on every split/merge/root-change, and this function
+    // is only called under write_mutex_, so no synchronization is needed.
+    // Fallback: if a page was demand-loaded (evicted then reloaded from disk),
+    // its parent_page_id is kInvalidPageId (not persisted). In that case, fall
+    // back to DFS from the root. This is O(tree size) but only on the cold
+    // (demand-load) path — the hot path (split/merge) always has valid parent
+    // pointers.
+    std::vector<uint64_t> path;
+    uint64_t              root = root_page_id_.load();
+    if (target_page_id == root) {
+        return path; // root has no parent path
+    }
+    // Try the fast parent-pointer walk first. Depth limit prevents
+    // infinite loops from stale/cyclic parent pointers (defensive).
+    bool      fast_ok   = true;
+    const int kMaxDepth = 64;
+    int       depth     = 0;
+    for (uint64_t pid = target_page_id; pid != kInvalidPageId && pid != root && depth < kMaxDepth;) {
+        PageBase *head = resident(pid);
+        if (head == nullptr) {
+            fast_ok = false;
+            break;
+        }
+        uint64_t parent = head->parent_page_id;
+        if (parent == kInvalidPageId || parent == pid) {
+            // Broken chain (demand-loaded page) or self-loop: fall back to DFS.
+            fast_ok = false;
+            break;
+        }
+        path.push_back(parent);
+        if (parent == root) {
+            break;
+        }
+        pid = parent;
+        ++depth;
+    }
+    if (depth >= kMaxDepth) {
+        fast_ok = false; // too deep — fall back to DFS
+    }
+    if (fast_ok) {
+        std::reverse(path.begin(), path.end());
+        return path;
+    }
+    // Fallback: DFS from the root (O(tree size) — cold path only).
+    path.clear();
     std::function<bool(uint64_t)> dfs = [&](uint64_t page_id) -> bool {
         if (page_id == target_page_id) {
             return true;
@@ -1276,7 +1518,7 @@ std::vector<uint64_t> Crowdbtree::path_to_page_id_locked(uint64_t target_page_id
         path.pop_back();
         return false;
     };
-    dfs(root_page_id_.load());
+    dfs(root);
     return path;
 }
 
@@ -1288,7 +1530,7 @@ void Crowdbtree::maybe_split_or_merge_locked(uint64_t page_id)
     }
     auto *leaf = static_cast<LeafBase *>(head);
     if (leaf->count() >= 2 && leaf->data_bytes() > opt_.leaf_split_bytes) {
-        split_leaf_locked(page_id, path_to_page_id_locked(page_id));
+        split_leaf_to_threshold_locked(page_id);
     }
     else if (leaf->data_bytes() < opt_.leaf_merge_bytes && page_id != root_page_id_.load()) {
         // Includes empty leaves (count 0) so fully-deleted leaves merge away.
@@ -1296,8 +1538,47 @@ void Crowdbtree::maybe_split_or_merge_locked(uint64_t page_id)
     }
 }
 
+void Crowdbtree::split_leaf_to_threshold_locked(uint64_t leaf_page_id)
+{
+    // Consolidation can fold a large delta chain into a leaf that is many
+    // times the split threshold. A single 2-way split leaves both halves
+    // oversized when the leaf is > 2x the threshold. Iteratively split each
+    // oversized half (via a worklist) until every leaf fits under the
+    // threshold. Reuses split_leaf_locked for each halving; the worklist
+    // ensures both the left half (still at leaf_page_id) and the right half
+    // (a new sibling) get re-checked. Terminates because each split halves
+    // the entry count and we stop at count < 2.
+    std::vector<uint64_t> worklist;
+    worklist.push_back(leaf_page_id);
+    while (!worklist.empty()) {
+        uint64_t pid = worklist.back();
+        worklist.pop_back();
+        PageBase *head = resident(pid);
+        if (head == nullptr || head->type != page_type::kLeafBase) {
+            continue;
+        }
+        auto *leaf = static_cast<LeafBase *>(head);
+        if (leaf->count() < 2 || leaf->data_bytes() <= opt_.leaf_split_bytes) {
+            continue;
+        }
+        split_leaf_locked(pid, path_to_page_id_locked(pid));
+        // Both halves may still exceed the threshold; re-check them.
+        PageBase *fresh = resident(pid);
+        if (fresh != nullptr && fresh->type == page_type::kLeafBase) {
+            worklist.push_back(pid);
+            uint64_t right = static_cast<LeafBase *>(fresh)->right_sibling();
+            if (right != kInvalidPageId) {
+                worklist.push_back(right);
+            }
+        }
+    }
+}
+
 void Crowdbtree::split_leaf_locked(uint64_t leaf_page_id, std::vector<uint64_t> path)
 {
+    if (metrics_.page_split_c != nullptr) {
+        metrics_.page_split_c->inc();
+    }
     auto                   *leaf = static_cast<LeafBase *>(resident(leaf_page_id));
     std::vector<leaf_entry> e    = leaf->entries(); // materialized owned copy
     size_t                  mid  = e.size() / 2;
@@ -1319,8 +1600,10 @@ void Crowdbtree::split_leaf_locked(uint64_t leaf_page_id, std::vector<uint64_t> 
     propagate_split_locked(std::move(path), leaf_page_id, std::move(sep), right_page_id);
 
     LeafBase *left = LeafBase::build(lo, right_page_id, pool_, opt_.frame_bytes);
-    mapping_.store(leaf_page_id, left);
+    store_preserving_parent_locked(leaf_page_id, left);
     retire_page(leaf);
+    leaf_count_.fetch_add(1, std::memory_order_relaxed);
+    sync_page_count_gauges();
 }
 
 void Crowdbtree::propagate_split_locked(std::vector<uint64_t> path, uint64_t child_page_id, std::string sep,
@@ -1332,6 +1615,10 @@ void Crowdbtree::propagate_split_locked(std::vector<uint64_t> path, uint64_t chi
         mapping_.store(new_root,
                        InnerBase::build({std::move(sep)}, {child_page_id, right_page_id}, pool_, opt_.frame_bytes));
         root_page_id_.store(new_root);
+        // O4: set parent pointers on the new root's children.
+        set_children_parent_locked(new_root, new_root);
+        inner_count_.fetch_add(1, std::memory_order_relaxed);
+        sync_page_count_gauges();
         return;
     }
     uint64_t parent_page_id = path.back();
@@ -1351,8 +1638,12 @@ void Crowdbtree::propagate_split_locked(std::vector<uint64_t> path, uint64_t chi
     children.insert(children.begin() + static_cast<std::ptrdiff_t>(idx + 1), right_page_id);
 
     if (seps.size() <= opt_.inner_max_keys) {
-        mapping_.store(parent_page_id, InnerBase::build(seps, children, pool_, opt_.frame_bytes));
+        store_preserving_parent_locked(parent_page_id, InnerBase::build(seps, children, pool_, opt_.frame_bytes));
         retire_page(parent);
+        // O4: update parent pointers for all children (the new right_page_id
+        // child and any existing children whose parent was just rebuilt).
+        set_children_parent_locked(parent_page_id, parent_page_id);
+        sync_page_count_gauges();
         return;
     }
 
@@ -1365,9 +1656,13 @@ void Crowdbtree::propagate_split_locked(std::vector<uint64_t> path, uint64_t chi
     std::vector<uint64_t>    rchildren(children.begin() + static_cast<std::ptrdiff_t>(m + 1), children.end());
 
     uint64_t rinner_page_id = mapping_.allocate_page_id();
-    mapping_.store(parent_page_id, InnerBase::build(lseps, lchildren, pool_, opt_.frame_bytes));
+    store_preserving_parent_locked(parent_page_id, InnerBase::build(lseps, lchildren, pool_, opt_.frame_bytes));
     mapping_.store(rinner_page_id, InnerBase::build(rseps, rchildren, pool_, opt_.frame_bytes));
     retire_page(parent);
+    // O4: set parent pointers on children of both split inner pages.
+    set_children_parent_locked(parent_page_id, parent_page_id);
+    set_children_parent_locked(rinner_page_id, rinner_page_id);
+    inner_count_.fetch_add(1, std::memory_order_relaxed);
 
     propagate_split_locked(std::move(path), parent_page_id, std::move(median), rinner_page_id);
 }
@@ -1376,6 +1671,9 @@ void Crowdbtree::try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<
 {
     if (path.empty()) {
         return; // root leaf: nothing to merge with
+    }
+    if (metrics_.page_merge_c != nullptr) {
+        metrics_.page_merge_c->inc();
     }
     uint64_t                     parent_page_id = path.back();
     auto                        *parent         = static_cast<InnerBase *>(resident(parent_page_id));
@@ -1414,11 +1712,12 @@ void Crowdbtree::try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<
         merged.push_back(std::move(e));
     }
     LeafBase *fresh = build_leaf_spilling_locked(std::move(merged), leaf->right_sibling());
-    mapping_.store(left_page_id, fresh);
+    store_preserving_parent_locked(left_page_id, fresh);
     retire_page(left);
     for (uint64_t h : dead_overflow) {
         retire_overflow_chain_locked(h);
     }
+    leaf_count_.fetch_sub(1, std::memory_order_relaxed);
 
     // 2. Repoint the parent: drop separators_[idx-1] and children_[idx].
     std::vector<std::string> seps     = parent->separators();
@@ -1431,12 +1730,20 @@ void Crowdbtree::try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<
         // Root now has a single child: collapse the root one level down.
         // `parent`'s own PID gets no replacement store() -- orphaned.
         root_page_id_.store(children[0]);
+        // O4: the new root (single child) has no parent.
+        PageBase *new_root_head = resident(children[0]);
+        if (new_root_head != nullptr) {
+            new_root_head->parent_page_id = kInvalidPageId;
+        }
         retire_orphaned_page(parent_page_id, parent);
+        inner_count_.fetch_sub(1, std::memory_order_relaxed);
     }
     else {
         size_t parent_seps = seps.size();
-        mapping_.store(parent_page_id, InnerBase::build(seps, children, pool_, opt_.frame_bytes));
+        store_preserving_parent_locked(parent_page_id, InnerBase::build(seps, children, pool_, opt_.frame_bytes));
         retire_page(parent);
+        // O4: update parent pointers for the rebuilt parent's children.
+        set_children_parent_locked(parent_page_id, parent_page_id);
         parent_underfull = parent_page_id != root_page_id_.load() && parent_seps < inner_merge_keys();
     }
 
@@ -1456,6 +1763,7 @@ void Crowdbtree::try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<
         ppath.pop_back();                   // -> root..grandparent (parent's path)
         try_merge_inner_locked(parent_page_id, std::move(ppath));
     }
+    sync_page_count_gauges();
 }
 
 void Crowdbtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint64_t> path)
@@ -1512,8 +1820,11 @@ void Crowdbtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint
     for (uint64_t c : inner->children()) {
         mchildren.push_back(c);
     }
-    mapping_.store(left_page_id, InnerBase::build(mseps, mchildren, pool_, opt_.frame_bytes));
+    store_preserving_parent_locked(left_page_id, InnerBase::build(mseps, mchildren, pool_, opt_.frame_bytes));
     retire_page(left);
+    // O4: update parent pointers for the merged left sibling's children.
+    set_children_parent_locked(left_page_id, left_page_id);
+    inner_count_.fetch_sub(1, std::memory_order_relaxed); // two inners → one
 
     // 2. Repoint the grandparent: drop separators[idx-1] and children[idx].
     std::vector<std::string> gseps     = gp->separators();
@@ -1526,12 +1837,20 @@ void Crowdbtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint
         // Root now has a single child: collapse one level down. `gp`'s own
         // PID gets no replacement store() -- orphaned.
         root_page_id_.store(gchildren[0]);
+        // O4: the new root (single child) has no parent.
+        PageBase *new_root_head = resident(gchildren[0]);
+        if (new_root_head != nullptr) {
+            new_root_head->parent_page_id = kInvalidPageId;
+        }
         retire_orphaned_page(gp_page_id, gp);
+        inner_count_.fetch_sub(1, std::memory_order_relaxed); // root inner retired
     }
     else {
         size_t gp_seps = gseps.size();
-        mapping_.store(gp_page_id, InnerBase::build(gseps, gchildren, pool_, opt_.frame_bytes));
+        store_preserving_parent_locked(gp_page_id, InnerBase::build(gseps, gchildren, pool_, opt_.frame_bytes));
         retire_page(gp);
+        // O4: update parent pointers for the rebuilt grandparent's children.
+        set_children_parent_locked(gp_page_id, gp_page_id);
         gp_underfull = gp_page_id != root_page_id_.load() && gp_seps < inner_merge_keys();
     }
 
@@ -1547,6 +1866,7 @@ void Crowdbtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint
         path.pop_back(); // -> root..great-grandparent (grandparent's path)
         try_merge_inner_locked(gp_page_id, std::move(path));
     }
+    sync_page_count_gauges();
 }
 
 GetView Crowdbtree::get_view(Slice key) const
@@ -1567,6 +1887,7 @@ GetView Crowdbtree::get_view(Slice key) const
     // buffer — the epoch guard keeps the skip-list node (and its cell
     // version) alive past any concurrent overwrite/drain, exactly as it
     // keeps an L1 frame resident. No copy, no std::string staging.
+    auto                                   l0_t0  = std::chrono::steady_clock::now();
     std::vector<std::shared_ptr<MemTable>> tables = all_memtables();
     const CellVersion                     *best   = nullptr;
     for (auto &mt : tables) {
@@ -1587,6 +1908,11 @@ GetView Crowdbtree::get_view(Slice key) const
         if (metrics_.mt_get_hit_c != nullptr) {
             metrics_.mt_get_hit_c->inc();
         }
+        if (metrics_.mt_get_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - l0_t0).count();
+            metrics_.mt_get_l->observe(static_cast<uint64_t>(ns));
+        }
         if ((best->flags & kFlagTombstone) != 0) {
             return result; // not found
         }
@@ -1602,29 +1928,55 @@ GetView Crowdbtree::get_view(Slice key) const
         }
         return result;
     }
+    if (metrics_.mt_get_l != nullptr) {
+        auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - l0_t0).count();
+        metrics_.mt_get_l->observe(static_cast<uint64_t>(ns));
+    }
 
     // L1: descend to the leaf and resolve its chain. A non-overflow cell's
     // value lives directly in head's frame, which result.guard_ keeps
     // resident for result's lifetime -- borrow it, no copy.
+    auto l1_t0 = std::chrono::steady_clock::now();
     l1_get_total_.fetch_add(1, std::memory_order_relaxed);
     if (metrics_.l1_get_c != nullptr) {
         metrics_.l1_get_c->inc();
     }
     uint64_t page_id = find_leaf_page_id([this](uint64_t p) { return resident(p); }, root_page_id_.load(), key);
     if (page_id == kInvalidPageId) {
+        if (metrics_.l1_get_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - l1_t0).count();
+            metrics_.l1_get_l->observe(static_cast<uint64_t>(ns));
+        }
         return result;
     }
     PageBase *head = resident(page_id);
     CellView  v;
     if (!resolve_chain(head, key, &v)) {
+        if (metrics_.l1_get_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - l1_t0).count();
+            metrics_.l1_get_l->observe(static_cast<uint64_t>(ns));
+        }
         return result;
     }
     if (v.is_tombstone()) {
+        if (metrics_.l1_get_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - l1_t0).count();
+            metrics_.l1_get_l->observe(static_cast<uint64_t>(ns));
+        }
         return result;
     }
     l1_get_hit_total_.fetch_add(1, std::memory_order_relaxed);
     if (metrics_.l1_get_hit_c != nullptr) {
         metrics_.l1_get_hit_c->inc();
+    }
+    if (metrics_.l1_get_l != nullptr) {
+        auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - l1_t0).count();
+        metrics_.l1_get_l->observe(static_cast<uint64_t>(ns));
     }
     result.found_ = true;
     result.slot_  = v.slot();
@@ -1949,14 +2301,11 @@ Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, s
     for (auto &mt : all_memtables()) {
         l0.push_back({.cur = mt->cursor(start_after)});
     }
-    auto l0_snapshot_ns = dur_ns(t0);
-    // R50: the cursor seeks directly to start_after (O(log N)), so the
-    // separate upper_bound skip pass is gone — l0_skip is always 0.
-    auto l0_skip_ns = uint64_t{0};
+    uint64_t l0_ns = dur_ns(t0);
 
-    uint64_t l1_resolve_ns = 0;
-    uint64_t gc            = gc_floor_.load();
-    uint64_t page_id       = root_page_id_.load();
+    uint64_t l1_ns   = 0;
+    uint64_t gc      = gc_floor_.load();
+    uint64_t page_id = root_page_id_.load();
     // Descend at the cursor when present, else at the prefix start -- a
     // non-empty start_after lands directly on the leaf containing it,
     // skipping every earlier leaf in the prefix range.
@@ -1964,8 +2313,8 @@ Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, s
     if (page_id != kInvalidPageId) {
         t0      = std::chrono::steady_clock::now();
         page_id = find_leaf_page_id([this](uint64_t p) { return resident(p); }, page_id, descend_key);
+        l1_ns += page_id != kInvalidPageId ? dur_ns(t0) : 0;
     }
-    auto l1_descent_ns = page_id != kInvalidPageId ? dur_ns(t0) : 0;
     // A lazy cursor over the current leaf's chain, not a materialized
     // vector -- it yields borrowed key/cell Slices in key order and only
     // resolves as far as the merge loop pulls, so a limit-bounded scan never
@@ -1993,7 +2342,7 @@ Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, s
                 l1.seek(descend_key, /*exclusive=*/!start_after.empty());
             }
             first_leaf = false;
-            l1_resolve_ns += dur_ns(rt);
+            l1_ns += dur_ns(rt);
             LeafBase *base = chain_leaf_base(head);
             page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
             // R58: prefetch the right-sibling leaf's memory while the merge
@@ -2355,18 +2704,15 @@ Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, s
         }
     }
     auto loop_ns = dur_ns(t_loop);
-    // merge = loop overhead excluding the leaf-resolution time already counted
-    // under l1_resolve (refill bookkeeping + min-key select + winner + decode).
-    uint64_t merge_ns = (loop_ns > l1_resolve_ns) ? loop_ns - l1_resolve_ns : 0;
+    // merge = loop overhead excluding L1 work (refill bookkeeping + min-key
+    // select + winner + decode).
+    uint64_t merge_ns = (loop_ns > l1_ns) ? loop_ns - l1_ns : 0;
     uint64_t total_ns = dur_ns(t_total);
-    if (metrics_.scan_c != nullptr) {
-        metrics_.scan_c->inc();
+    if (metrics_.scan_l != nullptr) {
         metrics_.scan_entries_c->inc_by(packed_count);
         metrics_.scan_l->observe(total_ns);
-        metrics_.scan_l0_snapshot_l->observe(l0_snapshot_ns);
-        metrics_.scan_l0_skip_l->observe(l0_skip_ns);
-        metrics_.scan_l1_descent_l->observe(l1_descent_ns);
-        metrics_.scan_l1_resolve_l->observe(l1_resolve_ns);
+        metrics_.scan_l0_l->observe(l0_ns);
+        metrics_.scan_l1_l->observe(l1_ns);
         metrics_.scan_merge_l->observe(merge_ns);
     }
     if (out_count != nullptr) {
@@ -2413,8 +2759,7 @@ bool Crowdbtree::try_scan_no_load(
     for (auto &mt : all_memtables()) {
         l0.push_back({.cur = mt->cursor(start_after)});
     }
-    auto l0_snapshot_ns = dur_ns(t0);
-    auto l0_skip_ns     = uint64_t{0}; // R50: cursor seeks directly
+    uint64_t l0_ns = dur_ns(t0);
 
     // Non-blocking probe (mirrors try_get_view_no_load's `probe`): bails out
     // on an unloaded slot instead of demand-loading it, recording which
@@ -2434,9 +2779,9 @@ bool Crowdbtree::try_scan_no_load(
         return v;
     };
 
-    uint64_t l1_resolve_ns = 0;
-    uint64_t gc            = gc_floor_.load();
-    uint64_t page_id       = root_page_id_.load();
+    uint64_t l1_ns   = 0;
+    uint64_t gc      = gc_floor_.load();
+    uint64_t page_id = root_page_id_.load();
     // Descend at the cursor when present, else at the prefix start -- see
     // scan()'s own comment.
     Slice descend_key = !start_after.empty() ? start_after : prefix;
@@ -2447,8 +2792,8 @@ bool Crowdbtree::try_scan_no_load(
             *out_pending_page_id = blocked_page_id;
             return false; // genuine miss on the initial descent
         }
+        l1_ns += page_id != kInvalidPageId ? dur_ns(t0) : 0;
     }
-    auto l1_descent_ns = page_id != kInvalidPageId ? dur_ns(t0) : 0;
     // Lazy leaf cursor -- see scan()'s own comment.
     LeafChainCursor l1;
     bool            first_leaf = true;
@@ -2469,7 +2814,7 @@ bool Crowdbtree::try_scan_no_load(
                 l1.seek(descend_key, /*exclusive=*/!start_after.empty());
             }
             first_leaf = false;
-            l1_resolve_ns += dur_ns(rt);
+            l1_ns += dur_ns(rt);
             LeafBase *base = chain_leaf_base(head);
             page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
             // R58: prefetch the right-sibling leaf (see scan()'s refill_l1).
@@ -2780,16 +3125,13 @@ bool Crowdbtree::try_scan_no_load(
         }
     }
     auto     loop_ns  = dur_ns(t_loop);
-    uint64_t merge_ns = (loop_ns > l1_resolve_ns) ? loop_ns - l1_resolve_ns : 0;
+    uint64_t merge_ns = (loop_ns > l1_ns) ? loop_ns - l1_ns : 0;
     uint64_t total_ns = dur_ns(t_total);
-    if (metrics_.scan_c != nullptr) {
-        metrics_.scan_c->inc();
+    if (metrics_.scan_l != nullptr) {
         metrics_.scan_entries_c->inc_by(packed_count);
         metrics_.scan_l->observe(total_ns);
-        metrics_.scan_l0_snapshot_l->observe(l0_snapshot_ns);
-        metrics_.scan_l0_skip_l->observe(l0_skip_ns);
-        metrics_.scan_l1_descent_l->observe(l1_descent_ns);
-        metrics_.scan_l1_resolve_l->observe(l1_resolve_ns);
+        metrics_.scan_l0_l->observe(l0_ns);
+        metrics_.scan_l1_l->observe(l1_ns);
         metrics_.scan_merge_l->observe(merge_ns);
     }
     if (out_count != nullptr) {
@@ -2945,6 +3287,9 @@ void Crowdbtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_o
             // Resume from the last accumulated key (if any) to avoid
             // re-traversing already-resolved leaves.
             auto resume_after = make_resume_after(start_after_owned, last_key);
+            if (metrics_.scan_retry_c != nullptr) {
+                metrics_.scan_retry_c->inc();
+            }
             scan_async_attempt(std::move(prefix_owned), resume_after, end_key_owned, remaining_limit, byte_budget,
                                keys_only, deadline_ms, std::move(accumulated), std::move(last_key), accumulated_count,
                                std::move(on_done));
@@ -2980,6 +3325,9 @@ void Crowdbtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_o
                 // Resume from the last accumulated key to avoid
                 // re-traversing already-resolved leaves.
                 auto resume_after = make_resume_after(start_after_owned, last_key);
+                if (metrics_.scan_retry_c != nullptr) {
+                    metrics_.scan_retry_c->inc();
+                }
                 scan_async_attempt(std::move(prefix_owned), resume_after, end_key_owned, remaining_limit, byte_budget,
                                    keys_only, deadline_ms, std::move(accumulated), std::move(last_key),
                                    accumulated_count, std::move(on_done));
@@ -2989,6 +3337,9 @@ void Crowdbtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_o
 #endif
     // No async backend wired -- fall back to the existing synchronous
     // demand-load and retry, still on this same thread.
+    if (metrics_.scan_retry_c != nullptr) {
+        metrics_.scan_retry_c->inc();
+    }
     (void)resident(pending_page_id);
     auto resume_after = make_resume_after(start_after_owned, last_key);
     scan_async_attempt(std::move(prefix_owned), resume_after, end_key_owned, remaining_limit, byte_budget, keys_only,
@@ -3057,6 +3408,8 @@ Status Crowdbtree::install_snapshot(std::vector<leaf_entry> sorted_entries, uint
         root_page_id_.store(page_id);
         // Replace L0 and reset the durable watermarks so the imported slots apply.
         reset_memtables_locked();
+        leaf_count_.store(1, std::memory_order_relaxed);
+        inner_count_.store(0, std::memory_order_relaxed);
         last_applied_slot_.store(0);
         contiguous_slot_.store(0);
         gc_floor_.store(0);
@@ -3118,7 +3471,7 @@ Status Crowdbtree::collect_native_frames(std::vector<NativeFrame> *out, uint64_t
             std::vector<uint64_t> dead_overflow;
             LeafBase             *fresh =
                 build_leaf_spilling_locked(resolve_leaf_chain_for_rebuild(head, gc, &dead_overflow), right);
-            mapping_.store(page_id, fresh);
+            store_preserving_parent_locked(page_id, fresh);
             for (PageBase *n = head; n != nullptr;) {
                 PageBase *nx = n->next;
                 retire_page(n);
@@ -3203,6 +3556,8 @@ Status Crowdbtree::install_snapshot_native(std::vector<NativeFrame> frames, uint
     free_all_resident_pages(/*retire=*/true);
 
     uint64_t max_page_id = root_page_id;
+    uint64_t leaves      = 0;
+    uint64_t inners      = 0;
     for (NativeFrame &f : frames) {
         if (f.page_id == kInvalidPageId) {
             return Status::invalid_argument("native snapshot: invalid page_id");
@@ -3213,6 +3568,12 @@ Status Crowdbtree::install_snapshot_native(std::vector<NativeFrame> frames, uint
         }
         page_type ft   = frame_page_type(f.frame.data());
         auto      plen = static_cast<uint32_t>(f.frame.size());
+        if (ft == page_type::kLeafBase) {
+            ++leaves;
+        }
+        else if (ft == page_type::kInnerBase) {
+            ++inners;
+        }
         PageBase *page = nullptr;
         switch (ft) {
         case page_type::kLeafBase:
@@ -3234,6 +3595,36 @@ Status Crowdbtree::install_snapshot_native(std::vector<NativeFrame> frames, uint
     }
     mapping_.set_next_page_id(max_page_id + 1);
     root_page_id_.store(root_page_id);
+    leaf_count_.store(leaves, std::memory_order_relaxed);
+    inner_count_.store(inners, std::memory_order_relaxed);
+    // O4: initialize parent pointers on all inner pages' children by walking
+    // from the root down. The root itself has no parent (kInvalidPageId).
+    {
+        std::vector<uint64_t> stack = {root_page_id};
+        while (!stack.empty()) {
+            uint64_t pid = stack.back();
+            stack.pop_back();
+            PageBase *head = resident(pid);
+            if (head == nullptr) {
+                continue;
+            }
+            PageBase *base = head;
+            while (base != nullptr && base->type == page_type::kBatchDelta) {
+                base = base->next;
+            }
+            if (base == nullptr || base->type != page_type::kInnerBase) {
+                continue;
+            }
+            auto *inner = static_cast<InnerBase *>(base);
+            for (uint64_t child : inner->children()) {
+                PageBase *child_head = resident(child);
+                if (child_head != nullptr) {
+                    child_head->parent_page_id = pid;
+                }
+                stack.push_back(child);
+            }
+        }
+    }
 
     reset_memtables_locked();
     last_applied_slot_.store(at_slot);
@@ -3259,6 +3650,8 @@ Status Crowdbtree::clear()
     mapping_.store(page_id, LeafBase::build({}, kInvalidPageId, pool_, opt_.frame_bytes));
     root_page_id_.store(page_id);
     reset_memtables_locked();
+    leaf_count_.store(1, std::memory_order_relaxed);
+    inner_count_.store(0, std::memory_order_relaxed);
     last_applied_slot_.store(0);
     contiguous_slot_.store(0);
     gc_floor_.store(0);
@@ -3302,6 +3695,8 @@ EngineStats Crowdbtree::stats() const
     s.l1_get_hit_total    = l1_get_hit_total_.load(std::memory_order_relaxed);
     s.map_lookup_total    = map_lookup_total_.load(std::memory_order_relaxed);
     s.demand_load_total   = demand_load_total_.load(std::memory_order_relaxed);
+    s.leaf_count          = leaf_count_.load(std::memory_order_relaxed);
+    s.inner_count         = inner_count_.load(std::memory_order_relaxed);
     return s;
 }
 
@@ -3320,58 +3715,106 @@ ScanProfile Crowdbtree::scan_profile() const
         s.max_ns  = snap.max;
         s.avg_ns  = snap.sum / count;
     };
-    p.count   = metrics_.scan_c != nullptr ? metrics_.scan_c->flush().count : 0;
+    // Count from scan_l (scan_c removed — count derivable from latency).
+    uint64_t scan_count = 0;
+    if (metrics_.scan_l != nullptr) {
+        auto snap      = metrics_.scan_l->flush();
+        scan_count     = snap.count;
+        p.total.sum_ns = snap.sum;
+        p.total.max_ns = snap.max;
+        if (snap.count > 0) {
+            p.total.avg_ns = snap.sum / snap.count;
+        }
+    }
+    p.count   = scan_count;
     p.entries = metrics_.scan_entries_c != nullptr ? metrics_.scan_entries_c->flush().count : 0;
-    fill(metrics_.scan_l, p.total, p.count);
-    fill(metrics_.scan_l0_snapshot_l, p.l0_snapshot, p.count);
-    fill(metrics_.scan_l0_skip_l, p.l0_skip, p.count);
-    fill(metrics_.scan_l1_descent_l, p.l1_descent, p.count);
-    fill(metrics_.scan_l1_resolve_l, p.l1_resolve, p.count);
+    fill(metrics_.scan_l0_l, p.l0, p.count);
+    fill(metrics_.scan_l1_l, p.l1, p.count);
     fill(metrics_.scan_merge_l, p.merge, p.count);
     return p;
 }
 
-void Crowdbtree::init_metrics(const std::string &prefix)
+void Crowdbtree::init_metrics(const std::string &prefix, const std::string &backend_label)
 {
     metrics_registry_ = std::make_unique<MetricsRegistry>();
     auto *r           = metrics_registry_.get();
+    // Backend-specific I/O prefix (empty for mem backend → no suffix).
+    std::string io = backend_label.empty() ? prefix : prefix + "." + backend_label;
 
-    metrics_.buf_hits                    = r->register_counter(prefix + ".buf.hits.c");
-    metrics_.buf_misses                  = r->register_counter(prefix + ".buf.misses.c");
-    metrics_.buf_evictions               = r->register_counter(prefix + ".buf.evictions.c");
-    metrics_.buf_writebacks              = r->register_counter(prefix + ".buf.writebacks.c");
-    metrics_.buf_resident                = r->register_gauge(prefix + ".buf.resident.g");
-    metrics_.buf_dirty                   = r->register_gauge(prefix + ".buf.dirty.g");
-    metrics_.apply_l                     = r->register_summary(prefix + ".apply.l");
-    metrics_.snapshot_l                  = r->register_summary(prefix + ".snapshot.l");
-    metrics_.mt_upsert_c                 = r->register_counter(prefix + ".mt.upsert.c");
-    metrics_.mt_get_c                    = r->register_counter(prefix + ".mt.get.c");
-    metrics_.mt_get_hit_c                = r->register_counter(prefix + ".mt.get.hit.c");
-    metrics_.flush_drain_c               = r->register_counter(prefix + ".flush.drain.c");
-    metrics_.flush_entries_c             = r->register_counter(prefix + ".flush.entries.c");
-    metrics_.l1_get_c                    = r->register_counter(prefix + ".l1.get.c");
-    metrics_.l1_get_hit_c                = r->register_counter(prefix + ".l1.get.hit.c");
-    metrics_.flush_l                     = r->register_summary(prefix + ".flush.l");
-    metrics_.page_write_l                = r->register_summary(prefix + ".page.write.l");
-    metrics_.page_map_lookup_c           = r->register_counter(prefix + ".page.map.lookup.c");
-    metrics_.demand_load_l               = r->register_summary(prefix + ".demand.load.l");
-    metrics_.snapshot_apply_l            = r->register_summary(prefix + ".snapshot.apply.l");
-    metrics_.snapshot_page_write_l       = r->register_summary(prefix + ".snapshot.page.write.io.l");
-    metrics_.snapshot_page_write_cache_c = r->register_counter(prefix + ".snapshot.page.write.cache.c");
-    metrics_.snapshot_page_write_bw      = r->register_bandwidth(prefix + ".snapshot.page.write.bw");
-    metrics_.snapshot_meta_write_bw      = r->register_bandwidth(prefix + ".snapshot.meta.write.bw");
-    metrics_.page_read_bw                = r->register_bandwidth(prefix + ".page.read.bw");
-    metrics_.snapshot_pages_c            = r->register_counter(prefix + ".snapshot.pages.c");
-    metrics_.scan_c                      = r->register_counter(prefix + ".scan.c");
-    metrics_.scan_entries_c              = r->register_counter(prefix + ".scan.entries.c");
-    metrics_.scan_l                      = r->register_summary(prefix + ".scan.l");
-    metrics_.scan_l0_snapshot_l          = r->register_summary(prefix + ".scan.l0.snapshot.l");
-    metrics_.scan_l0_skip_l              = r->register_summary(prefix + ".scan.l0.skip.l");
-    metrics_.scan_l1_descent_l           = r->register_summary(prefix + ".scan.l1.descent.l");
-    metrics_.scan_l1_resolve_l           = r->register_summary(prefix + ".scan.l1.resolve.l");
-    metrics_.scan_merge_l                = r->register_summary(prefix + ".scan.merge.l");
-    pool_->set_metrics(metrics_.buf_hits, metrics_.buf_misses, metrics_.buf_evictions, metrics_.buf_writebacks,
-                       metrics_.buf_resident, metrics_.buf_dirty);
+    // ── Logical metrics (backend-independent) ──
+    metrics_.flush_l         = r->register_summary(prefix + ".flush.l");
+    metrics_.flush_drain_c   = r->register_counter(prefix + ".flush.drain.c");
+    metrics_.flush_entries_c = r->register_counter(prefix + ".flush.entries.c");
+    metrics_.mt_apply_l      = r->register_summary(prefix + ".mt.apply.l");
+    metrics_.mt_get_c        = r->register_counter(prefix + ".mt.get.c");
+    metrics_.mt_get_hit_c    = r->register_counter(prefix + ".mt.get.hit.c");
+    metrics_.mt_get_l        = r->register_summary(prefix + ".mt.get.l");
+    metrics_.mt_frozen_g  = r->register_callback_gauge(prefix + ".mt.frozen.g",
+                                                       [this] { return static_cast<uint64_t>(frozen_table_count()); });
+    metrics_.mt_records_g = r->register_callback_gauge(prefix + ".mt.records.g", [this] {
+        size_t total = 0;
+        for (const auto &mt : all_memtables()) {
+            total += mt->count();
+        }
+        return static_cast<uint64_t>(total);
+    });
+    metrics_.mt_freeze_c  = r->register_counter(prefix + ".mt.freeze.c");
+    metrics_.l1_get_c     = r->register_counter(prefix + ".l1.get.c");
+    metrics_.l1_get_hit_c = r->register_counter(prefix + ".l1.get.hit.c");
+    metrics_.l1_get_l     = r->register_summary(prefix + ".l1.get.l");
+    metrics_.page_write_l = r->register_summary(prefix + ".page.write.l");
+    metrics_.page_split_c = r->register_counter(prefix + ".page.split.c");
+    metrics_.page_merge_c = r->register_counter(prefix + ".page.merge.c");
+    metrics_.page_consolidate_c = r->register_counter(prefix + ".page.consolidate.c");
+    metrics_.tree_height_g =
+        r->register_callback_gauge(prefix + ".tree.height.g", [this] { return static_cast<uint64_t>(height()); });
+    metrics_.tree_leaf_count_g  = r->register_gauge(prefix + ".tree.leaf.count.g");
+    metrics_.tree_inner_count_g = r->register_gauge(prefix + ".tree.inner.count.g");
+    metrics_.tree_retired_count_g =
+        r->register_callback_gauge(prefix + ".tree.retired.count.g", [this] { return epoch_.pending_retired(); });
+    // Seed the leaf/inner gauges with the current counter values (so the first
+    // metrics flush before any SMO shows the right counts).
+    metrics_.tree_leaf_count_g->set(leaf_count_.load(std::memory_order_relaxed));
+    metrics_.tree_inner_count_g->set(inner_count_.load(std::memory_order_relaxed));
+    metrics_.page_map_alloc_c = r->register_counter(prefix + ".page.map.alloc.c");
+    metrics_.page_map_total_pids_g =
+        r->register_callback_gauge(prefix + ".page.map.total_pids.g", [this] { return mapping_.next_page_id(); });
+    metrics_.page_map_segments_g = r->register_callback_gauge(
+        prefix + ".page.map.segments.g", [this] { return static_cast<uint64_t>(mapping_.segments_allocated()); });
+    metrics_.snapshot_l            = r->register_summary(prefix + ".snapshot.l");
+    metrics_.snapshot_pages_c      = r->register_counter(prefix + ".snapshot.pages.c");
+    metrics_.scan_entries_c        = r->register_counter(prefix + ".scan.entries.c");
+    metrics_.scan_l                = r->register_summary(prefix + ".scan.l");
+    metrics_.scan_l0_l             = r->register_summary(prefix + ".scan.l0.l");
+    metrics_.scan_l1_l             = r->register_summary(prefix + ".scan.l1.l");
+    metrics_.scan_merge_l          = r->register_summary(prefix + ".scan.merge.l");
+    metrics_.scan_retry_c          = r->register_counter(prefix + ".scan.retry.c");
+    metrics_.gc_tombstones_c       = r->register_counter(prefix + ".gc.tombstones.c");
+    metrics_.gc_pages_c            = r->register_counter(prefix + ".gc.pages.c");
+    metrics_.gc_leaves_checked_c   = r->register_counter(prefix + ".gc.leaves.checked.c");
+    metrics_.gc_leaves_reclaimed_c = r->register_counter(prefix + ".gc.leaves.reclaimed.c");
+    metrics_.gc_l                  = r->register_summary(prefix + ".gc.l");
+
+    // ── Backend I/O metrics ──
+    metrics_.page_find_c                 = r->register_counter(io + ".page.find.c");
+    metrics_.buf_evictions               = r->register_counter(io + ".buf.evictions.c");
+    metrics_.buf_writebacks              = r->register_counter(io + ".buf.writebacks.c");
+    metrics_.buf_resident                = r->register_gauge(io + ".buf.resident.g");
+    metrics_.buf_dirty                   = r->register_gauge(io + ".buf.dirty.g");
+    metrics_.page_load_l                 = r->register_summary(io + ".page.load.l");
+    metrics_.page_writeback_l            = r->register_summary(io + ".page.writeback.l");
+    metrics_.page_writeback_bw           = r->register_bandwidth(io + ".page.writeback.bw");
+    metrics_.fsync_l                     = r->register_summary(io + ".fsync.l");
+    metrics_.snapshot_apply_l            = r->register_summary(io + ".snapshot.apply.l");
+    metrics_.snapshot_page_write_l       = r->register_summary(io + ".snapshot.page.write.io.l");
+    metrics_.snapshot_page_write_cache_c = r->register_counter(io + ".snapshot.page.write.cache.c");
+    metrics_.snapshot_page_write_bw      = r->register_bandwidth(io + ".snapshot.page.write.bw");
+    metrics_.snapshot_meta_write_bw      = r->register_bandwidth(io + ".snapshot.meta.write.bw");
+    metrics_.page_read_bw                = r->register_bandwidth(io + ".page.read.bw");
+
+    pool_->set_metrics(metrics_.buf_evictions, metrics_.buf_writebacks, metrics_.buf_resident, metrics_.buf_dirty,
+                       metrics_.page_writeback_l, metrics_.page_writeback_bw);
+    mapping_.set_alloc_counter(metrics_.page_map_alloc_c);
 }
 
 std::string Crowdbtree::flush_metrics_str(double window_secs, const char *timestamp, size_t width, size_t count_w,
@@ -3386,7 +3829,7 @@ std::string Crowdbtree::flush_metrics_str(double window_secs, const char *timest
     if (fp == nullptr) {
         return {};
     }
-    metrics_registry_->flush_to(fp, window_secs, timestamp, "cpp-metrics", width, count_w, tps_w);
+    metrics_registry_->flush_to(fp, window_secs, timestamp, "cpp-tree", width, count_w, tps_w);
     std::fflush(fp);
     std::fclose(fp);
     std::string result(buf, len);

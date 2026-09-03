@@ -91,6 +91,11 @@ export function layoutTree(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges
 
   const positioned = nodes.map((node) => ({
     ...node,
+    // Pre-set dimensions so React Flow considers the node initialized
+    // immediately (visibility:visible) without waiting for the
+    // ResizeObserver. The observer later updates with actual sizes.
+    width: node.width ?? 160,
+    height: node.height ?? 40,
     position: {
       x: xById.get(node.id) ?? 0,
       y: yById.get(node.id) ?? layerOf(node) * V_SPACING,

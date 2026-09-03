@@ -39,6 +39,7 @@ and Rust source; this doc covers decisions and architecture only.
 - [16. References](#16-references)
 - [17. DiskdbClient Scanner / Rebuild Wrappers](#17-diskdbclient-scanner--rebuild-wrappers)
 - [18. Group-0 Status Write-Back: Init → Offline](#18-group-0-status-write-back-init--offline)
+- [19. Init-state zone load](#19-init-state-zone-load)
 
 ## 1. Overview
 
@@ -907,3 +908,18 @@ The fix:
 - A disk whose zone load fails ends up `Offline` in both group 0 and
   the runtime state machine, and stays `Offline` across sync ticks
   (no flip-flop to `Up`).
+
+## 19. Init-state zone load
+
+New disks start in `Init` state with no zones. A background task
+loads zones from the bind before transitioning `Init → Up` (or
+`Init → Offline` on load failure or operator-set offline). This
+prevents allocations against a disk with existing KV records from
+overwriting used blocks with empty zones. `reconcile_absent_disk`
+removes `Offline`/`Maintenance`/`Init` disks from memory when they
+disappear from group-0 sync (the disk is gone); `Bad` disks are kept
+(recovery scan running).
+
+- **I1 — Init before allocatable**: A disk is never allocatable
+  while in `Init` state. Zones must be loaded from the bind before
+  the disk transitions to `Up`.

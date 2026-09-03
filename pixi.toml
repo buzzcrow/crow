@@ -89,7 +89,7 @@ build = { cmd = "cargo build --release --workspace --exclude crowdb-kv-client &&
 default = { depends-on = ["build"] }
 
 # ── Run ──────────────────────────────────────────────────────────
-web = { cmd = "echo 'CROWDB console starting at: http://127.0.0.1:9920/' && cargo run --release -p crowdb-web", depends-on = ["build"] }
+web = { cmd = "echo 'CROWDB console starting at: http://127.0.0.1:14000/' && cargo run --release -p crowdb-web", depends-on = ["build"] }
 
 # ── Benchmark ────────────────────────────────────────────────────
 bench = { cmd = "cargo run --release -p crowdb-cli -- bench kv --mode mem --duration-secs 12 --loader-num 2 --connections 1 --workload write", depends-on = ["build"] }
@@ -109,7 +109,7 @@ profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 # Grouping Guide"). Each group maps 1:1 to a parallel CI job. Run
 # `pixi run build-tests` once before any test task to pre-build all
 # Rust test binaries; C++ ctest tasks need `pixi run build-cpp`.
-clean-env = "pkill -9 -f 'crowdb-kv-server.*test-' 2>/dev/null; rm -rf test-logs test-data; true"
+clean-env = "pkill -9 -f 'crowdb-kv-server.*test-' 2>/dev/null; pkill -9 -f 'crowdb-kv-server.*e2e' 2>/dev/null; pkill -9 -f 'crowdb-web.*test-mode' 2>/dev/null; rm -rf test-logs test-data runtime-data; true"
 # Pre-build ALL Rust test binaries + bin targets in one parallel cargo
 # invocation. Run this once at the start of a CI job so every subsequent
 # `cargo test -p <crate>` step just executes the pre-built binaries
@@ -151,7 +151,7 @@ test-console-cli = { cmd = "cargo test -p crowdb-cli --all-targets" }
 test-console-server = { cmd = "cargo build -p crowdb-kv-server && cargo test -p crowdb-web --all-targets" }
 
 # ── UITests job: Playwright browser E2E + subprocess spawning ──
-test-console-ui = { cmd = "cargo build -p crowdb-kv-server -p crowdb-diskdb && export CROWDB_KV_SERVER_BINARY=$(pwd)/target/debug/crowdb-kv-server && cd app/crowdb-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-ui-deps"] }
+test-console-ui = { cmd = "cargo build -p crowdb-kv-server -p crowdb-diskdb -p crowdb-port-alloc && export CROWDB_KV_SERVER_BINARY=$(pwd)/target/debug/crowdb-kv-server && cd app/crowdb-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-ui-deps"] }
 
 # ── Full local suite (not a CI job; runs everything in one process) ──
 # Grouped by CI job order. clean-env runs at start and before the
@@ -199,14 +199,14 @@ loc = "tokei . .github --exclude swagger-ui --exclude 'lib/crowdb-tree/build-*' 
 # ── Clean ────────────────────────────────────────────────────────
 # Removes all build/test/runtime artifacts, keeping only git-tracked
 # files, the pixi env (.pixi/), and install-deps caches (node_modules).
-# System-temp dirs (crowdb-web-*, crowdb-cli-test-* from std::env::temp_dir)
-# live outside the repo and are not touched.
+# C++ tests create hardcoded /tmp dirs (crowdb-*-tests, crowtree_log_*,
+# crowtree_metrics_test_*) — cleaned at the end.
 clean = { cmd = '''
 bash -c '
 set -e
-pkill crowdb-kv-server || true
-pkill crowdb-web || true
-pkill crowdb-cli || true
+pkill -f crowdb-kv-server || true
+pkill -f crowdb-web || true
+pkill -f crowdb-cli || true
 
 # ── Rust build artifacts ──
 echo "[clean] cargo clean"
@@ -228,17 +228,18 @@ rm -f app/crowdb-web/ui/*.tsbuildinfo
 
 # ── Test runtime data (in-repo) ──
 echo "[clean] test runtime data"
-rm -rf test-logs runtime-data .test-tmp lib/crowdb-tree/.test-tmp
+rm -rf test-logs test-data runtime-data .test-tmp lib/crowdb-tree/.test-tmp
 rm -rf app/crowdb-web/ui/e2e/runtime-data
 rm -rf app/crowdb-web/ctdata app/crowdb-web/waldata
-rm -rf app/crowdb-cli/bench-runs bench-runs/*
 
 # `log/` is dangerous as a glob (common Rust module name) — explicit per crate.
 # Repo-root `log/` is where crowdb-kv-server writes (CWD-relative); the per-crate
 # paths are future-proofing (those bins currently log under runtime-data/).
+# `cli-log/` is where crowdb-cli writes cluster deploy/bench logs (CWD-relative).
 echo "[clean] log dirs"
-rm -rf log app/crowdb-kv-server/log app/crowdb-diskdb/log app/crowdb-chunkdb/log \
+rm -rf log cli-log app/crowdb-kv-server/log app/crowdb-diskdb/log app/crowdb-chunkdb/log \
   app/crowdb-cli/log lib/crowdb-console-shared/log app/crowdb-web/log \
+  app/crowdb-web/ui/e2e/log \
   lib/crowdb-chunk-client/log lib/crowdb-diskdb-client/log lib/crowdb-diskio-client/log
 
 # ── Profiling artifacts ──
@@ -262,11 +263,31 @@ find . \( -name .pixi -o -name node_modules -o -name target -o -name .git \) -pr
   -o -type d \( -name waldata -o -name ctdata -o -name conf \) ! -path "*/src/*" ! -path "./app/*" \
   -print -exec rm -rf {} \; 2>/dev/null || true
 
+# temp-data/ — CWD-relative runtime scratch from crowdb-console-shared
+# (non-workspace deploys + SSH known_hosts fallback). Can appear at repo
+# root or under app/crowdb-web/ depending on which binary creates it, so
+# no app/ exclusion (unlike conf above — no tracked templates live here).
+echo "[clean] temp-data runtime dirs"
+find . \( -name .pixi -o -name node_modules -o -name target -o -name .git \) -prune \
+  -o -type d -name temp-data ! -path "*/src/*" \
+  -print -exec rm -rf {} \; 2>/dev/null || true
+
 # ── OS junk ──
 # Avoid -delete (implies -depth on BSD/macOS, breaks -prune → full traversal).
 echo "[clean] .DS_Store"
 find . \( -name .pixi -o -name node_modules -o -name target -o -name .git \) -prune \
   -o -name .DS_Store -print0 2>/dev/null | xargs -0 rm -f 2>/dev/null || true
+
+# ── System temp dirs (C++ tests with hardcoded /tmp paths) ──
+echo "[clean] /tmp test dirs"
+rm -rf /tmp/crowdb-common-diskio-uring-tests \
+       /tmp/crowdb-diskio-blocking-tests \
+       /tmp/crowdb-diskio-diskset-tests \
+       /tmp/crowdb-diskio-uring-tests
+rm -rf /tmp/crowtree_log_* /tmp/crowtree_metrics_test_*
+# Bench script temp files (config, cfgpath, output, logs)
+rm -f /tmp/bench-write-reg-* /tmp/bench-read-regression-* /tmp/bench-scan-regression-* \
+      /tmp/bench-rpc-regression-* /tmp/bench-compare-128t-*
 echo "[clean] done"
 '
 ''' }

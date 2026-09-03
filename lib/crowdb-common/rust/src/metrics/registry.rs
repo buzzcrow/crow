@@ -141,27 +141,26 @@ impl MetricsRegistry {
     /// format. Resets window state on each metric. Uses the registry's
     /// own `max_name_len` for column width.
     pub fn flush<W: Write>(&self, writer: &mut W, window_secs: f64, timestamp: &str) {
-        self.flush_with_width(writer, window_secs, timestamp, self.max_name_len, 5, 7);
+        self.flush_with_width(writer, window_secs, timestamp, self.max_name_len, 7, 7);
     }
 
     /// Flush with an explicit column width (for cross-section alignment
-    /// with C++ `[cpp-metrics]`).
+    /// with C++ `cpp-tree`).
     pub(crate) fn flush_with_width<W: Write>(
         &self,
         writer: &mut W,
         window_secs: f64,
-        timestamp: &str,
+        _timestamp: &str,
         width: usize,
         count_w: usize,
         tps_w: usize,
     ) {
-        let _ = writeln!(writer, "[metrics {timestamp} window={window_secs:.3}s]");
-        flush_counters(writer, &self.counters, window_secs, width, count_w, tps_w);
+        let _ = writeln!(writer, "rust");
         flush_histograms(writer, &self.histograms, window_secs, width, count_w, tps_w);
         flush_summaries(writer, &self.summaries, window_secs, width, count_w, tps_w);
         flush_bandwidths(writer, &self.bandwidths, window_secs, width, count_w, tps_w);
+        flush_counters(writer, &self.counters, window_secs, width, count_w, tps_w);
         flush_gauges(writer, &self.gauges, width);
-        let _ = writeln!(writer);
     }
 
     /// Current max metric name length across all types.
@@ -515,14 +514,13 @@ mod tests {
         reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05.123Z");
         let out = String::from_utf8(buf).unwrap();
 
-        assert!(out.contains("[metrics 2026-07-15T16:30:05.123Z window=5.000s]"));
+        assert!(out.starts_with("rust\n"));
         assert!(out.contains("count") && out.contains("tps(/s)") && out.contains("total"));
         assert!(out.contains("s.1.kv.put.c"));
         assert!(out.contains("10"));
         assert!(out.contains('2'));
         assert!(!out.contains("s.1.kv.delete.c"));
         assert!(!out.contains("s.1.kv.errors.c"));
-        assert!(out.ends_with("\n\n"));
     }
 
     #[test]
@@ -574,9 +572,9 @@ mod tests {
         reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05.123Z");
         let out = String::from_utf8(buf).unwrap();
 
-        assert!(out.contains("avg_size(KB)") && out.contains("rate(KB/s)"));
+        assert!(out.contains("avg_size(KB)") && out.contains("rate(MB/s)"));
         assert!(out.contains("s.1.kv.bytes_in.bw"));
-        assert!(out.contains("1.0"));
+        assert!(out.contains("0.00"));
     }
 
     #[test]
@@ -635,7 +633,6 @@ mod tests {
         let mut buf = Vec::new();
         reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05.123Z");
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("[metrics"));
-        assert!(out.ends_with("\n\n"));
+        assert!(out.starts_with("rust\n"));
     }
 }

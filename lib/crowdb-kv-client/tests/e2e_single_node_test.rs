@@ -4,7 +4,7 @@
 //! End-to-end test against a real single-node `PxKvStore` + `KvService`
 //! (no mocks): topology discovery over a small `/topology` HTTP server
 //! backed by the store's real `status`, then `put`/`get`/`delete`/
-//! `batch_write`/`scan` through [`crowdb_kv_client::CrowdbClient`], covering
+//! `batch_write`/`scan` through [`crowdb_kv_client::CrowdbKvClient`], covering
 //! `ReadMode` routing and the `MinSlot` watermark
 //! (C1-C3).
 
@@ -22,7 +22,7 @@ use crowdb_kv::cluster::px_kv_store::PxKvStore;
 use crowdb_kv::metrics::MetricsRegistry;
 
 use bytes::Bytes;
-use crowdb_kv_client::{BatchOp, ClientConfig, CrowdbClient, GetOutcome, ReadMode};
+use crowdb_kv_client::{BatchOp, ClientConfig, CrowdbKvClient, GetOutcome, ReadMode};
 
 const STORE_ID: u64 = 1;
 const GROUP_ID: u64 = 1;
@@ -70,7 +70,7 @@ async fn spawn_topology_server(store: Arc<PxKvStore>) -> String {
 async fn put_get_delete_round_trip_via_topology_discovery() {
     let store = start_single_node_store().await;
     let seed = spawn_topology_server(store.clone()).await;
-    let client = CrowdbClient::new(ClientConfig::new(vec![seed]));
+    let client = CrowdbKvClient::new(ClientConfig::new(vec![seed]));
 
     // No leader cached yet -- `put` must discover it via `/topology`.
     let outcome = client
@@ -114,7 +114,7 @@ async fn put_get_delete_round_trip_via_topology_discovery() {
 async fn batch_write_and_scan() {
     let store = start_single_node_store().await;
     let seed = spawn_topology_server(store.clone()).await;
-    let client = CrowdbClient::new(ClientConfig::new(vec![seed]));
+    let client = CrowdbKvClient::new(ClientConfig::new(vec![seed]));
 
     client
         .batch_write(
@@ -160,7 +160,7 @@ async fn batch_write_and_scan() {
 async fn read_your_writes_uses_auto_tracked_watermark() {
     let store = start_single_node_store().await;
     let seed = spawn_topology_server(store.clone()).await;
-    let client = CrowdbClient::new(ClientConfig::new(vec![seed]));
+    let client = CrowdbKvClient::new(ClientConfig::new(vec![seed]));
 
     assert_eq!(client.read_your_writes_slot(STORE_ID, GROUP_ID), 0);
 
@@ -188,7 +188,7 @@ async fn read_your_writes_uses_auto_tracked_watermark() {
 /// A multi-page `Linearizable` scan pays the leader read barrier once
 /// (page 1) then switches subsequent pages to `MinSlot` with page-1's
 /// `read_slot` as the freshness floor — skipping the per-page barrier.
-/// Verified by checking the store's `lease_path + readindex_path` counter
+/// Verified by checking the store's `read.barrier.l` summary count
 /// is 1 (not N) after an N-page scan.
 #[tokio::test]
 async fn linearizable_multi_page_scan_pays_barrier_once() {
@@ -206,7 +206,7 @@ async fn linearizable_multi_page_scan_pays_barrier_once() {
     server.start().await.expect("failed to start KvStore");
 
     let seed = spawn_topology_server(server.clone()).await;
-    let client = CrowdbClient::new(ClientConfig::new(vec![seed]));
+    let client = CrowdbKvClient::new(ClientConfig::new(vec![seed]));
 
     // Write 12 keys: "k00".."k11", each with a 20-byte value.
     for i in 0..12u32 {
@@ -241,20 +241,16 @@ async fn linearizable_multi_page_scan_pays_barrier_once() {
 
     // Only page 1 paid the leader barrier; pages 2..3 used MinSlot.
     let snap = registry.lock().unwrap().snapshot("s.1.g.1.read.");
-    let count = |suffix: &str| {
-        snap.iter()
-            .find(|(n, _)| n.ends_with(suffix))
-            .and_then(|(_, v)| v.strip_prefix("c:"))
-            .and_then(|v| v.split(':').next())
-            .and_then(|n| n.parse::<u64>().ok())
-            .unwrap_or(0)
-    };
-    let lease = count("read.lease_path.c");
-    let readindex = count("read.readindex_path.c");
-    let barriers = lease + readindex;
+    let barrier_count = snap
+        .iter()
+        .find(|(n, _)| n.ends_with("read.barrier.l"))
+        .and_then(|(_, v)| v.strip_prefix("l:"))
+        .and_then(|v| v.split(':').next())
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or(0);
     assert_eq!(
-        barriers, 1,
-        "multi-page Linearizable scan should pay 1 barrier (page 1 only), got {barriers} (lease={lease}, readindex={readindex})"
+        barrier_count, 1,
+        "multi-page Linearizable scan should pay 1 barrier (page 1 only), got {barrier_count}"
     );
 
     server.stop();
@@ -265,7 +261,7 @@ async fn linearizable_multi_page_scan_pays_barrier_once() {
 async fn scan_keys_only_and_scan_count() {
     let store = start_single_node_store().await;
     let seed = spawn_topology_server(store.clone()).await;
-    let client = CrowdbClient::new(ClientConfig::new(vec![seed]));
+    let client = CrowdbKvClient::new(ClientConfig::new(vec![seed]));
 
     for i in 0..12u32 {
         client
@@ -358,7 +354,7 @@ async fn scan_keys_only_and_scan_count() {
 async fn scan_deadline_returns_partial_result() {
     let store = start_single_node_store().await;
     let seed = spawn_topology_server(store.clone()).await;
-    let client = CrowdbClient::new(ClientConfig::new(vec![seed]));
+    let client = CrowdbKvClient::new(ClientConfig::new(vec![seed]));
 
     // Populate enough keys that the engine merge loop's periodic deadline
     // check (every 1024 entries) fires mid-scan.

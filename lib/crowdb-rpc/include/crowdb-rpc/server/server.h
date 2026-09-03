@@ -9,10 +9,8 @@
 #include "crowdb-rpc/transport/socket_transport.h"
 
 #include <atomic>
-#include <future>
 #include <memory>
 #include <string>
-#include <thread>
 
 namespace crowdb::rpc
 {
@@ -43,6 +41,13 @@ class RpcServer
     // Register a handler for a msg_type.
     void register_handler(uint16_t msg_type, HandlerFn handler);
 
+    // Clear all registered handlers. Called during shutdown to break
+    // reference cycles (Rust handler closures capture Arc<RpcServer>).
+    void clear_handlers()
+    {
+        handlers_.clear();
+    }
+
     // Wire an RpcClient into the server for server-initiated request-
     // response (e.g. WatchNotify). The server's dispatch tries the
     // request client's on_response first (to route ack responses);
@@ -71,6 +76,13 @@ class RpcServer
         return pool_;
     }
 
+    // Alive flag (for callback gauges to check before accessing transport).
+    // Shared so the callback can safely check it after the server is deleted.
+    std::shared_ptr<std::atomic<bool>> alive_flag()
+    {
+        return alive_;
+    }
+
   private:
     BufferPool                      *pool_;
     bool                             owns_pool_;
@@ -78,12 +90,14 @@ class RpcServer
     HandlerRegistry                  handlers_;
     RpcClient                       *request_client_{nullptr}; // server-initiated request-response
 
-    int               listen_fd_   = -1;
-    int               listen_port_ = 0;
-    std::atomic<bool> running_{false};
-    std::thread       acceptor_thread_;
+    int                                listen_fd_   = -1;
+    int                                listen_port_ = 0;
+    std::atomic<bool>                  running_{false};
+    std::shared_ptr<std::atomic<bool>> alive_{std::make_shared<std::atomic<bool>>(true)};
 
-    void acceptor_loop(std::promise<void> ready);
+    // Accept handler called by the I/O worker when the listen fd is
+    // readable. Loops accept() until EAGAIN, creating connections.
+    void handle_accept(int listen_fd);
     void dispatch(Frame *frame, Connection *conn);
 };
 

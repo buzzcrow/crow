@@ -14,8 +14,12 @@ use crowdb_console_shared::config::{NodeEntry, RackEntry};
 use crowdb_console_shared::lifecycle::{self, crowdb_kv_server_bin, DeployRequest};
 use crowdb_console_shared::mgmt::{AddGroupRequest, AddStoreRequest, RemoteReplicaInfo};
 
-fn pick_free_port() -> u16 {
-    crowdb_console_shared::test_ports::unique_test_port()
+fn pick_mgmt_port() -> u16 {
+    crowdb_protocol::port_alloc::alloc_test_port(crowdb_protocol::ServicePort::KvServerMgmt)
+}
+
+fn pick_rpc_port() -> u16 {
+    crowdb_protocol::port_alloc::alloc_test_port(crowdb_protocol::ServicePort::KvServerListen)
 }
 
 async fn spawn_server() -> Option<(u32, ServerClient)> {
@@ -38,8 +42,8 @@ async fn spawn_server() -> Option<(u32, ServerClient)> {
     };
     let req = DeployRequest {
         server_id: "s1".into(),
-        rest_port: pick_free_port(),
-        rpc_port: pick_free_port(),
+        rest_port: pick_mgmt_port(),
+        rpc_port: pick_rpc_port(),
         election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()

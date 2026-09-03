@@ -102,8 +102,6 @@ pub struct BlockDevice {
     alignment: WalBlockAlignment,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     use_direct_io: bool,
-    logical_bytes_written: Arc<AtomicU64>,
-    physical_bytes_written: Arc<AtomicU64>,
     rmw_count: Arc<AtomicU64>,
 }
 
@@ -135,8 +133,6 @@ impl BlockDevice {
             fdatasync_count: Arc::new(AtomicU64::new(0)),
             alignment,
             use_direct_io,
-            logical_bytes_written: Arc::new(AtomicU64::new(0)),
-            physical_bytes_written: Arc::new(AtomicU64::new(0)),
             rmw_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -154,18 +150,6 @@ impl BlockDevice {
     #[must_use]
     pub fn fdatasync_count(&self) -> u64 {
         self.fdatasync_count.load(Ordering::Acquire)
-    }
-
-    /// Total logical (payload) bytes accepted by writes.
-    #[must_use]
-    pub fn logical_bytes_written(&self) -> u64 {
-        self.logical_bytes_written.load(Ordering::Acquire)
-    }
-
-    /// Total physical bytes written to the underlying media.
-    #[must_use]
-    pub fn physical_bytes_written(&self) -> u64 {
-        self.physical_bytes_written.load(Ordering::Acquire)
     }
 
     /// Number of writes that triggered a read-modify-write of a partial block.
@@ -245,9 +229,6 @@ impl BlockSegment {
     pub(super) fn write_at(&self, data: &[u8], offset: u64) -> io::Result<usize> {
         self.write_bytes_to_file(&self.file, data, offset)?;
         self.device.write_count.fetch_add(1, Ordering::AcqRel);
-        self.device
-            .logical_bytes_written
-            .fetch_add(data.len() as u64, Ordering::AcqRel);
         Ok(data.len())
     }
 
@@ -259,9 +240,6 @@ impl BlockSegment {
             cur_offset += buf.len() as u64;
         }
         self.device.write_count.fetch_add(1, Ordering::AcqRel);
-        self.device
-            .logical_bytes_written
-            .fetch_add(total_len as u64, Ordering::AcqRel);
         Ok(total_len)
     }
 
@@ -269,9 +247,6 @@ impl BlockSegment {
         match self.device.alignment {
             WalBlockAlignment::Unaligned => {
                 file.write_at(data, offset)?;
-                self.device
-                    .physical_bytes_written
-                    .fetch_add(data.len() as u64, Ordering::AcqRel);
             }
             WalBlockAlignment::Aligned { io_unit_bytes } => {
                 let plan = self.device.alignment.plan_write(offset, data.len());
@@ -294,9 +269,6 @@ impl BlockSegment {
                 let payload_off = plan.payload_offset_within_aligned;
                 buf[payload_off..payload_off + data.len()].copy_from_slice(data);
                 file.write_at(buf, aligned_off)?;
-                self.device
-                    .physical_bytes_written
-                    .fetch_add(aligned_len as u64, Ordering::AcqRel);
             }
         }
         Ok(())
@@ -362,8 +334,6 @@ pub struct MemBlockDevice {
     write_count: Arc<AtomicU64>,
     fdatasync_count: Arc<AtomicU64>,
     alignment: WalBlockAlignment,
-    logical_bytes_written: Arc<AtomicU64>,
-    physical_bytes_written: Arc<AtomicU64>,
     rmw_count: Arc<AtomicU64>,
 }
 
@@ -386,8 +356,6 @@ impl MemBlockDevice {
             write_count: Arc::new(AtomicU64::new(0)),
             fdatasync_count: Arc::new(AtomicU64::new(0)),
             alignment,
-            logical_bytes_written: Arc::new(AtomicU64::new(0)),
-            physical_bytes_written: Arc::new(AtomicU64::new(0)),
             rmw_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -410,16 +378,6 @@ impl MemBlockDevice {
     #[must_use]
     pub fn fdatasync_count(&self) -> u64 {
         self.fdatasync_count.load(Ordering::Acquire)
-    }
-
-    #[must_use]
-    pub fn logical_bytes_written(&self) -> u64 {
-        self.logical_bytes_written.load(Ordering::Acquire)
-    }
-
-    #[must_use]
-    pub fn physical_bytes_written(&self) -> u64 {
-        self.physical_bytes_written.load(Ordering::Acquire)
     }
 
     #[must_use]
@@ -493,6 +451,44 @@ impl MemBlockDevice {
         Ok(())
     }
 
+    /// Remove all segments and layouts under `prefix`. Unlike
+    /// `unlink_segment`, this is idempotent — a missing prefix is not an
+    /// error. This is the mem-block equivalent of `tokio::fs::remove_dir_all`:
+    /// without it, `wipe_user_data`'s `tokio::fs::remove_dir_all` call is a
+    /// no-op on the in-memory backend, leaving old WAL segments behind that
+    /// `create_group_with_wal` then replays (causing multi-second stalls and
+    /// preventing the old group's memory from being freed).
+    pub(super) fn remove_prefix(&self, prefix: &Path) -> io::Result<()> {
+        self.controller.check_io()?;
+        let mut segments = self.segments.lock();
+        let mut layouts = self.layouts.lock();
+        // Remove segments whose path starts with `prefix`.
+        let seg_keys: Vec<PathBuf> = segments
+            .keys()
+            .filter(|p| p.starts_with(prefix))
+            .cloned()
+            .collect();
+        for k in &seg_keys {
+            segments.remove(k);
+        }
+        // Remove layouts whose path starts with `prefix`.
+        let layout_keys: Vec<PathBuf> = layouts
+            .iter()
+            .filter(|p| p.starts_with(prefix))
+            .cloned()
+            .collect();
+        for k in &layout_keys {
+            layouts.remove(k);
+        }
+        tracing::info!(
+            prefix = %prefix.display(),
+            segments_removed = seg_keys.len(),
+            layouts_removed = layout_keys.len(),
+            "MemBlockDevice::remove_prefix"
+        );
+        Ok(())
+    }
+
     pub(super) fn list_layout(&self, layout_path: &Path) -> io::Result<Vec<PathBuf>> {
         self.controller.check_io()?;
         let segments = self.segments.lock();
@@ -552,9 +548,6 @@ impl MemBlockSegment {
         self.device.controller.check_write()?;
         self.write_bytes(data, offset)?;
         self.device.write_count.fetch_add(1, Ordering::AcqRel);
-        self.device
-            .logical_bytes_written
-            .fetch_add(data.len() as u64, Ordering::AcqRel);
         Ok(data.len())
     }
 
@@ -567,9 +560,6 @@ impl MemBlockSegment {
             cur_offset += buf.len() as u64;
         }
         self.device.write_count.fetch_add(1, Ordering::AcqRel);
-        self.device
-            .logical_bytes_written
-            .fetch_add(total_len as u64, Ordering::AcqRel);
         Ok(total_len)
     }
 
@@ -591,9 +581,6 @@ impl MemBlockSegment {
             segment_data.resize(end, 0);
         }
         segment_data[off..end].copy_from_slice(data);
-        self.device
-            .physical_bytes_written
-            .fetch_add(data.len() as u64, Ordering::AcqRel);
         Ok(())
     }
 
@@ -610,9 +597,6 @@ impl MemBlockSegment {
         }
         let payload_off = aligned_off + plan.payload_offset_within_aligned;
         segment_data[payload_off..payload_off + data.len()].copy_from_slice(data);
-        self.device
-            .physical_bytes_written
-            .fetch_add(plan.aligned_len as u64, Ordering::AcqRel);
         if plan.requires_read_modify_write {
             self.device.rmw_count.fetch_add(1, Ordering::AcqRel);
         }

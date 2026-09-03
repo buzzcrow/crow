@@ -5,7 +5,7 @@
 //! snapshot.pages.c (a magnitude counter with no paired latency in the
 //! C++ registry) into the Rust `MetricsRegistry` so they appear in the
 //! periodic metrics log. C++ engine counters/gauges/summaries/bandwidths
-//! are now flushed natively via the `[cpp-metrics]` section (FFI string
+//! are now flushed natively via the `cpp-tree` section (FFI string
 //! from `CrowdbTreeEngine::flush_metrics_str`).
 
 use std::sync::{Arc, Mutex};
@@ -22,9 +22,9 @@ use crowdb_rpc_ffi::CrowdbRpcTransportStats;
 struct EngineHandles {
     paxos_chosen: Arc<Gauge>,
     paxos_applied: Arc<Gauge>,
-    paxos_last_chosen: Arc<Gauge>,
     paxos_highest_seen: Arc<Gauge>,
     paxos_term: Arc<Gauge>,
+    paxos_leader: Arc<Gauge>,
     paxos_inflight: Arc<Gauge>,
     snapshot_pages: Arc<Counter>,
 }
@@ -32,13 +32,15 @@ struct EngineHandles {
 impl EngineHandles {
     fn register(registry: &mut MetricsRegistry, store_id: u64, group_id: u64) -> Self {
         Self {
-            paxos_chosen: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.chosen_slot.g")),
-            paxos_applied: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.applied_slot.g")),
-            paxos_last_chosen: registry
-                .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.last_chosen_slot.g")),
+            paxos_chosen: registry
+                .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.learn.slot.con.chosen.g")),
+            paxos_applied: registry.register_gauge(format!(
+                "s.{store_id}.g.{group_id}.paxos.learn.slot.con.applied.g"
+            )),
             paxos_highest_seen: registry
-                .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.highest_seen_slot.g")),
+                .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.acp.slot.highest_seen.g")),
             paxos_term: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.current_term.g")),
+            paxos_leader: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.leader_id.g")),
             paxos_inflight: registry
                 .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.inflight_slots.g")),
             snapshot_pages: registry
@@ -48,10 +50,9 @@ impl EngineHandles {
 }
 
 /// Registered Rust handles for one store's crowdb-rpc transport stats:
-/// submit→writev queue-wait gauges (cumulative snapshot).
+/// submit→writev queue-wait gauge (cumulative snapshot).
 struct RpcTransportHandles {
     submit_to_writev_avg_us: Arc<Gauge>,
-    submit_to_writev_count: Arc<Gauge>,
 }
 
 impl RpcTransportHandles {
@@ -59,8 +60,6 @@ impl RpcTransportHandles {
         Self {
             submit_to_writev_avg_us: registry
                 .register_gauge(format!("s.{store_id}.rpc.submit_to_writev.avg_us.g")),
-            submit_to_writev_count: registry
-                .register_gauge(format!("s.{store_id}.rpc.submit_to_writev.count.g")),
         }
     }
 }
@@ -70,9 +69,9 @@ impl RpcTransportHandles {
 struct PaxosGauges {
     contiguous_chosen: u64,
     contiguous_applied: u64,
-    last_chosen_slot: u64,
     highest_seen_slot: u64,
     current_term: u64,
+    leader_id: u64,
     inflight_slots: u64,
 }
 
@@ -86,9 +85,9 @@ fn read_paxos_gauges_per_group(store: &Arc<PxKvStore>) -> std::collections::Hash
             PaxosGauges {
                 contiguous_chosen: replica.contiguous_chosen(),
                 contiguous_applied: replica.contiguous_applied(),
-                last_chosen_slot: replica.last_chosen_slot(),
                 highest_seen_slot: replica.highest_seen_slot(),
                 current_term: replica.current_term_snapshot(),
+                leader_id: group.leader_id(),
                 inflight_slots: group.inflight_slot_count(),
             },
         );
@@ -102,7 +101,7 @@ fn read_paxos_gauges_per_group(store: &Arc<PxKvStore>) -> std::collections::Hash
 /// (store, group), installs a pre-flush collector that polls Paxos
 /// watermarks and snapshot.pages deltas, and installs a post-flush C++
 /// callback that calls `flush_metrics_str` per engine and writes the
-/// `[cpp-metrics]` block.
+/// `cpp-tree` block.
 ///
 /// # Panics
 ///
@@ -219,9 +218,9 @@ pub fn setup_engine_collector(
             if let Some(p) = per_group_p.get(&key.1) {
                 hd.paxos_chosen.set(p.contiguous_chosen);
                 hd.paxos_applied.set(p.contiguous_applied);
-                hd.paxos_last_chosen.set(p.last_chosen_slot);
                 hd.paxos_highest_seen.set(p.highest_seen_slot);
                 hd.paxos_term.set(p.current_term);
+                hd.paxos_leader.set(p.leader_id);
                 hd.paxos_inflight.set(p.inflight_slots);
             }
 
@@ -256,22 +255,10 @@ pub fn setup_engine_collector(
                     if let Some(snap) = wal.block_device_snapshot() {
                         let mut last = last_block_device.lock().expect("last_block_device poisoned");
                         let prev = last.entry(*key).or_default();
-                        let d_logical = snap
-                            .logical_bytes_written
-                            .saturating_sub(prev.logical_bytes_written);
-                        let d_physical = snap
-                            .physical_bytes_written
-                            .saturating_sub(prev.physical_bytes_written);
                         let d_rmw = snap.rmw_count.saturating_sub(prev.rmw_count);
                         *prev = snap;
                         drop(last);
                         if let Some(h) = wal.block_device_counter_handles() {
-                            if d_logical > 0 {
-                                h.logical_bytes.inc_by(d_logical);
-                            }
-                            if d_physical > 0 {
-                                h.physical_bytes.inc_by(d_physical);
-                            }
                             if d_rmw > 0 {
                                 h.rmw.inc_by(d_rmw);
                             }
@@ -297,7 +284,6 @@ pub fn setup_engine_collector(
             drop(last);
             hd.submit_to_writev_avg_us
                 .set(sw.sum_ns.checked_div(sw.count).unwrap_or(0) / 1000);
-            hd.submit_to_writev_count.set(sw.count);
         }
     });
 
@@ -329,7 +315,7 @@ pub fn setup_engine_collector(
             if let Some(str) = crowdb_tree_ffi::flush_cpp_global_metrics(
                 window_secs,
                 timestamp,
-                "cpp-metrics-global",
+                "cpp-rpc",
                 shared_width,
                 count_w,
                 tps_w,
@@ -345,7 +331,7 @@ pub fn setup_engine_collector(
     // defaults.
     let stores3 = Arc::clone(store_registry);
     runner.set_cpp_negotiate(move || {
-        let mut result = (5, 7);
+        let mut result = (7, 7);
         let mut found = false;
         for entry in &stores3.stores {
             if found {
@@ -359,7 +345,7 @@ pub fn setup_engine_collector(
                 let replica = group.local_replica();
                 let engine = replica.learner.engine();
                 if let Some(e) = engine.as_any().downcast_ref::<CrowdbTreeEngine>() {
-                    result = e.negotiate_widths(5, 7);
+                    result = e.negotiate_widths(7, 7);
                     found = true;
                 }
             });

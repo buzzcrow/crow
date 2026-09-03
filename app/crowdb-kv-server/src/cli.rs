@@ -9,8 +9,8 @@ use crowdb_protocol::KV_SERVER_MGMT_BASE;
 #[allow(clippy::struct_excessive_bools)]
 #[command(name = "crowdb-kv-server", about = "CrowDB server daemon")]
 pub struct Cli {
-    /// HTTP management API listen port. Default: 9910.
-    #[arg(long, default_value_t = KV_SERVER_MGMT_BASE)]
+    /// HTTP management API listen port. Default: 10000.
+    #[arg(long, default_value_t = KV_SERVER_MGMT_BASE, value_parser = clap::value_parser!(u16).range(1..))]
     pub management_port: u16,
 
     /// HTTP management API bind address.
@@ -29,7 +29,7 @@ pub struct Cli {
     #[arg(long)]
     pub config: Option<std::path::PathBuf>,
 
-    /// Port pool for crowdb-rpc `PxKvStore` listeners (comma/range format, e.g. "28001,28002,28010..28020").
+    /// Port pool for crowdb-rpc `PxKvStore` listeners (comma/range format, e.g. "10100,10101,10110..10120").
     #[arg(long)]
     pub ports: Option<String>,
 
@@ -52,6 +52,22 @@ pub struct Cli {
     /// Also print logs to console (in addition to file logging).
     #[arg(short = 'l', long)]
     pub log: bool,
+
+    /// Log directory. If omitted, uses `config.log_dir` (default
+    /// `<root>/log`). All Rust and C++ logs land under this directory.
+    #[arg(long)]
+    pub log_dir: Option<String>,
+
+    /// Log level for both Rust and C++ stacks. If omitted, derives
+    /// from `RUST_LOG` (first global directive) or defaults to
+    /// `"info"`. Valid: trace, debug, info, warn, error, off.
+    #[arg(long)]
+    pub log_level: Option<String>,
+
+    /// Mirror C++ log lines at this level or above to stderr (e.g.
+    /// `"warn"` mirrors warn+error). Off by default.
+    #[arg(long)]
+    pub log_stderr: Option<String>,
 
     #[arg(long, default_value = "default", value_parser = ["default", "test", "e2e"])]
     pub election_profile: String,
@@ -218,16 +234,24 @@ pub fn parse_id_list(input: &str) -> Result<Vec<u64>, String> {
     Ok(result)
 }
 
-/// Parse port list — same format as `parse_id_list` but validates u16 range.
+/// Parse port list — same format as `parse_id_list` but validates u16
+/// range and rejects port 0.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - The input cannot be parsed by `parse_id_list`
-/// - Any value is outside the u16 range (0-65535)
+/// - Any value is outside the u16 range (1-65535)
+/// - Any value is 0 (port 0 is not allowed)
 pub fn parse_port_list(input: &str) -> Result<Vec<u16>, String> {
     let ids = parse_id_list(input)?;
     ids.into_iter()
-        .map(|v| u16::try_from(v).map_err(|_| format!("port out of range (0-65535): {v}")))
+        .map(|v| {
+            let p = u16::try_from(v).map_err(|_| format!("port out of range (1-65535): {v}"))?;
+            if p == 0 {
+                return Err("port 0 is not allowed; pass an explicit non-zero port".into());
+            }
+            Ok(p)
+        })
         .collect()
 }

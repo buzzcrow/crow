@@ -18,7 +18,8 @@ use crowdb_chunkdb::service::ChunkdbRpcService;
 use crowdb_chunkdb::storage::ChunkStore;
 use crowdb_chunkdb::topology::{notify::NotifyHandler, refresh::run_refresh_loop, TopologyCache};
 use crowdb_kv_client::{
-    ClientConfig, CrowdbClient, HardwareClient, RangeBindingClient, ServiceRegistryClient, WatchNotifyClient,
+    ClientConfig, CrowdbKvClient, HardwareClient, RangeBindingClient, ServiceRegistryClient,
+    WatchNotifyClient,
 };
 use tracing::{info, warn};
 
@@ -30,39 +31,103 @@ struct Cli {
     #[arg(long)]
     config: String,
 
-    /// crowdb-rpc listen address (overrides config).
-    #[arg(long)]
-    listen_addr: Option<String>,
-
     /// HTTP management listen address (overrides config).
     #[arg(long)]
     http_addr: Option<String>,
 
+    /// crowdb-rpc listener address (overrides config `rpc_listen_addr`).
+    #[arg(long)]
+    rpc_listen_addr: Option<String>,
+
+    /// HTTP management port (overrides the port in config `http_listen_addr`).
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    http_port: Option<u16>,
+
+    /// crowdb-rpc listener port (overrides the port in config `rpc_listen_addr`).
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    rpc_port: Option<u16>,
+
     /// Number of crowdb-rpc I/O worker threads. Default: 2.
     #[arg(long, default_value_t = 2)]
     rpc_workers: u32,
+
+    /// Log directory. Default: "log" (relative to CWD).
+    #[arg(long)]
+    log_dir: Option<String>,
+
+    /// Log level for both Rust and C++ stacks. Default: "info"
+    /// (or derived from `RUST_LOG`).
+    #[arg(long)]
+    log_level: Option<String>,
+
+    /// Max log file size in MiB before rotation. Default: 30.
+    #[arg(long, default_value_t = crowdb_common::logging::DEFAULT_LOG_MAX_FILE_MB)]
+    log_max_file_mb: usize,
+
+    /// Number of rotated log files to keep. Default: 5.
+    #[arg(long, default_value_t = crowdb_common::logging::DEFAULT_LOG_MAX_FILES)]
+    log_max_files: usize,
+
+    /// Also print logs to console (in addition to file logging).
+    #[arg(short = 'l', long)]
+    log: bool,
+
+    /// Mirror C++ log lines at this level or above to stderr.
+    #[arg(long)]
+    log_stderr: Option<String>,
 }
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() {
     let args = Cli::parse();
+
+    let log_dir = args.log_dir.clone().unwrap_or_else(|| "log".to_string());
+    let cpp_level = args
+        .log_level
+        .clone()
+        .unwrap_or_else(|| crowdb_common::logging::cpp_level_from_rust_log("info"));
+
     // Layered logging: INFO+ to rotating file, WARN+ to console.
     // RUST_LOG overrides both sinks for debugging.
-    let _log_guards = crowdb_common::logging::init_file_and_console_logging_split(
-        "log",
-        "crowdb-chunkdb",
-        crowdb_common::logging::DEFAULT_LOG_MAX_FILE_MB,
-        crowdb_common::logging::DEFAULT_LOG_MAX_FILES,
-        "info",
-        "warn",
-    )
-    .expect("failed to initialize crowdb-chunkdb logging");
+    let _log_guards = if args.log {
+        crowdb_common::logging::init_file_and_console_logging_split(
+            &log_dir,
+            "crowdb-chunkdb",
+            args.log_max_file_mb,
+            args.log_max_files,
+            "info",
+            "warn",
+        )
+        .expect("failed to initialize crowdb-chunkdb logging")
+    } else {
+        crowdb_common::logging::init_file_logging(
+            &log_dir,
+            "crowdb-chunkdb",
+            args.log_max_file_mb,
+            args.log_max_files,
+            "info",
+        )
+        .expect("failed to initialize crowdb-chunkdb logging")
+    };
+
+    // Initialize the crowdb-rpc C++ spdlog logger (connection failures,
+    // transport errors). No-op when the build has no spdlog.
+    crowdb_rpc_ffi::init_logging(
+        &log_dir,
+        &cpp_level,
+        args.log_max_file_mb,
+        args.log_max_files,
+        "crowdb-chunkdb-rpc",
+    );
+
+    if let Some(ref stderr_level) = args.log_stderr {
+        crowdb_rpc_ffi::add_log_stderr(stderr_level);
+    }
 
     let config = load_config(&args);
     info!(config = ?config, "crowdb-chunkdb starting");
 
-    let listen_addr: SocketAddr = config.server.listen_addr.parse().expect("valid listen_addr");
     let http_listen_addr: SocketAddr = config
         .server
         .http_listen_addr
@@ -75,7 +140,7 @@ async fn main() {
         .expect("valid rpc_listen_addr");
 
     // Build KV client for group-0 topology access.
-    let kv = Arc::new(CrowdbClient::new(ClientConfig::new(
+    let kv = Arc::new(CrowdbKvClient::new(ClientConfig::new(
         config.server.kv_server_mgmt_seeds.clone(),
     )));
     let hw = HardwareClient::from_shared(Arc::clone(&kv));
@@ -191,8 +256,6 @@ async fn main() {
 
     // Start HTTP health + metrics + cache invalidation server.
     let http_handle = tokio::spawn(run_http_server(http_listen_addr, Arc::clone(&lock_map)));
-
-    info!(%listen_addr, "RPC server listening");
 
     let rpc_server_stop = Arc::clone(&rpc_server);
     let _ = tokio::signal::ctrl_c().await;
@@ -328,14 +391,29 @@ fn load_config(args: &Cli) -> ChunkdbConfig {
         crowdb_common::config::load_from_file::<ChunkdbConfig>(std::path::Path::new(config_path))
             .unwrap_or_else(|e| panic!("failed to load config file {config_path}: {e}"));
 
-    if let Some(addr) = &args.listen_addr {
-        config.server.listen_addr.clone_from(addr);
-    }
     if let Some(addr) = &args.http_addr {
         config.server.http_listen_addr.clone_from(addr);
     }
+    if let Some(addr) = &args.rpc_listen_addr {
+        config.server.rpc_listen_addr.clone_from(addr);
+    }
+    if let Some(port) = args.http_port {
+        config.server.http_listen_addr = replace_port(&config.server.http_listen_addr, port);
+    }
+    if let Some(port) = args.rpc_port {
+        config.server.rpc_listen_addr = replace_port(&config.server.rpc_listen_addr, port);
+    }
 
     config
+}
+
+/// Replace the port portion of a `host:port` address string.
+fn replace_port(addr: &str, port: u16) -> String {
+    if let Some(idx) = addr.rfind(':') {
+        format!("{}:{port}", &addr[..idx])
+    } else {
+        format!("0.0.0.0:{port}")
+    }
 }
 
 /// Request body for `POST /invalidate_chunk`.

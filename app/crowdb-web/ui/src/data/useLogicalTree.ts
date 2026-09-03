@@ -42,7 +42,7 @@ interface UseLogicalTreeResult {
  * Hook for polling the logical cluster tree (stores -> groups -> replicas)
  */
 export function useLogicalTree({
-  pollIntervalActive = 5000,
+  pollIntervalActive = 3000,
   pollIntervalInactive = 30000,
   enabled = true,
   recursive = 3,
@@ -79,47 +79,51 @@ export function useLogicalTree({
       const allGroups: GroupView[] = [];
       const allReplicas: ReplicaView[] = [];
 
-      const enrichedStores: EnrichedStoreView[] = [];
-      for (const store of sourceStores) {
-        // Fetch groups for each store (or use existing if recursive included them)
-        let storeGroups: GroupView[];
-        if (store.groups) {
-          storeGroups = await Promise.all(store.groups.map(async g => {
-            try {
-              const detail = await getGroup(store.store_id, g.group_id, recursive);
-              return {
-                ...detail,
-                store_id: store.store_id,
-                replicas: detail.replicas || [],
-              };
-            } catch {
-              // `GroupSummary` carries no health (the backend struct is
-              // group_id/replica_count/leader only), so a failed detail
-              // fetch leaves the group's state unknown.
-              return {
-                store_id: store.store_id,
-                group_id: g.group_id,
-                leader: g.leader,
-                replicas: [],
-                state: GroupHealth.Unknown,
-              };
-            }
-          }));
-        } else {
-          const fetchedGroups = await listGroups(store.store_id, recursive);
-          storeGroups = Array.isArray(fetchedGroups) ? fetchedGroups.map(g => ({
-            ...g,
-            store_id: store.store_id,
-            replicas: g.replicas || [],
-          })) : [];
-        }
-        allGroups.push(...storeGroups);
-        enrichedStores.push({
-          ...store,
-          groups: storeGroups,
-        });
+      // Fetch groups for all stores in parallel (previously sequential
+      // per-store — slow when there are many stores).
+      const enrichedStores: EnrichedStoreView[] = await Promise.all(
+        sourceStores.map(async (store) => {
+          let storeGroups: GroupView[];
+          if (store.groups) {
+            storeGroups = await Promise.all(store.groups.map(async g => {
+              try {
+                const detail = await getGroup(store.store_id, g.group_id, recursive);
+                return {
+                  ...detail,
+                  store_id: store.store_id,
+                  replicas: detail.replicas || [],
+                };
+              } catch {
+                // `GroupSummary` carries no health (the backend struct is
+                // group_id/replica_count/leader only), so a failed detail
+                // fetch leaves the group's state unknown.
+                return {
+                  store_id: store.store_id,
+                  group_id: g.group_id,
+                  leader: g.leader,
+                  replicas: [],
+                  state: GroupHealth.Unknown,
+                };
+              }
+            }));
+          } else {
+            const fetchedGroups = await listGroups(store.store_id, recursive);
+            storeGroups = Array.isArray(fetchedGroups) ? fetchedGroups.map(g => ({
+              ...g,
+              store_id: store.store_id,
+              replicas: g.replicas || [],
+            })) : [];
+          }
+          return {
+            ...store,
+            groups: storeGroups,
+          };
+        }),
+      );
 
-        for (const group of storeGroups) {
+      for (const store of enrichedStores) {
+        allGroups.push(...store.groups);
+        for (const group of store.groups) {
           if (group.replicas && Array.isArray(group.replicas)) {
             allReplicas.push(...group.replicas.map(r => ({ ...r, store_id: store.store_id, group_id: group.group_id })));
           }

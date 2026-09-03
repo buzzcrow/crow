@@ -1,20 +1,18 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! A6: Logical group plane — orchestrated group create/delete.
+//! A6: Logical group plane — writes delegate to `ops::kv_logical`,
+//! reads from the monitor cache (live role/leader info).
 
-use crate::error::{err_400, err_409, err_500, err_502, ErrorBody};
+use crate::error::{err_502, map_config_err, map_persist_err, ErrorBody};
 use crate::expand::Recursive;
-use crate::mgmt::{
-    build_server_client, cluster_initialized, mgmt_url_for_node, refresh_node_cache, rpc_endpoint_for_node,
-};
+use crate::mgmt::{cluster_initialized, refresh_node_cache};
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crowdb_console_shared::cluster::{GroupSummary, GroupView, NodeId};
-use crowdb_console_shared::config::ReplicaEntry;
-use crowdb_console_shared::mgmt::{AddGroupInitialRole, AddGroupRequest, RemoteReplicaInfo};
+use crowdb_console_shared::ops;
 use serde::Deserialize;
 
 /// `GET /api/stores/:store_id/groups`. List groups from cache.
@@ -45,120 +43,41 @@ pub(crate) struct CreateGroupBody {
 }
 
 /// `POST /api/stores/:store_id/groups`. Create a group across the listed
-/// nodes. Orchestrated: creates a local `PxGroup` on each node and wires
-/// remote-replica entries. Rolls back on partial failure.
-///
-/// # Panics
-/// Panics if the `RwLock` is poisoned.
+/// nodes. Delegates to `ops::kv_logical::add_group` which handles
+/// local group creation, remote wiring, sysdata recording, and rollback.
 ///
 /// # Errors
-/// Returns an error if the nodes list is empty or any upstream RPC fails.
+/// Returns `409` if the cluster is not initialized (non-zero store),
+/// `502` if any upstream RPC fails, `500` if config persistence fails.
 pub(crate) async fn http_add_group(
     State(state): State<AppState>,
     Path(sid): Path<u64>,
     Json(body): Json<CreateGroupBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorBody>)> {
     if sid != 0 && !cluster_initialized(&state).await {
-        return Err(err_409(
-            "cluster not initialized; call POST /api/cluster/init first",
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                error: "cluster not initialized; call POST /api/cluster/init first".into(),
+            }),
         ));
     }
-    if body.nodes.is_empty() {
-        return Err(err_400("nodes list must not be empty"));
+    // Ensure the group-0 leader is available before the sysdata write
+    // inside add_group. Right after a resetAll + cluster init, the
+    // election may still be in progress and op_context would seed a
+    // stale/non-leader endpoint, causing a 5s retry cycle.
+    if sid != 0 {
+        state.refresh_group0_leader(None).await;
     }
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::kv_logical::add_group(&ctx, sid, body.group_id, body.replica_id, &body.nodes)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
 
-    // Phase 1: create the group on each node.
-    let mut succeeded: Vec<(NodeId, u64)> = Vec::new(); // (node_id, replica_id)
-    let base_rid = body.replica_id;
-    for (i, nid) in body.nodes.iter().enumerate() {
-        let url = mgmt_url_for_node(&state, *nid)?;
-        let client = build_server_client(url)?;
-        let rid = base_rid + i as u64;
-        let req = AddGroupRequest {
-            group_id: body.group_id,
-            replica_id: rid,
-            initial_role: Some(if i == 0 {
-                AddGroupInitialRole::Leader
-            } else {
-                AddGroupInitialRole::Follower
-            }),
-            // Multi-node groups defer the driver until Phase-2 wires remotes;
-            // single-node groups start it now.
-            start_election: Some(body.nodes.len() <= 1),
-        };
-        match client.add_group(sid, &req).await {
-            Ok(()) => succeeded.push((*nid, rid)),
-            Err(e) => {
-                for (ok_nid, _) in &succeeded {
-                    if let Ok(u) = mgmt_url_for_node(&state, *ok_nid) {
-                        if let Ok(c) = build_server_client(u) {
-                            let _ = c.remove_group(sid, body.group_id).await;
-                        }
-                    }
-                }
-                return Err(err_502(format!("group create failed on node {nid}: {e}")));
-            }
-        }
-    }
-
-    // Refresh the cache for each node before wiring remotes so the per-store
-    // `listen_addr` (each `PxKvStore` binds its own port) is known to the
-    // monitor cache used by `rpc_endpoint_for_node`.
-    for (nid, _) in &succeeded {
-        refresh_node_cache(&state, *nid).await;
-    }
-
-    // Phase 2: wire remote replicas. Each node gets every other node's
-    // replica as a remote.
-    for (i, (nid, _rid)) in succeeded.iter().enumerate() {
-        let Ok(url) = mgmt_url_for_node(&state, *nid) else {
-            continue;
-        };
-        let Ok(client) = build_server_client(url) else {
-            continue;
-        };
-        let mut remotes: Vec<RemoteReplicaInfo> = Vec::new();
-        for (j, (peer_nid, peer_rid)) in succeeded.iter().enumerate() {
-            if j == i {
-                continue;
-            }
-            if let Some(ep) = rpc_endpoint_for_node(&state, *peer_nid, sid).await {
-                remotes.push(RemoteReplicaInfo {
-                    replica_id: *peer_rid,
-                    endpoint: ep,
-                    voting: true,
-                });
-            }
-        }
-        if !remotes.is_empty() {
-            let _ = client.add_remote_replicas(sid, body.group_id, &remotes).await;
-        }
-    }
-
-    for (nid, _) in &succeeded {
-        refresh_node_cache(&state, *nid).await;
-    }
-
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.record_group(
-            sid,
-            body.group_id,
-            succeeded
-                .iter()
-                .map(|(node_id, replica_id)| ReplicaEntry {
-                    replica_id: *replica_id,
-                    node_id: *node_id,
-                })
-                .collect(),
-        );
-        for (node_id, _) in &succeeded {
-            cfg.ensure_store_node(sid, *node_id);
-        }
-    }
-    state
-        .persist()
-        .map_err(|e| err_500(format!("persist config: {e}")))?;
+    // Refresh the monitor cache for all target nodes so health badges
+    // and RPC endpoint resolution reflect the new group.
+    futures::future::join_all(body.nodes.iter().map(|&nid| refresh_node_cache(&state, nid))).await;
 
     Ok((
         StatusCode::CREATED,
@@ -170,7 +89,9 @@ pub(crate) async fn http_add_group(
     ))
 }
 
-/// `GET /api/stores/:store_id/groups/:group_id`. Aggregated group view.
+/// `GET /api/stores/:store_id/groups/:group_id`. Aggregated group view
+/// from cache. Refreshes all nodes hosting the store first so role /
+/// leader info reflects the most recent election state.
 ///
 /// # Errors
 /// Returns `404` if the group is not found.
@@ -180,11 +101,7 @@ pub(crate) async fn http_get_group(
     Recursive(_depth): Recursive,
 ) -> Result<Json<GroupView>, (StatusCode, Json<ErrorBody>)> {
     // Refresh the cache for every node currently believed to host this
-    // store so role / leader info reflects the most recent topology
-    // (elections happen asynchronously after the last write that
-    // refreshed the cache; without this read-side refresh the response
-    // would otherwise show stale `Follower` roles for the actual
-    // leader). Bounded by the number of nodes hosting the store.
+    // store so role / leader info reflects the most recent topology.
     let node_ids: Vec<NodeId> = {
         let snap = state.monitor_cache.snapshot().await;
         snap.iter()
@@ -197,9 +114,7 @@ pub(crate) async fn http_get_group(
             })
             .collect()
     };
-    for nid in &node_ids {
-        refresh_node_cache(&state, *nid).await;
-    }
+    futures::future::join_all(node_ids.iter().map(|&nid| refresh_node_cache(&state, nid))).await;
     state
         .monitor_cache
         .resolve_group(sid, gid)
@@ -216,47 +131,40 @@ pub(crate) async fn http_get_group(
 }
 
 /// `DELETE /api/stores/:store_id/groups/:group_id`. Delete the group
-/// across every hosting node.
-///
-/// # Panics
-/// Panics if the `RwLock` is poisoned.
+/// across every hosting node. Delegates to `ops::kv_logical::remove_group`
+/// which handles fan-out + sysdata cleanup + config update.
 ///
 /// # Errors
-/// Returns `404` if the group is not found in the cache.
+/// Returns `409` if removing group 0 in store 0,
+/// `500` if config persistence fails.
 pub(crate) async fn http_remove_group(
     State(state): State<AppState>,
     Path((sid, gid)): Path<(u64, u64)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     if sid == 0 && gid == 0 {
-        return Err(err_409(
-            "group 0 in store 0 is the system group; use POST /api/cluster/reset to tear down the entire cluster",
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                error: "group 0 in store 0 is the system group; use POST /api/cluster/reset to tear down the entire cluster".into(),
+            }),
         ));
     }
-    let view = state.monitor_cache.resolve_group(sid, gid).await.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: format!("group {gid} in store {sid} not found"),
-            }),
-        )
-    })?;
-    let node_ids: Vec<NodeId> = view.replicas.iter().map(|r| r.node_id).collect();
-    for nid in &node_ids {
-        if let Ok(url) = mgmt_url_for_node(&state, *nid) {
-            if let Ok(client) = build_server_client(url) {
-                let _ = client.remove_group(sid, gid).await;
-            }
-        }
-    }
-    for nid in &node_ids {
-        refresh_node_cache(&state, *nid).await;
-    }
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.remove_group_record(sid, gid);
-    }
-    state
-        .persist()
-        .map_err(|e| err_500(format!("persist config: {e}")))?;
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    // Resolve hosting nodes from group-0 sysdata before removal
+    // so we can refresh their caches afterwards.
+    let hosting_nodes: Vec<NodeId> = ctx
+        .sysmd()
+        .list_replicas_in_group(sid, gid)
+        .await
+        .map_err(|e| map_config_err(e.into()))?
+        .iter()
+        .map(|r| r.node_id)
+        .collect();
+    ops::kv_logical::remove_group(&ctx, sid, gid)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
+
+    futures::future::join_all(hosting_nodes.iter().map(|&nid| refresh_node_cache(&state, nid))).await;
     Ok(StatusCode::NO_CONTENT)
 }

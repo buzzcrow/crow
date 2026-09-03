@@ -1,338 +1,442 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-use clap::Subcommand;
-use crowdb_console_shared::clients::console::{ConsoleClient, ServerSummary};
-use crowdb_console_shared::cluster::{GroupView, NodeHealth, StoreView};
-use crowdb_console_shared::config::NodeEntry;
-use crowdb_protocol::NodeId;
+//! `cluster` domain — cluster-level ops: init, reset, clean, status,
+//! topology, plus hardware subcommands (rack/node/disk-group/disk).
+
 use std::process::ExitCode;
 
-use crate::utils::{client::console_client, print_json};
+use clap::Subcommand;
+
+use crate::commands::{
+    commit_config, op_context, print_json, run_disk_group_verb, run_disk_verb, run_node_verb, run_rack_verb,
+    DiskGroupVerb, DiskVerb, NodeVerb, RackVerb,
+};
 use crate::Cli;
 
 #[derive(Subcommand, Debug)]
 pub enum ClusterVerb {
-    /// High-level health summary (servers + store/group counts).
-    Status,
-    /// Print the full hierarchy (logical stores/groups/replicas plus
-    /// physical nodes/servers), built entirely from console reads.
-    Topology,
-    /// Detailed view of one entity, addressed by id:
-    ///   `s<sid>`               → store
-    ///   `s<sid>/g<gid>`        → group
-    ///   `s<sid>/g<gid>/r<rid>` → replica
-    ///   `<node-id>`            → node (any token not matching the above)
-    Inspect { id: String },
-    /// Initialize the cluster: create the system group (store 0, group
-    /// 0) on the given nodes and finalize topology cutover. Must be
-    /// called before creating non-zero stores/groups.
+    /// Initialize the cluster by bootstrapping group 0 on the listed nodes.
     Init {
-        /// Comma-separated node ids to bootstrap (e.g. `n1,n2,n3`).
-        #[arg(long, value_delimiter = ',')]
+        #[arg(short = 'n', long, value_delimiter = ',')]
         nodes: Vec<String>,
+    },
+    /// Deploy a local N-node KV cluster on 127.0.0.1 (forks
+    /// `crowdb-kv-server` on each node, bootstraps group 0).
+    /// With `-t rpc`, deploys a standalone crowdb-rpc-fb-server (echo)
+    /// for RPC regression bench.
+    #[command(name = "local-deploy")]
+    LocalDeploy {
+        #[arg(short = 'n', long, default_value_t = 3)]
+        nodes: usize,
+        /// Service type: `kv` (default), `diskdb`, or `rpc`.
+        #[arg(short = 't', long, default_value = "kv")]
+        service_type: String,
+        /// [rpc] Listen port. 0 = auto-allocate.
+        #[arg(long, default_value_t = 0)]
+        rpc_port: u16,
+        /// [rpc] Independent epoll instances (round-robin).
+        #[arg(long, default_value_t = 1)]
+        io_engines: u32,
+        /// [rpc] Total I/O worker threads.
+        #[arg(long, default_value_t = 1)]
+        io_workers: u32,
+        /// [rpc] Enable Nagle's algorithm (disable `TCP_NODELAY`).
+        #[arg(long, default_value_t = false)]
+        enable_nagle: bool,
+        /// [kv] `--rpc-workers` for the spawned server. 0 = server default (2).
+        #[arg(long, default_value_t = 0)]
+        rpc_workers: u32,
+        /// [kv] `--peer-pool-size` for the spawned server. 0 = server default (2).
+        #[arg(long, default_value_t = 0)]
+        peer_pool_size: usize,
+        /// [kv] `--max-inflight` for the spawned server. 0 = server default.
+        #[arg(long, default_value_t = 0)]
+        max_inflight: usize,
+        /// [kv] `--coalesce-max-keys` for the spawned server. 0 = server default.
+        #[arg(long, default_value_t = 0)]
+        coalesce_max_keys: usize,
+        /// [kv] `--coalesce-drain-threshold` for the spawned server. 0 = server default (`max_inflight/4`).
+        #[arg(long, default_value_t = 0)]
+        coalesce_drain_threshold: usize,
+        /// [kv] Enable `--event-write` on the spawned server.
+        #[arg(long, default_value_t = false)]
+        event_write: bool,
+        /// [kv] `--send-queue-capacity` for the spawned server. 0 = server default (4096).
+        #[arg(long, default_value_t = 0)]
+        send_queue_capacity: u32,
+        /// [kv] `--metrics-interval` for the spawned server (seconds). 0 = server default (5).
+        #[arg(long, default_value_t = 0)]
+        metrics_interval: u64,
+        /// [kv] `--kv-backend` for the spawned server (file|block|mem-block).
+        /// Empty = server default (file).
+        #[arg(long, default_value = "")]
+        kv_backend: String,
+        /// [kv] `--wal-backend` for the spawned server (file|mem-block|block-device).
+        /// Empty = server default.
+        #[arg(long, default_value = "")]
+        wal_backend: String,
+        /// [kv] Enable `--no-fsync` on the spawned server.
+        #[arg(long, default_value_t = false)]
+        no_fsync: bool,
+    },
+    /// Tear down the entire cluster (all groups, stores, servers, sysdata).
+    Destroy,
+    /// Remove orphaned sysdata entries without stopping running servers.
+    Reset,
+    /// Wipe user data on every node + wait for re-election. Preserves
+    /// group-0 sysdata + topology — servers stay running. Use --store/--group
+    /// to target a non-system group (recommended for benchmarks).
+    Clean {
+        /// Target store ID (default 0 = system store).
+        #[arg(long, default_value_t = 0)]
+        store: u64,
+        /// Target group ID (default 0 = system group; use 1+ for bench groups).
+        #[arg(long, default_value_t = 0)]
+        group: u64,
+    },
+    /// Show cluster status (list all stores from group-0 sysdata).
+    Status,
+    /// Show the topology view from a node's `/topology` endpoint.
+    Topology {
+        #[arg(short = 'n', long)]
+        node: String,
+    },
+    /// Hardware: rack management.
+    Rack {
+        #[command(subcommand)]
+        verb: RackVerb,
+    },
+    /// Hardware: node management.
+    Node {
+        #[command(subcommand)]
+        verb: NodeVerb,
+    },
+    /// Hardware: disk-group management.
+    #[command(name = "disk-group")]
+    DiskGroup {
+        #[command(subcommand)]
+        verb: DiskGroupVerb,
+    },
+    /// Hardware: disk management.
+    Disk {
+        #[command(subcommand)]
+        verb: DiskVerb,
     },
 }
 
-pub async fn run_cluster_status(cli: &Cli) -> ExitCode {
-    let client = match console_client(cli) {
-        Ok(c) => c,
-        Err(c) => return c,
-    };
-    let servers = match client.list_servers().await {
-        Ok(v) => v,
-        Err(e) => return fail("list servers", &e),
-    };
-    let stores = match client.list_stores().await {
-        Ok(v) => v,
-        Err(e) => return fail("list stores", &e),
-    };
-    if cli.json {
-        return print_json(&serde_json::json!({ "servers": servers, "stores": stores }));
-    }
-    print_status_human(&servers, &stores);
-    ExitCode::SUCCESS
-}
-
-pub async fn run_cluster_topology(cli: &Cli) -> ExitCode {
-    let client = match console_client(cli) {
-        Ok(c) => c,
-        Err(c) => return c,
-    };
-    let servers = match client.list_servers().await {
-        Ok(v) => v,
-        Err(e) => return fail("list servers", &e),
-    };
-    let nodes = match client.list_nodes(None).await {
-        Ok(v) => v,
-        Err(e) => return fail("list nodes", &e),
-    };
-    let stores = match client.list_stores().await {
-        Ok(v) => v,
-        Err(e) => return fail("list stores", &e),
-    };
-    // Inflate each group to its replica list (the store view only carries
-    // group summaries). One read per group; topology is not hot-path.
-    let mut groups: Vec<GroupView> = Vec::new();
-    for s in &stores {
-        for g in &s.groups {
-            match client.get_group(s.store_id, g.group_id).await {
-                Ok(v) => groups.push(v),
-                Err(e) => eprintln!("warning: get group {}/{}: {e}", s.store_id, g.group_id),
-            }
-        }
-    }
-    if cli.json {
-        return print_json(&serde_json::json!({
-            "servers": servers,
-            "nodes": nodes,
-            "stores": stores,
-            "groups": groups,
-        }));
-    }
-    print_topology_human(&servers, &nodes, &stores, &groups);
-    ExitCode::SUCCESS
-}
-
-pub async fn run_cluster_init(cli: &Cli, nodes: &[String]) -> ExitCode {
-    if nodes.is_empty() {
-        eprintln!("error: cluster init requires at least one node (--nodes 1,2,...)");
-        return ExitCode::from(1);
-    }
-    let node_ids: Vec<NodeId> = match nodes
-        .iter()
-        .map(|n| n.parse::<NodeId>())
-        .collect::<Result<_, _>>()
-    {
-        Ok(ids) => ids,
-        Err(e) => {
-            eprintln!("error: invalid node id: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let client = match console_client(cli) {
-        Ok(c) => c,
-        Err(c) => return c,
-    };
-    match client.cluster_init(&node_ids).await {
-        Ok(v) => {
-            if cli.json {
-                print_json(&v)
-            } else {
-                println!("cluster initialized on nodes: {}", nodes.join(", "));
-                ExitCode::SUCCESS
-            }
-        }
-        Err(e) => fail("cluster init", &e),
-    }
-}
-
-pub async fn run_cluster_inspect(cli: &Cli, id: &str) -> ExitCode {
-    let client = match console_client(cli) {
-        Ok(c) => c,
-        Err(c) => return c,
-    };
-    match parse_inspect_id(id) {
-        Ok(InspectTarget::Store(sid)) => match client.get_store(sid).await {
-            Ok(v) => render(cli, &v, || print_store(&v)),
-            Err(e) => fail(&format!("inspect store {sid}"), &e),
-        },
-        Ok(InspectTarget::Group(sid, gid)) => match client.get_group(sid, gid).await {
-            Ok(v) => render(cli, &v, || print_group(&v)),
-            Err(e) => fail(&format!("inspect group {sid}/{gid}"), &e),
-        },
-        Ok(InspectTarget::Replica(sid, gid, rid)) => match client.get_replica(sid, gid, rid).await {
-            Ok(v) => render(cli, &v, || {
-                println!(
-                    "replica {} node={} role={:?} state={:?}",
-                    v.replica_id, v.node_id, v.role, v.state
-                );
-            }),
-            Err(e) => fail(&format!("inspect replica {sid}/{gid}/{rid}"), &e),
-        },
-        Ok(InspectTarget::Node(node)) => inspect_node(cli, &client, node).await,
-        Err(msg) => {
-            eprintln!("error: {msg}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-async fn inspect_node(cli: &Cli, client: &ConsoleClient, node: NodeId) -> ExitCode {
-    match client.get_node_server(node).await {
-        Ok(entry) => render(cli, &entry, || {
-            println!("node {node}");
-            println!("  mgmt_url: {}", entry.url);
-            println!("  rpc_url: {}", entry.rpc_url.as_deref().unwrap_or("-"));
-            println!(
-                "  pid:      {}",
-                entry.pid.map_or_else(|| "-".to_string(), |p| p.to_string())
-            );
-        }),
-        Err(e) => {
-            // No server deployed is the common, non-fatal case for a node id.
-            eprintln!("error: inspect node {node}: {e}");
-            ExitCode::from(2)
-        }
-    }
-}
-
-/// Render a value as JSON (when `--json`) or via the provided human
-/// printer, returning success.
-fn render<T: serde::Serialize>(cli: &Cli, v: &T, human: impl FnOnce()) -> ExitCode {
-    if cli.json {
-        return print_json(v);
-    }
-    human();
-    ExitCode::SUCCESS
-}
-
-fn fail(what: &str, e: &crowdb_console_shared::error::Error) -> ExitCode {
-    eprintln!("error: {what}: {e}");
-    ExitCode::from(2)
-}
-
-// ── id grammar ──────────────────────────────────────────────────────
-
-enum InspectTarget {
-    Node(NodeId),
-    Store(u64),
-    Group(u64, u64),
-    Replica(u64, u64, u64),
-}
-
-/// Parse a `cluster inspect` id. Logical ids use prefixed decimal
-/// segments (`s<sid>[/g<gid>[/r<rid>]]`); any token that is not a valid
-/// `s<digits>...` path is treated as a node id.
-fn parse_inspect_id(id: &str) -> Result<InspectTarget, String> {
-    let segs: Vec<&str> = id.split('/').collect();
-    let Some(sid) = segs[0].strip_prefix('s').and_then(|d| d.parse::<u64>().ok()) else {
-        // Not a logical path: a single bare token is a node id.
-        if segs.len() == 1 && !id.is_empty() {
-            let nid = id
-                .parse::<NodeId>()
-                .map_err(|_| format!("invalid node id {id:?} (expected a number)"))?;
-            return Ok(InspectTarget::Node(nid));
-        }
-        return Err(format!(
-            "unrecognised id {id:?} (expected s<sid>[/g<gid>[/r<rid>]] or a node id)"
-        ));
-    };
-    match segs.as_slice() {
-        [_] => Ok(InspectTarget::Store(sid)),
-        [_, g] => parse_seg(g, 'g')
-            .map(|gid| InspectTarget::Group(sid, gid))
-            .ok_or_else(|| format!("expected g<group_id>, got {g:?}")),
-        [_, g, r] => {
-            let gid = parse_seg(g, 'g').ok_or_else(|| format!("expected g<group_id>, got {g:?}"))?;
-            let rid = parse_seg(r, 'r').ok_or_else(|| format!("expected r<replica_id>, got {r:?}"))?;
-            Ok(InspectTarget::Replica(sid, gid, rid))
-        }
-        _ => Err(format!("too many path segments in id {id:?}")),
-    }
-}
-
-fn parse_seg(seg: &str, prefix: char) -> Option<u64> {
-    seg.strip_prefix(prefix).and_then(|d| d.parse::<u64>().ok())
-}
-
-// ── human rendering ─────────────────────────────────────────────────
-
-fn health_str(h: NodeHealth) -> &'static str {
-    match h {
-        NodeHealth::Up => "up",
-        NodeHealth::Down => "down",
-        NodeHealth::Unknown => "unknown",
-    }
-}
-
-fn print_status_human(servers: &[ServerSummary], stores: &[StoreView]) {
-    let up = servers
-        .iter()
-        .filter(|s| matches!(s.health, NodeHealth::Up))
-        .count();
-    println!("servers: {} ({up} up)", servers.len());
-    for s in servers {
-        println!(
-            "  {:<12} {:<24} health={} pid={}",
-            s.node_id.map_or_else(|| "-".to_string(), |n| n.to_string()),
-            s.mgmt_url,
-            health_str(s.health),
-            s.pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
-        );
-    }
-    let groups: usize = stores.iter().map(|s| s.groups.len()).sum();
-    println!("stores: {}  groups: {groups}", stores.len());
-}
-
-fn print_topology_human(
-    servers: &[ServerSummary],
-    nodes: &[NodeEntry],
-    stores: &[StoreView],
-    groups: &[GroupView],
-) {
-    println!("logical:");
-    for s in stores {
-        println!("  store {}  nodes={:?}", s.store_id, s.nodes);
-        for gsum in &s.groups {
-            let view = groups
-                .iter()
-                .find(|g| g.store_id == s.store_id && g.group_id == gsum.group_id);
-            let leader = view
-                .and_then(GroupView::leader_id)
-                .map_or_else(|| "?".to_string(), |l| l.to_string());
-            println!("    group {}  leader={leader}", gsum.group_id);
-            if let Some(view) = view {
-                for r in &view.replicas {
+#[allow(clippy::too_many_lines)]
+pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
+    match verb {
+        ClusterVerb::Init { nodes } => {
+            let ctx = match op_context(cli) {
+                Ok(c) => c,
+                Err(c) => return c,
+            };
+            let node_ids: Vec<u64> = match nodes.iter().map(|s| s.parse::<u64>()).collect::<Result<_, _>>() {
+                Ok(ids) => ids,
+                Err(e) => {
+                    eprintln!("error: invalid node id: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            match crowdb_console_shared::ops::cluster::init(&ctx, &node_ids).await {
+                Ok(summary) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
+                    if cli.json {
+                        return print_json(cli, &summary);
+                    }
                     println!(
-                        "      replica {}  node={}  role={:?}  state={:?}",
-                        r.replica_id, r.node_id, r.role, r.state
+                        "cluster initialized: store {}, group {}, {} nodes",
+                        summary.store_id,
+                        summary.group_id,
+                        summary.nodes.len()
                     );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: cluster init: {e}");
+                    ExitCode::from(2)
                 }
             }
         }
-    }
-
-    println!("physical:");
-    for n in nodes {
-        let server = servers.iter().find(|s| s.node_id == Some(n.id));
-        let server_label = server.map_or_else(
-            || "none".to_string(),
-            |s| format!("{} ({})", s.mgmt_url, health_str(s.health)),
-        );
-        println!(
-            "  node {:<12} rack={:<10} host={:<16} server={server_label}",
-            n.id, n.rack_id, n.host
-        );
+        ClusterVerb::LocalDeploy {
+            nodes,
+            service_type,
+            rpc_port,
+            io_engines,
+            io_workers,
+            enable_nagle,
+            rpc_workers,
+            peer_pool_size,
+            max_inflight,
+            coalesce_max_keys,
+            coalesce_drain_threshold,
+            event_write,
+            send_queue_capacity,
+            metrics_interval,
+            kv_backend,
+            wal_backend,
+            no_fsync,
+        } => match service_type.as_str() {
+            "kv" => {
+                let ctx = match op_context(cli) {
+                    Ok(c) => c,
+                    Err(c) => return c,
+                };
+                let tunables = crowdb_console_shared::ops::cluster::KvDeployTunables {
+                    rpc_workers: nonzero(rpc_workers),
+                    peer_pool_size: nonzero(peer_pool_size),
+                    max_inflight: nonzero(max_inflight),
+                    coalesce_max_keys: nonzero(coalesce_max_keys),
+                    coalesce_drain_threshold: nonzero(coalesce_drain_threshold),
+                    event_write: if event_write { Some(true) } else { None },
+                    send_queue_capacity: nonzero(send_queue_capacity),
+                    metrics_interval: nonzero(metrics_interval),
+                    kv_backend: if kv_backend.is_empty() {
+                        None
+                    } else {
+                        Some(kv_backend)
+                    },
+                    wal_backend: if wal_backend.is_empty() {
+                        None
+                    } else {
+                        Some(wal_backend)
+                    },
+                    no_fsync: if no_fsync { Some(true) } else { None },
+                };
+                let workspace = deploy_workspace(cli);
+                match crowdb_console_shared::ops::cluster::local_deploy(
+                    &ctx,
+                    nodes,
+                    workspace.as_deref(),
+                    Some(&tunables),
+                )
+                .await
+                {
+                    Ok(summary) => {
+                        if let Err(c) = commit_config(cli, &ctx) {
+                            return c;
+                        }
+                        if cli.json {
+                            return print_json(cli, &summary);
+                        }
+                        println!(
+                            "local-deploy complete: {} nodes (rack {}, nodes [{}]), group 0 bootstrapped",
+                            summary.node_count,
+                            summary.rack_id,
+                            summary
+                                .node_ids
+                                .iter()
+                                .map(std::string::ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("error: local-deploy: {e}");
+                        ExitCode::from(2)
+                    }
+                }
+            }
+            "rpc" => {
+                let ctx = match op_context(cli) {
+                    Ok(c) => c,
+                    Err(c) => return c,
+                };
+                let rpc_cfg = crowdb_console_shared::ops::cluster::RpcDeployConfig {
+                    port: rpc_port,
+                    io_engines,
+                    io_workers,
+                    enable_nagle,
+                    ..Default::default()
+                };
+                let workspace = deploy_workspace(cli);
+                match crowdb_console_shared::ops::cluster::local_deploy_rpc(
+                    &ctx,
+                    &rpc_cfg,
+                    workspace.as_deref(),
+                )
+                .await
+                {
+                    Ok(summary) => {
+                        if let Err(c) = commit_config(cli, &ctx) {
+                            return c;
+                        }
+                        if cli.json {
+                            return print_json(cli, &summary);
+                        }
+                        println!(
+                            "local-deploy rpc: port={}, pid={}, io_engines={}, io_workers={}, nagle={}",
+                            summary.port, summary.pid, summary.io_engines, summary.io_workers, summary.nagle
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("error: local-deploy rpc: {e}");
+                        ExitCode::from(2)
+                    }
+                }
+            }
+            other => {
+                eprintln!("error: local-deploy: unsupported service type `{other}` (expected kv or rpc)");
+                ExitCode::from(1)
+            }
+        },
+        ClusterVerb::Destroy => {
+            let ctx = match op_context(cli) {
+                Ok(c) => c,
+                Err(c) => return c,
+            };
+            match crowdb_console_shared::ops::cluster::destroy(&ctx).await {
+                Ok(()) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
+                    if !cli.json {
+                        println!("cluster destroy complete");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: cluster destroy: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        ClusterVerb::Reset => {
+            let ctx = match op_context(cli) {
+                Ok(c) => c,
+                Err(c) => return c,
+            };
+            match crowdb_console_shared::ops::cluster::reset(&ctx).await {
+                Ok(()) => {
+                    if !cli.json {
+                        println!("cluster reset complete");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: cluster reset: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        ClusterVerb::Clean { store, group } => {
+            let ctx = match op_context(cli) {
+                Ok(c) => c,
+                Err(c) => return c,
+            };
+            match crowdb_console_shared::ops::cluster::clean(&ctx, store, group).await {
+                Ok(result) => {
+                    if cli.json {
+                        return print_json(cli, &result);
+                    }
+                    println!(
+                        "cluster clean: wiped {} nodes, leader = {}",
+                        result.wiped_nodes, result.new_leader
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: cluster clean: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        ClusterVerb::Status => {
+            let ctx = match op_context(cli) {
+                Ok(c) => c,
+                Err(c) => return c,
+            };
+            match crowdb_console_shared::ops::cluster::status(&ctx).await {
+                Ok(stores) => {
+                    if cli.json {
+                        return print_json(cli, &stores);
+                    }
+                    if stores.is_empty() {
+                        println!("(no stores)");
+                    } else {
+                        println!("{:<12}  {:<12}  NODES", "STORE", "REPLICAS");
+                        for s in &stores {
+                            println!(
+                                "{:<12}  {:<12}  {}",
+                                s.store_id,
+                                s.node_ids.len(),
+                                s.node_ids
+                                    .iter()
+                                    .map(std::string::ToString::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            );
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: cluster status: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        ClusterVerb::Topology { node } => {
+            let ctx = match op_context(cli) {
+                Ok(c) => c,
+                Err(c) => return c,
+            };
+            let node_id: u64 = match node.parse() {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("error: invalid node id: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            match crowdb_console_shared::ops::cluster::topology(&ctx, node_id).await {
+                Ok(stores) => {
+                    if cli.json {
+                        return print_json(cli, &stores);
+                    }
+                    for s in &stores {
+                        println!(
+                            "store {} listen={}",
+                            s.store_id,
+                            s.listen_addr.as_deref().unwrap_or("-")
+                        );
+                        for g in &s.groups {
+                            println!("  group {} leader={}", g.group_id, g.local_replica_id);
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: cluster topology: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        ClusterVerb::Rack { verb } => run_rack_verb(cli, verb).await,
+        ClusterVerb::Node { verb } => run_node_verb(cli, verb).await,
+        ClusterVerb::DiskGroup { verb } => run_disk_group_verb(cli, verb).await,
+        ClusterVerb::Disk { verb } => run_disk_verb(cli, verb).await,
     }
 }
 
-fn print_store(v: &StoreView) {
-    println!("store {}  nodes={:?}", v.store_id, v.nodes);
-    println!("{:>10}  {:>10}  {:>10}", "GROUP", "LEADER", "REPLICAS");
-    for g in &v.groups {
-        println!(
-            "{:>10}  {:>10}  {:>10}",
-            g.group_id,
-            g.leader.map_or_else(|| "?".to_string(), |l| l.to_string()),
-            g.replica_count
-        );
-    }
+/// Convert 0 to `None` (use server default), pass through nonzero values.
+fn nonzero<T: Copy + PartialEq + Default>(v: T) -> Option<T> {
+    (v != T::default()).then_some(v)
 }
 
-fn print_group(v: &GroupView) {
-    println!(
-        "group {} (store {})  leader={}  state={:?}",
-        v.group_id,
-        v.store_id,
-        v.leader_id().map_or_else(|| "?".to_string(), |l| l.to_string()),
-        v.state
-    );
-    println!("{:>10}  {:<12}  {:<10}  STATE", "REPLICA", "NODE", "ROLE");
-    for r in &v.replicas {
-        println!(
-            "{:>10}  {:<12}  {:?}  {:?}",
-            r.replica_id, r.node_id, r.role, r.state
-        );
+/// Resolve the `local-deploy` workspace from the CLI's per-invocation
+/// log dir. The workspace lands at `<log_dir>/deploy/` so server data
+/// dirs stay separate from the CLI's own log files. Returns `None`
+/// (falling back to the lib default) when `log_dir` is unset.
+fn deploy_workspace(cli: &Cli) -> Option<std::path::PathBuf> {
+    if cli.log_dir.as_os_str().is_empty() {
+        None
+    } else {
+        Some(cli.log_dir.join("deploy"))
     }
 }

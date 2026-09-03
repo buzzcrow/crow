@@ -66,8 +66,8 @@ fn bandwidth_count_avg_size_and_rate() {
         out.contains("count")
             && out.contains("tps(/s)")
             && out.contains("avg_size(KB)")
-            && out.contains("rate(KB/s)")
-            && out.contains("total(KB)")
+            && out.contains("rate(MB/s)")
+            && out.contains("total(MB)")
     );
     assert!(out.contains("10"));
     assert!(out.contains("s.1.kv.bytes_in.bw"));
@@ -133,7 +133,7 @@ async fn registry_start_stop_lifecycle() {
     let poll_start = std::time::Instant::now();
     loop {
         let content = std::fs::read_to_string(&metrics_file).unwrap();
-        if content.matches("[metrics").count() >= 1 {
+        if content.matches("\nrust\n").count() >= 1 {
             break;
         }
         assert!(
@@ -147,7 +147,7 @@ async fn registry_start_stop_lifecycle() {
 
     let content = std::fs::read_to_string(&metrics_file).unwrap();
     // Should have at least 2 flush blocks (periodic + final)
-    let count = content.matches("[metrics").count();
+    let count = content.matches("\nrust\n").count();
     assert!(count >= 2, "expected >= 2 flush blocks, got {count}");
 }
 
@@ -196,17 +196,17 @@ fn flush_format_header_and_sections() {
     let out = String::from_utf8(buf).unwrap();
 
     // Header
-    assert!(out.starts_with("[metrics 2026-07-15T16:30:05.123Z window=5.000s]"));
-    // Section order: counters, histograms, summaries, bandwidths, gauges
-    let counter_pos = out.find("s.1.kv.delete.c").unwrap();
+    assert!(out.starts_with("rust\n"));
+    // Section order: histograms, summaries, bandwidths, counters, gauges
     let hist_pos = out.find("s.1.kv.get.lh").unwrap();
     let summary_pos = out.find("s.1.kv.scan.l").unwrap();
     let bw_pos = out.find("s.1.kv.bytes_in.bw").unwrap();
+    let counter_pos = out.find("s.1.kv.delete.c").unwrap();
     let gauge_pos = out.find("s.1.g.0.buf.resident.g").unwrap();
-    assert!(counter_pos < hist_pos);
     assert!(hist_pos < summary_pos);
     assert!(summary_pos < bw_pos);
-    assert!(bw_pos < gauge_pos);
+    assert!(bw_pos < counter_pos);
+    assert!(counter_pos < gauge_pos);
     // Trailing blank line
     assert!(out.ends_with('\n'));
 }
@@ -286,17 +286,16 @@ async fn cpp_metrics_block_appears_with_matching_window() {
         let mut reg = runner.registry().lock().unwrap();
         let _ = reg.register_counter("s.1.kv.put.c");
     }
-    runner.set_cpp_flush(|w, window, ts, _width, _count_w, _tps_w| {
-        let _ = writeln!(w, "[cpp-metrics {ts} window={window:.3}s]");
+    runner.set_cpp_flush(|w, _window, _ts, _width, _count_w, _tps_w| {
+        let _ = writeln!(w, "cpp-tree");
         let _ = writeln!(
             w,
             "s.0.g.0.snapshot.apply.l  count 1 tps(/s)  avg 100us  max 100us"
         );
-        let _ = writeln!(w);
     });
     runner.start();
-    // Poll until at least 1 periodic flush (with both [metrics and
-    // [cpp-metrics blocks) appears in the log. The runner flushes
+    // Poll until at least 1 periodic flush (with both rust and
+    // cpp-tree blocks) appears in the log. The runner flushes
     // every 1s; polling avoids a fixed 1200ms sleep.
     let poll_start = std::time::Instant::now();
     loop {
@@ -306,7 +305,7 @@ async fn cpp_metrics_block_appears_with_matching_window() {
                 content.push_str(&std::fs::read_to_string(entry.path()).unwrap());
             }
         }
-        if content.contains("[metrics ") && content.contains("[cpp-metrics ") {
+        if content.contains("\nrust\n") && content.contains("\ncpp-tree\n") {
             break;
         }
         assert!(
@@ -328,18 +327,17 @@ async fn cpp_metrics_block_appears_with_matching_window() {
     }
     std::fs::remove_dir_all(&dir).ok();
 
+    assert!(content.contains("\nrust\n"), "missing rust block in:\n{content}");
     assert!(
-        content.contains("[metrics "),
-        "missing [metrics] block in:\n{content}"
+        content.contains("\ncpp-tree\n"),
+        "missing cpp-tree block in:\n{content}"
     );
+    // Both blocks should have window= with 3 decimal places. The
+    // 1-second flush interval can produce a window slightly under 1s
+    // (e.g. 0.999s) due to timing jitter, so accept 0.9xx as well.
     assert!(
-        content.contains("[cpp-metrics "),
-        "missing [cpp-metrics] block in:\n{content}"
-    );
-    // Both blocks should have window= with 3 decimal places.
-    assert!(
-        content.contains("window=1."),
-        "expected window=1.xxx in:\n{content}"
+        content.contains("window=1.") || content.contains("window=0.9"),
+        "expected window≈1.xxx in:\n{content}"
     );
 }
 

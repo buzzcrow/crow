@@ -6,10 +6,14 @@
 use crate::sys;
 use std::ffi::CString;
 use std::ptr;
+use std::sync::Arc;
 
 /// An RPC server. Accepts connections and dispatches to handlers.
 pub struct RpcServer {
     handle: sys::crowdb_rpc_server_t,
+    // Raw pointers from Box::into_raw in register_handler. Freed in
+    // Drop to avoid leaking the Rust handler closures.
+    handler_ptrs: std::sync::Mutex<Vec<*mut std::ffi::c_void>>,
 }
 
 impl std::fmt::Debug for RpcServer {
@@ -72,7 +76,10 @@ impl RpcServer {
         let pool_handle = pool.map(|p| p.handle()).unwrap_or(ptr::null_mut());
         let handle =
             unsafe { sys::crowdb_rpc_server_create_with_engines(pool_handle, io_engines, effective_workers) };
-        RpcServer { handle }
+        RpcServer {
+            handle,
+            handler_ptrs: std::sync::Mutex::new(Vec::new()),
+        }
     }
 
     /// Listen on the given address and port. If port is 0, the OS assigns
@@ -94,7 +101,31 @@ impl RpcServer {
 
     /// Stop the server.
     pub fn stop(&self) {
+        // Clear handlers before stopping to break reference cycles
+        // (handler closures capture Arc<RpcServer>; the server owns
+        // the closures via register_handler → Box::into_raw). Without
+        // this, the Arc ref count never reaches 0 and Drop never runs.
+        self.clear_handlers();
         unsafe { sys::crowdb_rpc_server_stop(self.handle) };
+    }
+
+    /// Clear all registered handlers and free the Rust closures.
+    /// Called automatically by `stop`. Safe to call multiple times.
+    pub fn clear_handlers(&self) {
+        // Clear the C++ handler registry first so no dispatch can
+        // access the closures after we free them.
+        unsafe { sys::crowdb_rpc_server_clear_handlers(self.handle) };
+        // Free the Rust handler closures (drops captured Arcs).
+        let ptrs = std::mem::take(&mut *self.handler_ptrs.lock().unwrap());
+        for user_data in ptrs {
+            if !user_data.is_null() {
+                unsafe {
+                    drop(Box::from_raw(
+                        user_data.cast::<Box<dyn Fn(ServerRequest) + Send + 'static>>(),
+                    ));
+                }
+            }
+        }
     }
 
     /// The port the server is listening on (0 if not listening).
@@ -148,7 +179,9 @@ impl RpcServer {
         if handle.is_null() {
             Err(RpcError::ConnectionError)
         } else {
-            Ok(Connection { handle })
+            Ok(Connection {
+                inner: Arc::new(ConnectionInner { handle, owned: true }),
+            })
         }
     }
 
@@ -185,14 +218,16 @@ impl RpcServer {
     {
         let box_ptr: *mut Box<dyn Fn(ServerRequest) + Send + 'static> =
             Box::into_raw(Box::new(Box::new(handler)));
+        let user_data = box_ptr.cast::<std::ffi::c_void>();
         unsafe {
             sys::crowdb_rpc_server_register_handler(
                 self.handle,
                 msg_type,
                 Some(rust_handler_trampoline),
-                box_ptr.cast::<std::ffi::c_void>(),
+                user_data,
             );
         }
+        self.handler_ptrs.lock().unwrap().push(user_data);
     }
 
     /// Submit a response on a server-side connection. Thread-safe — may
@@ -285,6 +320,18 @@ impl RpcServer {
 impl Drop for RpcServer {
     fn drop(&mut self) {
         if !self.handle.is_null() {
+            // Free any handler closures not already freed by
+            // clear_handlers/stop (e.g. if stop was never called).
+            let ptrs = std::mem::take(&mut *self.handler_ptrs.lock().unwrap());
+            for user_data in ptrs {
+                if !user_data.is_null() {
+                    unsafe {
+                        drop(Box::from_raw(
+                            user_data.cast::<Box<dyn Fn(ServerRequest) + Send + 'static>>(),
+                        ));
+                    }
+                }
+            }
             unsafe { sys::crowdb_rpc_server_destroy(self.handle) };
             self.handle = ptr::null_mut();
         }
@@ -298,26 +345,47 @@ impl Drop for RpcServer {
 unsafe impl Send for RpcServer {}
 unsafe impl Sync for RpcServer {}
 
-/// A connection to a peer endpoint. Cloning is cheap — it just copies
-/// the C++ handle (a raw pointer). The underlying connection is owned
-/// by the transport and is safe to share across threads (send queue
-/// is mutex-protected).
+/// A connection to a peer endpoint. Cloning is cheap — it clones an
+/// `Arc` under the hood. The underlying connection is owned by the
+/// transport and is safe to share across threads (send queue is
+/// mutex-protected). When the last clone is dropped, the
+/// `crowdb_rpc_conn_s` wrapper is destroyed (for connections created
+/// by `RpcServer::connect`). Borrowed connections (from `from_handle`)
+/// are never destroyed.
 #[derive(Clone)]
 pub struct Connection {
-    handle: sys::crowdb_rpc_conn_t,
+    inner: Arc<ConnectionInner>,
 }
+
+struct ConnectionInner {
+    handle: sys::crowdb_rpc_conn_t,
+    owned: bool,
+}
+
+impl Drop for ConnectionInner {
+    fn drop(&mut self) {
+        if self.owned && !self.handle.is_null() {
+            unsafe { sys::crowdb_rpc_conn_destroy(self.handle) };
+        }
+    }
+}
+
+// Safety: ConnectionInner wraps a C++ handle that is safe to share
+// across threads (the transport's send queue is mutex-protected).
+unsafe impl Send for ConnectionInner {}
+unsafe impl Sync for ConnectionInner {}
 
 impl std::fmt::Debug for Connection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Connection")
-            .field("handle", &self.handle)
+            .field("handle", &self.inner.handle)
             .finish_non_exhaustive()
     }
 }
 
 impl Connection {
     pub fn handle(&self) -> sys::crowdb_rpc_conn_t {
-        self.handle
+        self.inner.handle
     }
 
     /// Construct a `Connection` wrapper from a raw `conn_handle`
@@ -337,15 +405,9 @@ impl Connection {
     /// `conn_handle` directly.
     #[must_use]
     pub fn from_handle(handle: sys::crowdb_rpc_conn_t) -> Self {
-        Self { handle }
-    }
-}
-
-impl Drop for Connection {
-    fn drop(&mut self) {
-        // The connection is owned by the server's transport; we don't
-        // destroy it here. The C ABI doesn't have a crowdb_rpc_conn_destroy
-        // because connections are managed by the transport.
+        Self {
+            inner: Arc::new(ConnectionInner { handle, owned: false }),
+        }
     }
 }
 

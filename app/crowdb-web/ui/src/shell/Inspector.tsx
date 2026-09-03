@@ -4,9 +4,9 @@
 import { useState, useMemo, lazy, Suspense } from 'react';
 import { X, Info, ListChecks, ExternalLink } from 'lucide-react';
 import { useSelection, SelectedEntity } from '../contexts/SelectionContext';
-import { useViewMode } from '../contexts/ViewModeContext';
+import { useDomain } from '../contexts/DomainContext';
 import { cn } from '../utils/cn';
-import { ViewMode, Node, Rack, EnrichedStoreView, CrowdbKVServerView, CapacityUsageResponse, DiskdbInstanceInfo, HardwareCapacitySummary, ElectionState, ReadState, ReplicaRole } from '../types';
+import { Domain, Node, Rack, EnrichedStoreView, CrowdbKVServerView, CapacityUsageResponse, DiskdbInstanceInfo, HardwareCapacitySummary, ElectionState, ReadState, ReplicaRole } from '../types';
 import { DEFAULT_DC_NAME } from '../data/defaultDatacenter';
 import { ActivityLog } from '../panels/ActivityLog';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, serverLabel, storeLabel } from '../utils/entityDisplay';
@@ -64,7 +64,7 @@ interface InspectorProps {
  */
 export function Inspector({ readonly, modules: _modules, nodes = [], racks = [], servers = [], stores = [], capacityUsage = null, hardwareCapacity = null, diskdbInstances = [], width = 320 }: InspectorProps) {
   const { selectedEntity, clearSelection, selectEntity } = useSelection();
-  const { setViewMode } = useViewMode();
+  const { setDomain } = useDomain();
   const [activeTab, setActiveTab] = useState<TabId>('details');
 
   if (!selectedEntity) return null;
@@ -99,7 +99,7 @@ export function Inspector({ readonly, modules: _modules, nodes = [], racks = [],
 
       <div className="tw-flex-1 tw-overflow-y-auto">
         {activeTab === 'details' && (
-          <DetailsTab entity={selectedEntity} nodes={nodes} racks={racks} servers={servers} stores={stores} capacityUsage={capacityUsage} hardwareCapacity={hardwareCapacity} diskdbInstances={diskdbInstances} selectEntity={selectEntity} setViewMode={setViewMode} readonly={readonly} />
+          <DetailsTab entity={selectedEntity} nodes={nodes} racks={racks} servers={servers} stores={stores} capacityUsage={capacityUsage} hardwareCapacity={hardwareCapacity} diskdbInstances={diskdbInstances} selectEntity={selectEntity} setDomain={setDomain} readonly={readonly} />
         )}
         {activeTab === 'activity' && <ActivityLog />}
       </div>
@@ -147,11 +147,11 @@ interface DetailsTabProps {
   hardwareCapacity: HardwareCapacitySummary | null;
   diskdbInstances: DiskdbInstanceInfo[];
   selectEntity: (e: SelectedEntity | null) => void;
-  setViewMode: (m: ViewMode) => void;
+  setDomain: (m: Domain) => void;
   readonly?: boolean;
 }
 
-function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, hardwareCapacity, diskdbInstances, selectEntity, setViewMode, readonly }: DetailsTabProps) {
+function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, hardwareCapacity, diskdbInstances, selectEntity, setDomain, readonly }: DetailsTabProps) {
   const displayType = entity.type === 'Server'
     ? (entity.serviceType === 'diskdb' ? 'DiskDB' : 'KV')
     : entity.type;
@@ -170,7 +170,7 @@ function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, hard
   // crowtree_stats) out of `stores`. `stores` is `EnrichedStoreView[]`,
   // so `groups[].replicas` is typed `ReplicaView[]` — no cast needed.
   const replica =
-    entity.type === 'Replica' && entity.viewMode === ViewMode.Logical
+    entity.type === 'Replica' && entity.domain === Domain.KV
       ? stores
           .find((s) => String(s.store_id) === entity.parentIds?.store_id)
           ?.groups.find((g) => String(g.group_id) === entity.parentIds?.group_id)
@@ -179,11 +179,11 @@ function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, hard
 
   // Logical Group: dig the full GroupView (read_state) out of `stores`.
   const groupView =
-    entity.type === 'Group' && entity.viewMode === ViewMode.Logical
+    entity.type === 'Group' && entity.domain === Domain.KV
       ? stores
           .find((s) => String(s.store_id) === entity.parentIds?.store_id)
           ?.groups.find((g) => String(g.group_id) === entity.id)
-      : entity.type === 'Replica' && entity.viewMode === ViewMode.Logical
+      : entity.type === 'Replica' && entity.domain === Domain.KV
         ? stores
             .find((s) => String(s.store_id) === entity.parentIds?.store_id)
             ?.groups.find((g) => String(g.group_id) === entity.parentIds?.group_id)
@@ -203,7 +203,7 @@ function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, hard
 
     // In Physical view, only show capacity for DiskGroup and Disk
     // (rack/node/datacenter capacity is a Capacity-view concept).
-    if (entity.viewMode === ViewMode.Physical && entity.type !== 'DiskGroup' && entity.type !== 'Disk') return null;
+    if (entity.domain === Domain.Cluster && entity.type !== 'DiskGroup' && entity.type !== 'Disk') return null;
 
     let dgs = hwDgs;
     if (entity.type === 'Datacenter') {
@@ -242,7 +242,7 @@ function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, hard
       return sum + (u?.busy_bytes ?? 0);
     }, 0);
     return { capacity, busy, free: capacity - busy };
-  }, [entity.type, entity.viewMode, entity.id, entity.parentIds, hardwareCapacity, capacityUsage]);
+  }, [entity.type, entity.domain, entity.id, entity.parentIds, hardwareCapacity, capacityUsage]);
 
   // Disk list for the selected DiskGroup (from hardwareCapacity sysdata).
   // Works in both Physical and Capacity views.
@@ -320,7 +320,7 @@ function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, hard
   ];
 
   // Single cross-jump per design §3.1.
-  const crossJump = buildCrossJump(entity, nodes, stores, selectEntity, setViewMode);
+  const crossJump = buildCrossJump(entity, nodes, stores, selectEntity, setDomain);
 
   return (
     <div className="tw-p-3 tw-space-y-3">
@@ -400,21 +400,21 @@ function buildCrossJump(
   nodes: Node[],
   stores: EnrichedStoreView[],
   selectEntity: (e: SelectedEntity | null) => void,
-  setViewMode: (m: ViewMode) => void,
+  setDomain: (m: Domain) => void,
 ): { label: string; go: () => void } | null {
   // Logical Replica -> physical Node ("show on node").
-  if (entity.viewMode === ViewMode.Logical && entity.type === 'Replica') {
+  if (entity.domain === Domain.KV && entity.type === 'Replica') {
     const nodeId = entity.parentIds?.node_id;
     if (nodeId) {
       const node = nodes.find((n) => n.id === Number(nodeId));
       return {
         label: `Show on node ${nodeId}`,
         go: () => {
-          setViewMode(ViewMode.Physical);
+          setDomain(Domain.Cluster);
           selectEntity({
             type: 'Node',
             id: String(nodeId),
-            viewMode: ViewMode.Physical,
+            domain: Domain.Cluster,
             parentIds: node?.rack_id ? { rack_id: node.rack_id } : {},
             name: node?.host,
           });
@@ -423,14 +423,14 @@ function buildCrossJump(
     }
   }
   // Physical Node -> logical Store ("show in cluster").
-  if (entity.viewMode === ViewMode.Physical && entity.type === 'Node') {
+  if (entity.domain === Domain.Cluster && entity.type === 'Node') {
     const store = stores.find((s) => String(s.store_id) !== '0' && s.nodes?.includes(Number(entity.id)));
     if (store) {
       return {
         label: `Show store ${store.store_id} in cluster`,
         go: () => {
-          setViewMode(ViewMode.Logical);
-          selectEntity({ type: 'Store', id: String(store.store_id), viewMode: ViewMode.Logical, name: store.name });
+          setDomain(Domain.KV);
+          selectEntity({ type: 'Store', id: String(store.store_id), domain: Domain.KV, name: store.name });
         },
       };
     }

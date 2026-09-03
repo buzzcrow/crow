@@ -5,6 +5,7 @@
 //! client construction for chunkdb E2E tests.
 
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,8 @@ use crate::hardware::INSTANCE_ID;
 // Re-export hardware helpers for convenience.
 pub use crate::cluster::crowdb_kv_server_bin;
 pub use crate::hardware::{seed_hardware, standard_disk_ids_4};
+
+static CHUNKDB_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Find the crowdb-chunkdb binary.
 pub fn crowdb_chunkdb_bin() -> Option<std::path::PathBuf> {
@@ -135,17 +138,21 @@ lock_hold_warn_threshold_ms = 1000
                 .join(", "),
         );
 
-        let config_path =
-            crate::test_dirs::test_data_dir().join(format!("chunkdb-config-{}.toml", std::process::id()));
+        let inst = CHUNKDB_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let config_path = crate::test_dirs::test_data_dir()
+            .join(format!("chunkdb-config-{}-{inst}.toml", std::process::id()));
         std::fs::write(&config_path, &config_content).expect("write config");
 
-        let log_path =
-            crate::test_dirs::test_log_dir().join(format!("crowdb-chunkdb-e2e-{}.log", std::process::id()));
+        let log_path = crate::test_dirs::test_log_dir()
+            .join(format!("crowdb-chunkdb-e2e-{}-{inst}.log", std::process::id()));
         let log_file = std::fs::File::create(&log_path).expect("create log file");
         let log_file2 = log_file.try_clone().expect("clone log file");
 
         let mut cmd = Command::new(&bin);
+        let test_log_dir = crate::test_dirs::test_log_dir();
         cmd.args(["--config", config_path.to_str().unwrap()])
+            .arg("--log-dir")
+            .arg(test_log_dir.to_str().unwrap())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file2));
 

@@ -147,6 +147,7 @@ extern "C" {
     pub fn ct_shutdown_logging();
     pub fn ct_snapshot(t: *mut ct_tree, out_last_applied: *mut u64) -> c_int;
     pub fn ct_last_applied_slot(t: *const ct_tree) -> u64;
+    pub fn ct_frozen_table_count(t: *const ct_tree) -> usize;
     pub fn ct_set_gc_watermark(t: *mut ct_tree, snapshot_slot: u64, safe_slot: u64);
     pub fn ct_collect_garbage(t: *mut ct_tree, out_stats: *mut ct_gc_stats) -> c_int;
     pub fn ct_io_failed(t: *const ct_tree) -> c_int;

@@ -45,16 +45,12 @@ pub struct BatchStats {
 /// to compute per-window deltas for the metrics registry.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BlockDeviceSnapshot {
-    pub logical_bytes_written: u64,
-    pub physical_bytes_written: u64,
     pub rmw_count: u64,
 }
 
 /// Registered counter handles for block device metrics. Stored on
 /// `WalEngine` via `OnceLock` and polled by the engine collector.
 pub struct BlockDeviceCounterHandles {
-    pub logical_bytes: Arc<Counter>,
-    pub physical_bytes: Arc<Counter>,
     pub rmw: Arc<Counter>,
 }
 
@@ -187,6 +183,13 @@ impl WalEngine {
             };
             let record_format = select_record_format(config.wal_record_format);
 
+            // Skip runtime (per-write) fsync when --no-fsync is set, or
+            // on macOS where fsync is prohibitively slow (APFS semantics
+            // make sync_all ~10x slower than Linux). The shutdown flush
+            // (flush_all) always does a real fsync regardless of this
+            // flag, so data is still persisted at shutdown.
+            let skip_runtime_fsync = config.wal_skip_fsync || cfg!(target_os = "macos");
+
             let (writer_tx, task) = spawn_pipeline_writer(
                 idx,
                 backend.clone(),
@@ -202,7 +205,7 @@ impl WalEngine {
                 flush_count.clone(),
                 records_flushed.clone(),
                 watchdog_wakeups.clone(),
-                config.wal_skip_fsync,
+                skip_runtime_fsync,
                 Arc::clone(&fsync_summary),
                 Arc::clone(&write_bandwidth),
             );
@@ -343,8 +346,9 @@ impl WalEngine {
     }
 
     /// Durably flush all active segments (real `fsync`/`sync_all`). Used
-    /// during shutdown to persist WAL data even when `--no-fsync` is set.
-    /// Does NOT seal or rotate segments — just forces a durable flush.
+    /// during shutdown to persist WAL data to disk. Always durable —
+    /// even when `--no-fsync` is set, the final shutdown flush persists
+    /// data so a restart can recover. Does NOT seal or rotate segments.
     ///
     /// # Errors
     /// Returns IO error if flushing any segment fails.
@@ -481,13 +485,9 @@ impl WalEngine {
         let _handles = self.block_device_counters.get()?;
         match self.backend.as_ref() {
             IoBackend::BlockDevice(dev) => Some(BlockDeviceSnapshot {
-                logical_bytes_written: dev.logical_bytes_written(),
-                physical_bytes_written: dev.physical_bytes_written(),
                 rmw_count: dev.rmw_count(),
             }),
             IoBackend::MemBlock(dev) => Some(BlockDeviceSnapshot {
-                logical_bytes_written: dev.logical_bytes_written(),
-                physical_bytes_written: dev.physical_bytes_written(),
                 rmw_count: dev.rmw_count(),
             }),
             IoBackend::File => None,

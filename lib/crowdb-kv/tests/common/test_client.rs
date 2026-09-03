@@ -259,4 +259,26 @@ impl TestPxClient {
         };
         Ok(TestResponse(resp))
     }
+
+    /// Test-only: send raw control bytes as an `EAcceptRequest` frame
+    /// and return the raw response control buffer. Used by R120 to
+    /// verify the server rejects malformed Accept frames.
+    #[cfg(feature = "test-util")]
+    pub async fn send_raw_accept(&self, control: Vec<u8>) -> Result<Vec<u8>, TestRpcStatus> {
+        use crowdb_protocol::fb::FBMsgType;
+        use crowdb_rpc_ffi::Buffer;
+        let resp = self
+            .transport
+            .send_raw_request(
+                &self.endpoint,
+                FBMsgType::EAcceptRequest.0 as u16,
+                Buffer::from_bytes(&control),
+            )
+            .await
+            .map_err(status)?;
+        let ctrl = resp
+            .control
+            .ok_or_else(|| status("accept response missing control buffer"))?;
+        Ok(ctrl.bytes().to_vec())
+    }
 }

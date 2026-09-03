@@ -74,8 +74,11 @@ void crowdb_rpc_server_set_quickack(crowdb_rpc_server_t server, int enabled);
 // Event-write mode. Default 0 (direct writev on caller thread).
 // Set to 1 to notify I/O worker to drain + writev (better batching,
 // adds epoll-wake latency).
-void              crowdb_rpc_server_set_event_write(crowdb_rpc_server_t server, int enabled);
-void              crowdb_rpc_server_destroy(crowdb_rpc_server_t server);
+void crowdb_rpc_server_set_event_write(crowdb_rpc_server_t server, int enabled);
+void crowdb_rpc_server_destroy(crowdb_rpc_server_t server);
+// Clear all registered handlers. Called during shutdown to break
+// reference cycles (Rust handler closures capture Arc<RpcServer>).
+void              crowdb_rpc_server_clear_handlers(crowdb_rpc_server_t server);
 crowdb_rpc_status crowdb_rpc_server_listen(crowdb_rpc_server_t server, const char *addr, int port);
 void              crowdb_rpc_server_start(crowdb_rpc_server_t server);
 void              crowdb_rpc_server_stop(crowdb_rpc_server_t server);
@@ -107,9 +110,10 @@ void crowdb_rpc_server_transport_stats(crowdb_rpc_server_t server, crowdb_rpc_tr
 // ABI compatibility).
 typedef struct crowdb_rpc_client_counters
 {
-    uint64_t submit_fail; // send() submit failed
-    uint64_t resp_missed; // on_response: late/dup/wrong_id/dropped
-    uint64_t reaped;      // reaper timed out (slab or map)
+    uint64_t submit_fail;  // send() submit failed
+    uint64_t submit_retry; // coroutine submit failed then retried
+    uint64_t resp_missed;  // on_response: late/dup/wrong_id/dropped
+    uint64_t reaped;       // reaper timed out (slab or map)
 } crowdb_rpc_client_counters_t;
 
 void crowdb_rpc_client_get_counters(crowdb_rpc_client_t client, crowdb_rpc_client_counters_t *out);
@@ -148,6 +152,10 @@ void crowdb_rpc_client_start_reaper(crowdb_rpc_client_t client, uint64_t timeout
 // No-op if not running.
 void crowdb_rpc_client_stop_reaper(crowdb_rpc_client_t client);
 
+// Dump all pending request IDs + deadlines to the log. For diagnostics:
+// call when the bench stops to see which requests are still in-flight.
+void crowdb_rpc_client_dump_pending(crowdb_rpc_client_t client);
+
 // Callback-based call: reserves a slab slot by request_id,
 // stores the callback + user_data, and submits. The callback is invoked
 // directly on the I/O worker thread when the response arrives — no
@@ -173,6 +181,12 @@ crowdb_rpc_status crowdb_rpc_client_send_conn(crowdb_rpc_client_t client, crowdb
 
 // ── Connection (for client-side use) ──────────────────────────────
 crowdb_rpc_conn_t crowdb_rpc_connect(crowdb_rpc_server_t server, const char *addr, int port);
+// Destroy a connection wrapper created by crowdb_rpc_connect. Releases
+// the shared_ptr<Connection> held inside the wrapper, allowing the
+// transport to reclaim the connection when all references are gone.
+// No-op on null. Do NOT call this on handler conn_handle values (those
+// are raw Connection* pointers, not crowdb_rpc_conn_t).
+void crowdb_rpc_conn_destroy(crowdb_rpc_conn_t conn);
 
 // ── Built-in handlers ─────────────────────────────────────────────
 
@@ -251,6 +265,9 @@ crowdb_rpc_status crowdb_rpc_server_submit_response_buffer(crowdb_rpc_server_t s
 // captures the server handle). The callback must be non-blocking.
 void crowdb_rpc_client_register_handler(crowdb_rpc_client_t client, uint16_t msg_type, crowdb_rpc_handler_fn callback,
                                         void *user_data);
+// Clear all registered client-side handlers. Called during shutdown
+// to break reference cycles (Rust handler closures capture Arcs).
+void crowdb_rpc_client_clear_handlers(crowdb_rpc_client_t client);
 
 // Set the transport on a client for submitting UnknownMessage responses
 // when no handler matches an incoming request msg_type. The transport

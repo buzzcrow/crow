@@ -49,7 +49,7 @@ async fn start_fake(node_id: u64, store_id: u64) -> FakeServer {
                                     "id": match id { 1 => 100u64, 2 => 200, _ => 300 },
                                     "role": if id == 1 { "Leader" } else { "Follower" },
                                     "voting": true,
-                                    "kv_store": { "key_count": 0 }
+                                    "kv_store": {}
                                 },
                                 "remotes": []
                             }]

@@ -16,10 +16,11 @@ const apiBase = consoleBaseURL();
 
 async function openKvPanel(page: any, storeId: string, groupId?: string) {
   await step('kv: goto', () => page.goto('/'));
-  await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
-  await page.getByLabel('Store').selectOption(storeId);
+  await page.getByTestId('domain-kv').click();
+  await page.getByTestId('kv-tab-kv').click();
+  await page.getByTestId('kv-store-select').selectOption(storeId);
   if (groupId !== undefined) {
-    await page.getByLabel('Group').selectOption(groupId);
+    await page.getByTestId('kv-group-select').selectOption(groupId);
   }
 }
 
@@ -217,14 +218,14 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
     await openKvPanel(page, '261');
 
     // Put keys in each group
-    await page.getByLabel('Group').selectOption('2610');
+    await page.getByTestId('kv-group-select').selectOption('2610');
     await putKey(page, 'all-groups-key-0', 'val-0');
 
-    await page.getByLabel('Group').selectOption('2611');
+    await page.getByTestId('kv-group-select').selectOption('2611');
     await putKey(page, 'all-groups-key-1', 'val-1');
 
     // Switch to All Groups
-    await page.getByLabel('Group').selectOption('All Groups');
+    await page.getByTestId('kv-group-select').selectOption('All Groups');
 
     // Get should be disabled in All Groups mode
     await expect(page.getByRole('button', { name: /^Get$/ })).toBeDisabled();

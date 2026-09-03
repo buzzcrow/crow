@@ -59,11 +59,49 @@ AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04.
 | 16T | MinSlot | 16:16 | 236,501 | 66 | 64 | 109 | 150 |
 | 32T | Linearizable | 32:32 | 271,184 | 116 | 112 | 221 | 273 |
 | 32T | MinSlot | 32:32 | 265,130 | 119 | 116 | 206 | 276 |
-| 6T fan-in | MinSlot | 6:3 | 89,795 | 66 | — | 113 | — |
 
-At 6T, MinSlot is 24.0% faster. The modes are within 1.6% at 16T, and
-Linearizable is 2.3% faster at 32T. The 6T:3C fan-in run is error-free and
-reaches 93.6% of the 6T:6C MinSlot result.
+### Linux — 2026-09-02
+
+AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04. Same hw as 2026-08-28
+but with the crowdb-tree engine changes: B-tree page-count metrics
+(O(1) leaf/inner gauges at SMO sites via relaxed atomics) and the flush
+re-check loop. p50/p99 use coarser histogram buckets (100/500us
+increments) than the 2026-08-28 run. `lin_1t` had 144 errors from a
+lease-expiry burst at startup (not storage-related). Not strictly better
+than 2026-08-28 — reference retained per regression policy.
+
+| Config | Mode | T:C | ops/s | avg us | p50 us | p99 us | Errors |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1T | Linearizable | 1:1 | 13,825 | 70 | 100 | 500 | 144 |
+| 1T | MinSlot | 1:1 | 12,196 | 79 | 100 | 500 | 0 |
+| 6T | Linearizable | 6:6 | 67,159 | 86 | 100 | 500 | 0 |
+| 6T | MinSlot | 6:6 | 96,356 | 60 | 100 | 100 | 0 |
+| 16T | Linearizable | 16:16 | 231,137 | 66 | 100 | 500 | 0 |
+| 16T | MinSlot | 16:16 | 224,174 | 67 | 100 | 500 | 0 |
+| 32T | Linearizable | 32:32 | 265,939 | 116 | 500 | 500 | 0 |
+| 32T | MinSlot | 32:32 | 256,674 | 119 | 500 | 500 | 0 |
+
+### Linux — 2026-09-02 (group 1, mem-block WAL wipe fix)
+
+AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04. Same hw as prior runs
+but bench now runs on group 1 (group 0 sysdata preserved). Numbers are
+within run-to-run noise of the prior 2026-09-02 run (all within ±2.6%).
+`lin_1t` still has the startup lease-expiry burst (1188 errors, corr=0)
+— pre-existing, not related to the group-1 change.
+
+| Config | Mode | T:C | ops/s | avg us | p50 us | p99 us | Errors |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1T | Linearizable | 1:1 | 14,493 | 66 | 100 | 500 | 1188 |
+| 1T | MinSlot | 1:1 | 12,368 | 78 | 100 | 500 | 0 |
+| 6T | Linearizable | 6:6 | 68,923 | 83 | 100 | 500 | 0 |
+| 6T | MinSlot | 6:6 | 97,380 | 59 | 100 | 100 | 0 |
+| 16T | Linearizable | 16:16 | 232,388 | 65 | 100 | 500 | 0 |
+| 16T | MinSlot | 16:16 | 228,956 | 66 | 100 | 500 | 0 |
+| 32T | Linearizable | 32:32 | 268,557 | 114 | 500 | 500 | 0 |
+| 32T | MinSlot | 32:32 | 260,685 | 116 | 500 | 500 | 0 |
+
+Correctness verification (verify-bytes=8): lin_16t 234,234 ops/s
+(corr=0), minslot_16t 228,800 ops/s (corr=0).
 
 ### macOS — 2026-08-19
 
@@ -79,7 +117,6 @@ Apple M5 Pro, 18c, arm64, macOS 26.5.
 | 16T | MinSlot | 16:16 | 107,455 | 147 | 145 | 235 | 281 |
 | 32T | Linearizable | 32:32 | 119,473 | 265 | 260 | 418 | 512 |
 | 32T | MinSlot | 32:32 | 113,270 | 280 | 278 | 432 | 521 |
-| 6T fan-in | MinSlot | 6:3 | 74,752 | 79 | — | 151 | — |
 
 Linux is slower at 1T but faster from 6T onward. At 32T it reaches 2.3x the
 macOS Linearizable throughput and 2.4x the MinSlot throughput. The platforms
@@ -150,9 +187,18 @@ positive throughput deltas and negative p99 deltas are improvements.
 | minslot_16t | 101,871 | 236,501 | +132.2% | 268 | 109 | −59.3% |
 | lin_32t | 144,262 | 271,184 | +88.0% | 498 | 221 | −55.6% |
 | minslot_32t | 138,610 | 265,130 | +91.3% | 532 | 206 | −61.3% |
-| minslot_6t_2to1 | 52,228 | 89,795 | +71.9% | 172 | 113 | −34.3% |
 | lin_16t_verify | 105,781 | 233,716 | +120.9% | 252 | 114 | −54.8% |
 | minslot_16t_verify | 101,552 | 233,090 | +129.5% | 268 | 111 | −58.6% |
 
 Largest throughput gain: MinSlot 16T at +132.2%. Largest p99 improvement:
 MinSlot 32T at −61.3%.
+
+### B-tree page-count metrics + flush re-check loop (2026-09-02)
+
+Same crowdb-tree engine changes as the write benchmark (page-count
+gauges + flush re-check loop). Read results are not strictly better than
+the 2026-08-28 reference: 1T is within noise (+2.4% lin, +3.8% minslot),
+but mid-range (6T-32T) is 1-13% lower. The `lin_1t` config had 144
+errors from a lease-expiry burst at startup (consensus-layer, not
+storage). Reference retained per regression policy. See the
+"Linux — 2026-09-02" subsection above for the full table.

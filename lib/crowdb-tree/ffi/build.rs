@@ -191,6 +191,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
     }
 
+    // AddressSanitizer + LeakSanitizer (gated by CROWDB_ASAN=1).
+    // libasan is also linked by crowdb-rpc-ffi; duplicate -lasan is
+    // harmless (linker deduplicates).
+    println!("cargo:rerun-if-env-changed=CROWDB_ASAN");
+    let asan = std::env::var("CROWDB_ASAN").as_deref() == Ok("1");
+    if asan {
+        build.flag("-fsanitize=address");
+        build.flag("-fno-omit-frame-pointer");
+        if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
+            let lib_dir = format!("{prefix}/lib");
+            println!("cargo:rustc-link-search=native={lib_dir}");
+            println!("cargo:rustc-link-lib=dylib=asan");
+        }
+    }
+
     build.compile("crowdb-tree");
 
     if let Some(dir) = have_lz4 {

@@ -16,6 +16,7 @@
 // CLOCK eviction, dirty write-back, stats.
 #pragma once
 
+#include "crowdb-common/metrics/metrics.h"
 #include "crowdb-tree/page_store.h"
 #include "crowdb-tree/page_types.h" // kInvalidPageId
 #include "crowdb-tree/status.h"
@@ -35,12 +36,16 @@ namespace crowdb::common::metrics
 {
 class Counter;
 class Gauge;
+class LatencySummary;
+class Bandwidth;
 } // namespace crowdb::common::metrics
 
 namespace crowdb::tree
 {
+using crowdb::common::metrics::Bandwidth;
 using crowdb::common::metrics::Counter;
 using crowdb::common::metrics::Gauge;
+using crowdb::common::metrics::LatencySummary;
 
 using PageAddr = uint64_t;
 
@@ -150,15 +155,15 @@ class BufferPool
     [[nodiscard]] Stats stats() const;
 
     // Wire optional metrics handles. All pointers must outlive the pool.
-    void set_metrics(Counter *hits, Counter *misses, Counter *evictions, Counter *writebacks, Gauge *resident,
-                     Gauge *dirty)
+    void set_metrics(Counter *evictions, Counter *writebacks, Gauge *resident, Gauge *dirty,
+                     LatencySummary *writeback_l, Bandwidth *page_writeback_bw)
     {
-        m_hits_       = hits;
-        m_misses_     = misses;
-        m_evictions_  = evictions;
-        m_writebacks_ = writebacks;
-        m_resident_   = resident;
-        m_dirty_      = dirty;
+        m_evictions_         = evictions;
+        m_writebacks_        = writebacks;
+        m_resident_          = resident;
+        m_dirty_             = dirty;
+        m_writeback_l_       = writeback_l;
+        m_page_writeback_bw_ = page_writeback_bw;
     }
 
   private:
@@ -205,12 +210,12 @@ class BufferPool
     Stats stats_;
 
     // Optional metrics handles (null if not wired).
-    Counter *m_hits_       = nullptr;
-    Counter *m_misses_     = nullptr;
-    Counter *m_evictions_  = nullptr;
-    Counter *m_writebacks_ = nullptr;
-    Gauge   *m_resident_   = nullptr;
-    Gauge   *m_dirty_      = nullptr;
+    Counter        *m_evictions_         = nullptr;
+    Counter        *m_writebacks_        = nullptr;
+    Gauge          *m_resident_          = nullptr;
+    Gauge          *m_dirty_             = nullptr;
+    LatencySummary *m_writeback_l_       = nullptr;
+    Bandwidth      *m_page_writeback_bw_ = nullptr;
 };
 
 } // namespace crowdb::tree

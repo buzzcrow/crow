@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 
 /// Eviction hook: called with the set of `(store_id, group_id)` keys
 /// that disappeared from the fresh `/topology` body. Used by
-/// `CrowdbClient` to evict stale `write_slot_highwater` entries.
+/// `CrowdbKvClient` to evict stale `write_slot_highwater` entries.
 pub type EvictionHook = Arc<dyn Fn(&HashSet<(u64, u64)>) + Send + Sync>;
 
 pub struct TopologyCache {
@@ -39,7 +39,7 @@ pub struct TopologyCache {
     /// request (: "not a storm").
     refresh_gate: AsyncMutex<Instant>,
     /// Optional eviction hook called with groups that disappeared from
-    /// a fresh `/topology` body. Set by `CrowdbClient::new` to evict
+    /// a fresh `/topology` body. Set by `CrowdbKvClient::new` to evict
     /// stale `write_slot_highwater` entries.
     eviction_hook: Option<EvictionHook>,
 }
@@ -139,6 +139,9 @@ impl TopologyCache {
 
     async fn fetch_and_merge(&self) -> Result<()> {
         let seeds = self.seeds.read().unwrap().clone();
+        if seeds.is_empty() {
+            return Err(Error::NoSeeds);
+        }
         let mut last_err = None;
         for seed in &seeds {
             let url = format!("{}/topology", seed.trim_end_matches('/'));
@@ -154,7 +157,7 @@ impl TopologyCache {
             }
         }
         Err(Error::Topology(
-            last_err.unwrap_or_else(|| "no seeds configured".to_string()),
+            last_err.unwrap_or_else(|| "all seeds returned errors".to_string()),
         ))
     }
 
@@ -162,6 +165,10 @@ impl TopologyCache {
         // Collect the set of (store_id, group_id) present in the fresh
         // body so we can evict stale entries after the insert loop.
         let mut fresh_keys: HashSet<(u64, u64)> = HashSet::new();
+        // Collect store_ids present in the fresh body so eviction only
+        // fires for stores the seed actually hosts — a seed that doesn't
+        // host a store shouldn't evict groups in it (see eviction below).
+        let fresh_stores: HashSet<u64> = body.stores.iter().map(|s| s.store_id).collect();
         for store in &body.stores {
             for group in &store.groups {
                 fresh_keys.insert((store.store_id, group.group_id));
@@ -175,6 +182,15 @@ impl TopologyCache {
             let local_endpoint = store.listen_addr.clone();
             for group in store.groups {
                 let leader_id = group.leader_id;
+                let key = (store.store_id, group.group_id);
+                if leader_id == 0 {
+                    // No leader elected (mid-election). Remove any stale
+                    // cached endpoint so the client doesn't keep sending to
+                    // a replica that stepped down. The client's retry loop
+                    // will refresh until a new leader appears.
+                    self.leaders.remove(&key);
+                    continue;
+                }
                 let endpoint = if group.local_replica.id == leader_id {
                     local_endpoint.clone()
                 } else {
@@ -185,7 +201,7 @@ impl TopologyCache {
                         .map(|r| r.endpoint.clone())
                 };
                 if let Some(endpoint) = endpoint {
-                    self.leaders.insert((store.store_id, group.group_id), endpoint);
+                    self.leaders.insert(key, endpoint);
                 }
 
                 // Full replica endpoint list for the `AnyReplica`
@@ -209,14 +225,21 @@ impl TopologyCache {
         // Evict stale entries: groups present in the cache but absent
         // from the fresh body. A removed group's stale leader endpoint
         // self-heals via `NotLeaderHint`, but evicting keeps the cache
-        // clean. The eviction hook lets `CrowdbClient` evict stale
+        // clean. The eviction hook lets `CrowdbKvClient` evict stale
         // `write_slot_highwater` entries — a stale `min_slot`
         // high-watermark does NOT self-heal (silent empty reads forever).
+        //
+        // Only evict groups for stores that ARE present in the fresh body.
+        // A seed that doesn't host a store shouldn't be authoritative for
+        // evicting groups in that store — otherwise a topology refresh
+        // from a non-store-0 seed would evict group 0's leader, causing
+        // "no known leader" on the next sysdata write.
         let evicted: Vec<(u64, u64)> = self
             .leaders
             .iter()
             .filter_map(|e| {
-                if fresh_keys.contains(e.key()) {
+                let (sid, _gid) = *e.key();
+                if fresh_keys.contains(e.key()) || !fresh_stores.contains(&sid) {
                     None
                 } else {
                     Some(*e.key())
@@ -285,7 +308,7 @@ mod tests {
                         "role": "leader",
                         "voting": true,
                         "status": "ok",
-                        "kv_store": { "key_count": 0, "engine_healthy": true }
+                        "kv_store": { "engine_healthy": true }
                     },
                     "remotes": []
                 }]
@@ -302,6 +325,60 @@ mod tests {
         cache.refresh().await.unwrap();
 
         assert_eq!(cache.leader(7, 42), Some("http://10.0.0.1:9001".to_string()));
+    }
+
+    /// A topology refresh that reports `leader_id == 0` (mid-election)
+    /// must evict a previously-cached leader endpoint. Without this, the
+    /// client keeps sending to a replica that stepped down and never
+    /// discovers the new leader once election completes.
+    #[tokio::test]
+    async fn refresh_with_no_leader_evicts_stale_cached_leader() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let seed_leader =
+            spawn_topology_server(sample_topology(1, 1, "http://10.0.0.1:9001"), counter.clone()).await;
+        let cache = TopologyCache::new(vec![seed_leader], Duration::from_millis(50));
+
+        // First refresh: leader is present.
+        cache.refresh().await.unwrap();
+        assert_eq!(cache.leader(1, 1), Some("http://10.0.0.1:9001".to_string()));
+
+        // Swap seed to a server reporting leader_id == 0 (mid-election).
+        let no_leader_body = serde_json::json!({
+            "stores": [{
+                "store_id": 1,
+                "listen_addr": "http://10.0.0.1:9001",
+                "status": "ok",
+                "groups": [{
+                    "group_id": 1,
+                    "leader_id": 0,
+                    "local_replica_id": 1,
+                    "force_classic": false,
+                    "status": "ok",
+                    "local_replica": {
+                        "id": 1,
+                        "role": "follower",
+                        "voting": true,
+                        "status": "ok",
+                        "kv_store": { "engine_healthy": true }
+                    },
+                    "remotes": []
+                }]
+            }]
+        });
+        let seed_no_leader = spawn_topology_server(no_leader_body, Arc::new(AtomicUsize::new(0))).await;
+        {
+            let mut seeds = cache.seeds_for_test();
+            seeds[0] = seed_no_leader;
+            cache.set_seeds(seeds);
+        }
+
+        // Wait past the coalescing window so the next refresh actually fetches.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        cache.refresh().await.unwrap();
+
+        // Stale leader must be gone — the client should see "no leader"
+        // and retry until a new leader is elected.
+        assert_eq!(cache.leader(1, 1), None);
     }
 
     #[tokio::test]
@@ -347,7 +424,7 @@ mod tests {
                         "role": "leader",
                         "voting": true,
                         "status": "ok",
-                        "kv_store": { "key_count": 0, "engine_healthy": true }
+                        "kv_store": { "engine_healthy": true }
                     },
                     "remotes": []
                 })

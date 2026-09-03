@@ -106,3 +106,28 @@ TEST(Consolidation, OldChainRetiredViaEpoch)
     t.epoch().try_reclaim();
     EXPECT_EQ(t.epoch().pending_retired(), 0U);
 }
+
+// Retired count drops after reclaim: consolidation retires pages, the
+// pending count is > 0 while a guard holds them, then drops to 0 after the
+// guard is released and try_reclaim() runs.
+TEST(Consolidation, RetiredCountAfterFold)
+{
+    Options opt;
+    opt.max_delta_len = 2;
+    Crowdbtree t(opt);
+    // Build a small tree with a few flushes so the delta chain grows.
+    for (uint64_t s = 1; s <= 3; ++s) {
+        ASSERT_TRUE(t.apply(s, put_one("k" + std::to_string(s), "v")).ok());
+        ASSERT_TRUE(t.flush().ok());
+    }
+    // Hold a guard so retired pages cannot be freed during consolidation.
+    {
+        EpochManager::Guard g = t.epoch().enter();
+        ASSERT_TRUE(t.apply(4, put_one("k4", "v")).ok());
+        ASSERT_TRUE(t.flush().ok()); // consolidation retires the old chain
+        EXPECT_GT(t.epoch().pending_retired(), 0U);
+    }
+    // Guard dropped -> retired pages become reclaimable.
+    t.epoch().try_reclaim();
+    EXPECT_EQ(t.epoch().pending_retired(), 0U);
+}

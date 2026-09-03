@@ -22,11 +22,11 @@ use crowdb_protocol::common_type::{GroupId, ReplicaId, StoreId};
 use crowdb_protocol::key::{KvGroupKey, KvReplicaKey, KvStoreKey, TextKey};
 use crowdb_protocol::mgmt::{
     AddGroupRequest, AddStoreRequest, GroupSummary, RemoteReplicaInfo, StepDownRequest, StepDownResult,
-    StoreDetail, StoreSummary, SystemInitRequest, SystemInitResponse,
+    StoreDetail, StoreSummary, SystemInitRequest, SystemInitResponse, WipeResult,
 };
 
 use crate::client::{GetOutcome, ScanOutcome};
-use crate::{CrowdbClient, Error, Result};
+use crate::{CrowdbKvClient, Error, Result};
 
 const G0_STORE: u64 = 0;
 const G0_GROUP: u64 = 0;
@@ -39,7 +39,7 @@ fn now_ms() -> u64 {
 
 // ── helpers ─────────────────────────────────────────────────────
 
-async fn put_json<T: serde::Serialize>(kv: &CrowdbClient, key: &str, value: &T) -> Result<()> {
+async fn put_json<T: serde::Serialize>(kv: &CrowdbKvClient, key: &str, value: &T) -> Result<()> {
     let payload = serde_json::to_vec(value).map_err(|e| Error::SysdataDecode {
         key: key.to_string(),
         reason: e.to_string(),
@@ -49,7 +49,7 @@ async fn put_json<T: serde::Serialize>(kv: &CrowdbClient, key: &str, value: &T) 
         .map(|_| ())
 }
 
-async fn get_json<T: serde::de::DeserializeOwned>(kv: &CrowdbClient, key: &str) -> Result<Option<T>> {
+async fn get_json<T: serde::de::DeserializeOwned>(kv: &CrowdbKvClient, key: &str) -> Result<Option<T>> {
     match kv
         .get(
             G0_STORE,
@@ -72,7 +72,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(kv: &CrowdbClient, key: &str) 
 }
 
 async fn scan_prefix<T: serde::de::DeserializeOwned>(
-    kv: &CrowdbClient,
+    kv: &CrowdbKvClient,
     prefix: &str,
 ) -> Result<Vec<(String, T)>> {
     let mut out: Vec<(String, T)> = Vec::new();
@@ -122,28 +122,29 @@ async fn scan_prefix<T: serde::de::DeserializeOwned>(
 /// Client for the KV-cluster topology records (store/group/replica)
 /// in group 0.
 ///
-/// All methods target store 0, group 0. The wrapped `CrowdbClient`
+/// All methods target store 0, group 0. The wrapped `CrowdbKvClient`
 /// must have its topology seeded with a group-0 leader endpoint.
+#[derive(Clone)]
 pub struct KVClusterMetaClient {
-    kv: Arc<CrowdbClient>,
+    kv: Arc<CrowdbKvClient>,
 }
 
 impl KVClusterMetaClient {
-    /// Wrap a `CrowdbClient` for group-0 KV-cluster topology access.
+    /// Wrap a `CrowdbKvClient` for group-0 KV-cluster topology access.
     #[must_use]
-    pub fn new(kv: CrowdbClient) -> Self {
+    pub fn new(kv: CrowdbKvClient) -> Self {
         Self { kv: Arc::new(kv) }
     }
 
-    /// Wrap an already-shared `CrowdbClient`.
+    /// Wrap an already-shared `CrowdbKvClient`.
     #[must_use]
-    pub fn from_shared(kv: Arc<CrowdbClient>) -> Self {
+    pub fn from_shared(kv: Arc<CrowdbKvClient>) -> Self {
         Self { kv }
     }
 
-    /// Access the underlying `CrowdbClient`.
+    /// Access the underlying `CrowdbKvClient`.
     #[must_use]
-    pub fn kv(&self) -> &CrowdbClient {
+    pub fn kv(&self) -> &CrowdbKvClient {
         &self.kv
     }
 
@@ -283,7 +284,7 @@ impl KVClusterMetaClient {
 /// the kv-server HTTP mgmt API for live runtime state.
 ///
 /// The `base_url` is the kv-server's HTTP management base URL
-/// (e.g. `http://127.0.0.1:9910`).
+/// (e.g. `http://127.0.0.1:10000`).
 pub struct KVClusterAdmin {
     meta: KVClusterMetaClient,
     http: reqwest::Client,
@@ -397,6 +398,25 @@ impl KVClusterAdmin {
     ) -> Result<StepDownResult> {
         self.post_json(&format!("/stores/{store_id}/groups/{group_id}/step-down"), req)
             .await
+    }
+
+    // ── lifecycle: system init ──────────────────────────────────
+
+    // ── lifecycle: wipe user data ────────────────────────────────
+
+    /// `POST /stores/{sid}/groups/{gid}/wipe-user-data`.
+    ///
+    /// Drops and recreates the WAL + engine user data for the group
+    /// on the receiving node, preserving group0 sysdata + store/
+    /// group/replica topology. `accepted` is `false` when the
+    /// replica had no WAL wired (no-op). The caller is responsible
+    /// for waiting for re-election + health after wiping every node.
+    pub async fn wipe_user_data(&self, store_id: StoreId, group_id: GroupId) -> Result<WipeResult> {
+        self.post_json(
+            &format!("/stores/{store_id}/groups/{group_id}/wipe-user-data"),
+            &serde_json::json!({}),
+        )
+        .await
     }
 
     // ── lifecycle: system init ──────────────────────────────────

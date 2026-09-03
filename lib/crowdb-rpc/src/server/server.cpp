@@ -3,6 +3,7 @@
 
 #include "crowdb-rpc/server/server.h"
 
+#include "crowdb-common/log.h"
 #include "crowdb-rpc/client/client.h" // RpcClient, RpcError (for request_client_ + fail_all)
 #include "crowdb-rpc/rpc_metrics.h"
 #include "crowdb-rpc/server/handler.h"
@@ -12,14 +13,11 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <cerrno>
-#include <chrono>
 #include <cstring>
-#include <thread>
 
 namespace crowdb::rpc
 {
@@ -37,6 +35,10 @@ RpcServer::RpcServer(BufferPool *pool, uint32_t io_engines, uint32_t io_workers)
 RpcServer::~RpcServer()
 {
     stop();
+    // Mark as dead before destroying the transport so that any
+    // callback gauge (e.g. conn_count_gauge) that captures a raw
+    // transport pointer returns 0 instead of accessing freed memory.
+    alive_->store(false, std::memory_order_release);
     if (owns_pool_) {
         delete pool_;
     }
@@ -79,6 +81,7 @@ bool RpcServer::listen(const std::string &addr, int port)
     if (::getsockname(listen_fd_, reinterpret_cast<struct sockaddr *>(&bound), &bound_len) == 0) {
         listen_port_ = ntohs(bound.sin_port);
     }
+    CRB_LOG_INFO("rpc server: listening on {}:{}", addr, listen_port_);
 
     // Register built-in handlers.
     handlers_.register_handler(static_cast<uint16_t>(proto::FBMsgType_EConnectionPingRequest), handle_ping);
@@ -96,14 +99,19 @@ void RpcServer::start()
     if (running_.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
+    CRB_LOG_INFO("rpc server: starting");
     transport_->start();
-    // Block until the acceptor is ready to accept connections.
-    // This eliminates the race where callers connect before the
-    // acceptor thread has entered its poll() loop.
-    std::promise<void> ready;
-    auto               ready_future = ready.get_future();
-    acceptor_thread_ = std::thread([this, ready = std::move(ready)]() mutable { acceptor_loop(std::move(ready)); });
-    ready_future.wait();
+    // Register the listen fd with the I/O worker's epoll loop instead of
+    // a dedicated acceptor thread. The worker's epoll loop is already
+    // woken by I/O events, so accept is not starved under CPU contention.
+    if (listen_fd_ >= 0) {
+        // Make the listen socket non-blocking for edge-triggered accept.
+        int lflags = fcntl(listen_fd_, F_GETFL, 0);
+        fcntl(listen_fd_, F_SETFL, lflags | O_NONBLOCK);
+
+        transport_->set_accept_handler([this](int fd) { handle_accept(fd); });
+        transport_->add_listen_fd(listen_fd_);
+    }
 }
 
 void RpcServer::stop()
@@ -111,14 +119,10 @@ void RpcServer::stop()
     if (!running_.exchange(false, std::memory_order_acq_rel)) {
         return;
     }
-    // Join the acceptor before closing listen_fd_ — on Linux, close() on
-    // a socket another thread is blocked in accept() on does NOT unblock
-    // it (unlike macOS). The acceptor uses poll() with a 100ms timeout,
-    // so it checks running_ and exits promptly. Closing the fd here would
-    // race with the acceptor's poll().
-    if (acceptor_thread_.joinable()) {
-        acceptor_thread_.join();
-    }
+    CRB_LOG_INFO("rpc server: stopping");
+    // Clear the accept handler before closing the listen fd so the
+    // worker doesn't call accept() on a closed fd during shutdown.
+    transport_->set_accept_handler(nullptr);
     if (listen_fd_ >= 0) {
         ::close(listen_fd_);
         listen_fd_ = -1;
@@ -126,51 +130,28 @@ void RpcServer::stop()
     transport_->stop();
 }
 
-void RpcServer::acceptor_loop(std::promise<void> ready)
+void RpcServer::handle_accept(int listen_fd)
 {
-    // Client-only server (no listen): sleep-loop on running_ so the
-    // acceptor thread doesn't busy-spin. On macOS, poll() with fd=-1
-    // returns immediately (POLLNVAL), causing 100% CPU; on Linux it
-    // times out, but either way there is nothing to accept.
-    if (listen_fd_ < 0) {
-        ready.set_value();
-        while (running_.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        return;
-    }
-
-    // Make the listen socket non-blocking and use poll() with a short
-    // timeout. On Linux, close(listen_fd) from another thread does NOT
-    // unblock a thread blocked in accept() (unlike macOS). The poll()
-    // timeout lets the acceptor check running_ periodically for shutdown.
-    int lflags = fcntl(listen_fd_, F_GETFL, 0);
-    fcntl(listen_fd_, F_SETFL, lflags | O_NONBLOCK);
-
-    // Signal readiness after the listen fd is non-blocking — the acceptor
-    // is now ready to poll() + accept() connections.
-    ready.set_value();
-
+    // Loop accept() until EAGAIN — drains the listen backlog in one
+    // wakeup. Called on the I/O worker thread.
     while (running_.load(std::memory_order_relaxed)) {
-        struct pollfd pfd;
-        pfd.fd      = listen_fd_;
-        pfd.events  = POLLIN;
-        pfd.revents = 0;
-        int ret     = ::poll(&pfd, 1, 100); // 100ms timeout
-        if (ret <= 0) {
-            // Timeout (ret == 0) or error — loop back and check running_.
-            continue;
-        }
-
-        int fd = ::accept(listen_fd_, nullptr, nullptr);
+        int fd = ::accept(listen_fd, nullptr, nullptr);
         if (fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                continue;
+                return;
             }
-            if (!running_.load(std::memory_order_relaxed)) {
-                break;
-            }
-            continue;
+            // EBADF or other error — listen fd was closed during shutdown.
+            return;
+        }
+
+        // Get peer address for logging.
+        struct sockaddr_in peer{};
+        socklen_t          peer_len                 = sizeof(peer);
+        char               peer_ip[INET_ADDRSTRLEN] = {};
+        int                peer_port                = 0;
+        if (::getpeername(fd, reinterpret_cast<struct sockaddr *>(&peer), &peer_len) == 0) {
+            ::inet_ntop(AF_INET, &peer.sin_addr, peer_ip, sizeof(peer_ip));
+            peer_port = ntohs(peer.sin_port);
         }
 
         int flags = fcntl(fd, F_GETFL, 0);
@@ -188,7 +169,7 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
         }
 #endif
 
-        auto conn      = transport_->create_connection(fd, "client");
+        auto conn      = transport_->create_connection(fd, std::string(peer_ip) + ":" + std::to_string(peer_port));
         conn->quickack = transport_->quickack();
         conn->set_on_frame([this](Frame *frame, Connection *c) { dispatch(frame, c); });
         // Fail pending server-initiated requests when the connection closes.
@@ -198,6 +179,8 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
                 request_client_->fail_all(c, RpcError::ConnectionClosed);
             }
         });
+        CRB_LOG_INFO("rpc server: connection accepted {}:{} -> conn_id={}", peer_ip, peer_port,
+                     static_cast<long long>(conn->id()));
     }
 }
 

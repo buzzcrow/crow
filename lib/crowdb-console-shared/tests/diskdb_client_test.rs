@@ -63,7 +63,7 @@ async fn mock_instances() -> Json<Value> {
     Json(json!([
         {
             "instance_id": 1,
-            "rpc_endpoint": "127.0.0.1:50051",
+            "rpc_endpoint": "127.0.0.1:11000",
             "last_heartbeat_ms": 1000,
             "owned_dg_ids": [1, 2],
             "group_usages": [
@@ -151,7 +151,7 @@ async fn list_diskdb_instances_deserializes() {
     assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 1);
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].instance_id, 1);
-    assert_eq!(result[0].rpc_endpoint, "127.0.0.1:50051");
+    assert_eq!(result[0].rpc_endpoint, "127.0.0.1:11000");
     assert_eq!(result[0].owned_dg_ids, vec![1, 2]);
     assert_eq!(result[0].group_usages.len(), 1);
     assert_eq!(result[0].group_usages[0].disk_group_id, 1);

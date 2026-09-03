@@ -24,7 +24,7 @@ use crate::config::{NodeEntry, RackEntry, ServerEntry};
 use crate::error::{Error, Result};
 
 /// Thin wrapper around `reqwest::Client` bound to one `crowdb-web`
-/// console base URL (default `http://127.0.0.1:9920`).
+/// console base URL (default `http://127.0.0.1:14000`).
 #[derive(Debug, Clone)]
 pub struct ConsoleClient {
     base_url: String,
@@ -70,13 +70,6 @@ pub struct AddDiskBody {
     pub unit_size_bytes: u32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub device_path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MoveDiskBody {
-    pub new_rack_id: RackId,
-    pub new_node_id: NodeId,
-    pub new_disk_group_id: DiskGroupId,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -400,14 +393,6 @@ impl ConsoleClient {
         .await
     }
 
-    /// `POST /api/disks/:disk_id/move`.
-    ///
-    /// # Errors
-    /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn move_disk(&self, disk_id: &str, body: &MoveDiskBody) -> Result<crate::config::DiskEntry> {
-        self.post_json(&format!("/api/disks/{disk_id}/move"), body).await
-    }
-
     // ── Physical: server lifecycle (one server per node) ──────────
 
     /// `GET /api/nodes/:node_id/server`. Returns the deployment
@@ -651,9 +636,9 @@ impl ConsoleClient {
         .await
     }
 
-    // ── Cluster reset ──────────────────────────────────────────────
+    // ── Cluster destroy ──────────────────────────────────────────────
 
-    /// `POST /internal/reset` — full cluster reset (stops all servers,
+    /// `POST /internal/reset` — full cluster destroy (stops all servers,
     /// removes all racks/nodes/stores/groups, clears workspaces).
     ///
     /// # Errors
@@ -740,7 +725,7 @@ impl ConsoleClient {
     // ── HTTP plumbing ──────────────────────────────────────────────
     //
     // Every helper attaches the current `x-crowdb-kv-corr-id` header (see
-    // `crate::corr_id`) and emits one `ops_log::append_http` record on
+    // `crate::corr_id`) and emits one `log_ops_http` tracing record on
     // completion. The id comes from the task-local if a `corr_id::scope`
     // wraps the call (web handler / CLI main), otherwise we generate
     // one inline so unit tests still produce well-formed log records.
@@ -756,7 +741,7 @@ impl ConsoleClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                super::log_ops_http(
                     &cid,
                     "GET",
                     &url,
@@ -767,7 +752,7 @@ impl ConsoleClient {
                 self.rpc_err(format!("GET {path}: {e}"))
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        super::log_ops_http(
             &cid,
             "GET",
             &url,
@@ -794,7 +779,7 @@ impl ConsoleClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                super::log_ops_http(
                     &cid,
                     "POST",
                     &url,
@@ -805,7 +790,7 @@ impl ConsoleClient {
                 self.rpc_err(format!("POST {path}: {e}"))
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        super::log_ops_http(
             &cid,
             "POST",
             &url,
@@ -827,7 +812,7 @@ impl ConsoleClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                super::log_ops_http(
                     &cid,
                     "DELETE",
                     &url,
@@ -838,7 +823,7 @@ impl ConsoleClient {
                 self.rpc_err(format!("DELETE {path}: {e}"))
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        super::log_ops_http(
             &cid,
             "DELETE",
             &url,
@@ -867,7 +852,7 @@ impl ConsoleClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                super::log_ops_http(
                     &cid,
                     "PUT",
                     &url,
@@ -878,7 +863,7 @@ impl ConsoleClient {
                 self.rpc_err(format!("PUT {path}: {e}"))
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        super::log_ops_http(
             &cid,
             "PUT",
             &url,
@@ -918,7 +903,7 @@ mod tests {
 
     #[test]
     fn trims_trailing_slashes_in_base_url() {
-        let c = ConsoleClient::new("http://127.0.0.1:9920///").unwrap();
-        assert_eq!(c.base_url(), "http://127.0.0.1:9920");
+        let c = ConsoleClient::new("http://127.0.0.1:14000///").unwrap();
+        assert_eq!(c.base_url(), "http://127.0.0.1:14000");
     }
 }

@@ -198,6 +198,10 @@ pub struct SetStatusBody {
 #[derive(Debug, Clone, Serialize)]
 pub struct DeployDiskdbBody {
     pub rpc_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listen_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_port: Option<u16>,
 }
 
 // ── ConsoleClient extension methods ───────────────────────────────

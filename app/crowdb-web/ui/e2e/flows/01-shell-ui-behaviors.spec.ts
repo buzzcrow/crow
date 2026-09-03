@@ -30,6 +30,7 @@ function nextNumericId(values: Array<string | number>): string {
 test.describe('shell · UI behaviors', () => {
   test('dialog defaults, cancel, and tree interactions', async ({ page, baseURL }) => {
     // --- create dialog defaults and eligible candidate lists ---
+    await step('shell: resetAll', () => resetAll(baseURL!));
     // Batch independent API calls to reduce total round-trip time under load.
     await step('shell: create racks', () => Promise.all([
       createRack(baseURL!, { id: 201, name: 'Rack Twenty A' }),
@@ -63,7 +64,7 @@ test.describe('shell · UI behaviors', () => {
       const expectedReplicaId = '1';
 
       await step('shell: goto', () => page.goto('/'));
-      await page.getByRole('button', { name: 'KV Cluster' }).click();
+      await page.getByTestId('domain-kv').click();
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       await step('shell: Add Store dialog', async () => {
@@ -78,9 +79,9 @@ test.describe('shell · UI behaviors', () => {
         await addStoreDialog.getByRole('button', { name: 'Cancel' }).click();
       });
 
-      await expect(aside.getByText('S-207')).toBeVisible({ timeout: 3_000 });
+      await expect(aside.getByText('S-207').first()).toBeVisible({ timeout: 10_000 });
       await step('shell: Add Group dialog', async () => {
-        await aside.getByText('S-207').click({ button: 'right' });
+        await aside.getByText('S-207').first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /add group/i }).click();
         const addGroupDialog = page.getByRole('dialog', { name: 'Add Group' });
         await expect(addGroupDialog).toBeVisible();
@@ -102,9 +103,9 @@ test.describe('shell · UI behaviors', () => {
       });
 
       const expectedReplicaAfterGroup = String(Number(expectedReplicaId) + 2);
-      await expect(aside.getByText(`G-${expectedGroupId}`)).toBeVisible({ timeout: 10_000 });
+      await expect(aside.getByText(`G-${expectedGroupId}`).first()).toBeVisible({ timeout: 10_000 });
       await step('shell: Add Replica dialog', async () => {
-        await aside.getByText(`G-${expectedGroupId}`).click({ button: 'right' });
+        await aside.getByText(`G-${expectedGroupId}`).first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /add replica/i }).click();
         const addReplicaDialog = page.getByRole('dialog', { name: 'Add Replica' });
         await expect(addReplicaDialog).toBeVisible();
@@ -120,7 +121,7 @@ test.describe('shell · UI behaviors', () => {
       });
 
       await step('shell: Add Replica cancel', async () => {
-        await aside.getByText(`G-${expectedGroupId}`).click({ button: 'right' });
+        await aside.getByText(`G-${expectedGroupId}`).first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /add replica/i }).click();
         const remainingReplicaDialog = page.getByRole('dialog', { name: 'Add Replica' });
         await expect(remainingReplicaDialog.getByLabel('Replica ID (optional)')).toHaveValue(String(Number(expectedReplicaAfterGroup) + 1));
@@ -143,7 +144,7 @@ test.describe('shell · UI behaviors', () => {
 
     // --- dialog cancel does not create entity ---
     await step('shell: goto', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Physical' }).click();
+    await page.getByTestId('domain-cluster').click();
 
     await step('shell: Add Rack cancel', async () => {
       await page.getByRole('button', { name: 'Add Rack' }).click();
@@ -181,7 +182,7 @@ test.describe('shell · UI behaviors', () => {
     ]));
 
     await step('shell: goto', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Physical' }).click();
+    await page.getByTestId('domain-cluster').click();
     const rack21a = page.getByRole('treeitem').filter({ hasText: 'R-211 (Rack Twenty One A)' });
     const node21c = page.getByRole('treeitem').filter({ hasText: 'N-213' });
     await expect(rack21a).toBeVisible({ timeout: 3_000 });
@@ -213,7 +214,7 @@ test.describe('shell · UI behaviors', () => {
     ]));
 
     await step('shell: goto', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Physical' }).click();
+    await page.getByTestId('domain-cluster').click();
 
     const filterAside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
     const rackA = page.getByRole('treeitem').filter({ hasText: 'R-341' });
@@ -242,7 +243,7 @@ test.describe('shell · UI behaviors', () => {
     await step('shell: create rack', () => createRack(baseURL!, { id: 351, name: 'r35a' }));
 
     await step('shell: goto', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Physical' }).click();
+    await page.getByTestId('domain-cluster').click();
     const refreshAside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
     // Verify initial rack

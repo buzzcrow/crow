@@ -54,13 +54,20 @@ fn parse_port_valid() {
 }
 
 #[test]
+fn parse_port_rejects_zero() {
+    assert!(parse_port_list("0").is_err());
+    assert!(parse_port_list("10000,0").is_err());
+    assert!(parse_port_list("0..5").is_err());
+}
+
+#[test]
 fn parse_root_cli_option() {
     let cli = Cli::parse_from([
         "crowdb-kv-server",
         "--root",
         "/data/N-1",
         "--management-port",
-        "9910",
+        "10000",
     ]);
     assert_eq!(cli.root, std::path::PathBuf::from("/data/N-1"));
     // --config is now optional.
@@ -70,6 +77,12 @@ fn parse_root_cli_option() {
 #[test]
 fn parse_root_is_required() {
     // Omitting --root should fail (clap rejects the invocation).
-    let result = Cli::try_parse_from(["crowdb-kv-server", "--management-port", "9910"]);
+    let result = Cli::try_parse_from(["crowdb-kv-server", "--management-port", "10000"]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn management_port_rejects_zero() {
+    let result = Cli::try_parse_from(["crowdb-kv-server", "--root", "/tmp/n1", "--management-port", "0"]);
     assert!(result.is_err());
 }

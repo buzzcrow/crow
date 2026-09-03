@@ -876,7 +876,7 @@ pub trait KVEngine: Send + Sync {
     fn apply(&self, slot: u64, batch: &Batch) -> KVFuture<()>;
     fn get(&self, key: &[u8]) -> KVFuture<Option<(u64, Vec<u8>)>>;
     fn scan(&self, prefix: &[u8], limit: usize) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)>;
-    // iter_all / live_key_count / clear / compare / resume_from_slot /
+    // iter_all / clear / compare / resume_from_slot /
     // persist_snapshot / set_gc_watermark / collect_garbage: plain sync fns.
     // Diagnostic/maintenance-path only (compare/iter_all: tests + snapshot
     // export; the rest: restore path + the periodic group-maintenance
