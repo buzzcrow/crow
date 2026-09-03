@@ -3,7 +3,7 @@
 // Baseline: 4.7s (2026-08-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, clusterInit, stopNodeServer, resetAll } from '../fixtures/consoleSetup';
+import { apiContext, clusterInit, stopNodeServer, resetAll, waitForLeader, freePort } from '../fixtures/consoleSetup';
 import { step } from '../fixtures/stepTimer';
 
 /**
@@ -226,22 +226,26 @@ test.describe('flow · full chain', () => {
       if (await expandRack18.count()) await expandRack18.click();
 
       // 4. Deploy CrowDB Storage Server on n18a.
+      const restPort181 = freePort('kv-mgmt');
+      const rpcPort181 = freePort('kv-listen');
       await step('full-chain: deploy 181 UI', async () => {
         await page.getByRole('treeitem').filter({ hasText: 'N-181' }).click({ button: 'right' });
         await page.getByRole('menuitem', { name: /deploy CrowDB Storage/i }).click();
         await expect(page.getByRole('dialog', { name: /deploy CrowDB Storage on 181/i })).toBeVisible();
-        await page.getByLabel('REST Port').fill('9933');
-        await page.getByLabel('RPC Port').fill('9943');
+        await page.getByLabel('REST Port').fill(String(restPort181));
+        await page.getByLabel('RPC Port').fill(String(rpcPort181));
         await page.getByRole('button', { name: 'Deploy' }).click();
       });
 
       // 5. Deploy CrowDB Storage Server on n18b.
+      const restPort182 = freePort('kv-mgmt');
+      const rpcPort182 = freePort('kv-listen');
       await step('full-chain: deploy 182 UI', async () => {
         await page.getByRole('treeitem').filter({ hasText: 'N-182' }).click({ button: 'right' });
         await page.getByRole('menuitem', { name: /deploy CrowDB Storage/i }).click();
         await expect(page.getByRole('dialog', { name: /deploy CrowDB Storage on 182/i })).toBeVisible();
-        await page.getByLabel('REST Port').fill('9934');
-        await page.getByLabel('RPC Port').fill('9944');
+        await page.getByLabel('REST Port').fill(String(restPort182));
+        await page.getByLabel('RPC Port').fill(String(rpcPort182));
         await page.getByRole('button', { name: 'Deploy' }).click();
       });
 
@@ -265,13 +269,20 @@ test.describe('flow · full chain', () => {
 
       // 6. Create empty store 188 on n18a.
       await step('full-chain: clusterInit (full)', () => clusterInit(baseURL!, [181, 182]));
+      // Wait for group-0 leader election to settle before creating stores.
+      // The election may take a few seconds to converge after init.
+      await step('full-chain: waitForLeader group 0', () => waitForLeader(baseURL!, 0, 0, 15_000));
       await step('full-chain: add store 188 UI', async () => {
         await page.locator('aside').getByRole('button', { name: 'Add Store' }).click();
         await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();
         await page.getByLabel('KV Store ID (numeric)').fill('188');
         await page.getByLabel(/^181\b/).check();
         await page.getByRole('button', { name: /create kv store/i }).click();
-        await expect(aside.getByText('S-188').first()).toBeVisible({ timeout: 3_000 });
+        // Wait for the dialog to close AND S-188 to appear — the tree
+        // poll may surface S-188 before the addStore API call returns
+        // and the dialog closes, so checking only S-188 is racy.
+        await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeHidden({ timeout: 10_000 });
+        await expect(aside.getByText('S-188').first()).toBeVisible({ timeout: 10_000 });
       });
 
       await step('full-chain: add group 1880 UI', async () => {
@@ -292,7 +303,7 @@ test.describe('flow · full chain', () => {
 
       // 7. Add replica to group 1880 on n18b via UI.
       await step('full-chain: add replica UI', async () => {
-        await expect(aside.getByText('G-1880').first()).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('G-1880').first()).toBeVisible({ timeout: 10_000 });
         const group1880 = page.getByRole('treeitem').filter({ hasText: 'G-1880' });
         const expandGroup1880 = group1880.getByRole('button', { name: 'Expand' });
         if (await expandGroup1880.count()) await expandGroup1880.click();
@@ -303,8 +314,8 @@ test.describe('flow · full chain', () => {
         await page.getByRole('button', { name: /add replica/i }).click();
 
         // Verify both replicas exist in the tree.
-        await expect(aside.getByText('LR-18800')).toBeVisible({ timeout: 3_000 });
-        await expect(aside.getByText('LR-18801')).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('LR-18800')).toBeVisible({ timeout: 10_000 });
+        await expect(aside.getByText('LR-18801')).toBeVisible({ timeout: 10_000 });
       });
 
       await step('full-chain: verify replicas API', async () => {

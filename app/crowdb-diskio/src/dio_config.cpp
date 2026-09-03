@@ -288,8 +288,8 @@ bool DioConfig::parse_args(int argc, char *argv[], DioConfig &out, std::string &
 
 bool DioConfig::validate(std::string &err) const
 {
-    if (listen_port <= 0 || listen_port > 65535) {
-        err = "invalid listen port (must be 1-65535, 0 is not allowed)";
+    if (listen_port < 0 || listen_port > 65535) {
+        err = "invalid listen port (must be 0-65535, 0 = OS-assigned)";
         return false;
     }
     if (thread_pool_size == 0) {

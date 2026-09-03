@@ -133,7 +133,7 @@ fn port_ranges_do_not_overlap() {
 // ── range_size ─────────────────────────────────────────────────
 
 #[test]
-fn range_size_is_100_for_all_services() {
+fn range_size_is_500_for_all_services() {
     for svc in [
         ServicePort::KvServerMgmt,
         ServicePort::KvServerListen,
@@ -146,6 +146,6 @@ fn range_size_is_100_for_all_services() {
         ServicePort::DiskioRpc,
         ServicePort::Web,
     ] {
-        assert_eq!(svc.range_size(), 100, "{svc:?} range_size must be 100");
+        assert_eq!(svc.range_size(), 500, "{svc:?} range_size must be 500");
     }
 }

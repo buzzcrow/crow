@@ -5,33 +5,39 @@
 //!
 //! Each service type gets a **1000-port block** with a shared prefix
 //! (same kind of server = same leading digits), all ports **>10000**.
-//! Within a block, each listener kind gets a 100-port sub-range. All
+//! Within a block, each listener kind gets a 500-port sub-range. All
 //! services use **stride 1** — no paired-port logic. Port 0 is never
 //! used (rejected everywhere by CLI parse and the port allocator).
+//!
+//! Sub-ranges within a block may overlap (e.g. kv-mgmt 10000-10499
+//! and kv-listen 10100-10599 share 10100-10499). This is safe because
+//! the port allocator uses a shared per-process claim file plus bind
+//! probes — a port claimed by one service type is never handed to
+//! another.
 //!
 //! ## Port map
 //!
 //! - `10000`–`10999` — crowdb-kv-server (prefix 10)
-//!   - `10000`–`10099` — HTTP management API (stride 1)
-//!   - `10100`–`10199` — main `PxKvStore` listener (hosts both
+//!   - `10000`–`10499` — HTTP management API (stride 1)
+//!   - `10100`–`10599` — main `PxKvStore` listener (hosts both
 //!     consensus and client crowdb-rpc handlers; stride 1)
-//!   - `10200`–`10999` — spare
+//!   - `10600`–`10999` — spare
 //! - `11000`–`11999` — crowdb-diskdb (prefix 11)
-//!   - `11000`–`11099` — main listener (stride 1)
-//!   - `11100`–`11199` — HTTP management API (stride 1; independent
+//!   - `11000`–`11499` — main listener (stride 1)
+//!   - `11100`–`11599` — HTTP management API (stride 1; independent
 //!     of listen — no paired-port invariant)
-//!   - `11200`–`11299` — crowdb-rpc listener (stride 1)
-//!   - `11300`–`11999` — spare
+//!   - `11200`–`11699` — crowdb-rpc listener (stride 1)
+//!   - `11700`–`11999` — spare
 //! - `12000`–`12999` — crowdb-chunkdb (prefix 12)
-//!   - `12100`–`12199` — HTTP management API (stride 1)
-//!   - `12200`–`12299` — crowdb-rpc listener (stride 1)
-//!   - `12300`–`12999` — spare
+//!   - `12100`–`12599` — HTTP management API (stride 1)
+//!   - `12200`–`12699` — crowdb-rpc listener (stride 1)
+//!   - `12700`–`12999` — spare
 //! - `13000`–`13999` — crowdb-diskio (prefix 13)
-//!   - `13000`–`13099` — crowdb-rpc listener (stride 1)
-//!   - `13100`–`13999` — spare
+//!   - `13000`–`13499` — crowdb-rpc listener (stride 1)
+//!   - `13500`–`13999` — spare
 //! - `14000`–`14999` — crowdb-web (prefix 14)
-//!   - `14000`–`14099` — HTTP service (stride 1)
-//!   - `14100`–`14999` — spare
+//!   - `14000`–`14499` — HTTP service (stride 1)
+//!   - `14500`–`14999` — spare
 //!
 //! The group-0 kv-server mgmt port (`10000`) is the famous bootstrap
 //! discovery port — any client can contact group-0 to read the service
@@ -141,10 +147,13 @@ impl ServicePort {
     }
 
     /// Sub-range size (number of ports) for this service type's
-    /// listener kind. Each listener kind gets 100 ports.
+    /// listener kind. Each listener kind gets 500 ports — large enough
+    /// for parallel E2E test suites that deploy 80+ nodes per service
+    /// type. Each service block is 1000 ports, so 500 fits with room
+    /// to spare.
     #[must_use]
     pub const fn range_size(self) -> u16 {
         let _ = self;
-        100
+        500
     }
 }

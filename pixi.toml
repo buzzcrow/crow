@@ -151,7 +151,7 @@ test-console-cli = { cmd = "cargo test -p crowdb-cli --all-targets" }
 test-console-server = { cmd = "cargo build -p crowdb-kv-server && cargo test -p crowdb-web --all-targets" }
 
 # ── UITests job: Playwright browser E2E + subprocess spawning ──
-test-console-ui = { cmd = "cargo build -p crowdb-kv-server -p crowdb-diskdb && export CROWDB_KV_SERVER_BINARY=$(pwd)/target/debug/crowdb-kv-server && cd app/crowdb-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-ui-deps"] }
+test-console-ui = { cmd = "cargo build -p crowdb-kv-server -p crowdb-diskdb -p crowdb-port-alloc && export CROWDB_KV_SERVER_BINARY=$(pwd)/target/debug/crowdb-kv-server && cd app/crowdb-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-ui-deps"] }
 
 # ── Full local suite (not a CI job; runs everything in one process) ──
 # Grouped by CI job order. clean-env runs at start and before the

@@ -323,6 +323,7 @@ async fn main() {
             crowdb_kv_server::binding_monitor_wiring::spawn_chunkdb_binding_monitor(
                 &registry,
                 group0_ep,
+                format!("http://{display_addr}"),
                 args.binding_monitor_interval,
             ),
         )
