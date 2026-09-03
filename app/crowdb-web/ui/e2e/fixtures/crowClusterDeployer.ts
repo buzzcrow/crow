@@ -308,6 +308,12 @@ export async function createStore(baseURL: string, storeId: number, nodeIds: num
       data: { store_id: storeId, nodes: nodeIds },
     });
     expect(response.status(), await response.text()).toBe(201);
+    await expect.poll(async () => {
+      const verify = await api.get(`/api/nodes/${nodeIds[0]}/stores`);
+      if (!verify.ok()) return false;
+      const stores = await verify.json();
+      return Array.isArray(stores) && stores.some((store: any) => Number(store.store_id) === storeId);
+    }, { timeout: 15_000, intervals: [200] }).toBe(true);
   } finally {
     await api.dispose();
   }

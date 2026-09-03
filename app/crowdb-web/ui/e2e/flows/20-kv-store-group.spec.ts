@@ -7,7 +7,7 @@ import { apiContext, addGroup, clusterInit, createStore, deployNodeServer, freeP
 import { step } from '../fixtures/stepTimer';
 
 test.describe('kv cluster · store + group CRUD', () => {
-  test.beforeAll(async ({ baseURL }) => {
+  test.beforeEach(async ({ baseURL }) => {
     await resetAll(baseURL!);
   });
 

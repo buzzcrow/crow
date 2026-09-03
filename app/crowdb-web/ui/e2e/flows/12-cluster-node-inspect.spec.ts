@@ -65,6 +65,7 @@ test.describe('cluster · node inspect & cross-jump', () => {
     }
 
     // --- physical node details -> hosting logical store ---
+    await step('xjump: resetAll', () => resetAll(baseURL!));
     await step('xjump: setup 62', async () => {
       await seedRackAndNode(baseURL!, 62, 62);
       await deployNodeServer(baseURL!, 62, freePort(), freePort());
@@ -96,6 +97,7 @@ test.describe('cluster · node inspect & cross-jump', () => {
 
     // --- node inspect: local + remote replicas, removed remote disappears ---
     // Unique ids/ports: 20-ui-behaviors already uses r21*/n21*.
+    await step('xjump: resetAll', () => resetAll(baseURL!));
     await step('xjump: setup replicas', async () => {
       await createRack(baseURL!, { id: 26, name: 'Rack TwentySix' });
       await createNode(baseURL!, { id: 261, rack_id: 26 });
