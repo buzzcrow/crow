@@ -33,6 +33,8 @@ pub enum AllocError {
     AllocateFailed { dg_id: u64, error: String },
     #[error("partial allocation: requested {requested}, got {got}")]
     PartialAllocation { requested: u32, got: u32 },
+    #[error("invalid diskdb allocation response for disk_group {dg_id}: {reason}")]
+    InvalidResponse { dg_id: u64, reason: String },
     #[error("rollback failed: {0}")]
     Rollback(String),
 }
@@ -74,6 +76,7 @@ impl ChunkAllocator {
         strip_sequence: u32,
         constraints: &PlacementConstraints,
     ) -> Result<ChunkStrip, AllocError> {
+        self.pool.update_disk_id_lookup(&snap.disk_groups());
         let plan = match strip_type {
             StripAllocType::Mirror { copy_count } => MirrorPlacement::select(snap, copy_count, constraints)?,
             StripAllocType::Ec { data_num, code_num } => {
@@ -85,7 +88,13 @@ impl ChunkAllocator {
             .allocate_blocks_parallel(owner_chunk, &plan, unit_count)
             .await?;
 
-        let strip = assemble_strip(&segments, strip_type, strip_sequence, &plan);
+        let strip = assemble_strip(
+            &segments,
+            strip_type,
+            strip_sequence,
+            unit_count,
+            (snap.unit_size_bytes() / 1024).max(1),
+        );
         Ok(strip)
     }
 
@@ -141,6 +150,26 @@ impl ChunkAllocator {
                 match result {
                     Ok(resp) => {
                         let got = u32::try_from(resp.segments.len()).unwrap_or(u32::MAX);
+                        if got > *requested {
+                            all_segments.extend(resp.segments);
+                            let error = AllocError::InvalidResponse {
+                                dg_id: *dg_id,
+                                reason: format!("requested {requested} segments, got {got}"),
+                            };
+                            self.rollback_or_error(&all_segments, error).await?;
+                            unreachable!("rollback_or_error always returns Err")
+                        }
+                        if let Some(reason) = resp.segments.iter().find_map(|segment| {
+                            self.validate_segment(segment, *dg_id, owner_chunk, unit_count)
+                        }) {
+                            all_segments.extend(resp.segments);
+                            let error = AllocError::InvalidResponse {
+                                dg_id: *dg_id,
+                                reason,
+                            };
+                            self.rollback_or_error(&all_segments, error).await?;
+                            unreachable!("rollback_or_error always returns Err")
+                        }
                         if got < *requested {
                             warn!(
                                 disk_group_id = *dg_id,
@@ -160,8 +189,8 @@ impl ChunkAllocator {
 
             if !errors.is_empty() {
                 // Hard failure — free everything allocated so far.
-                self.free_all(&all_segments).await;
-                return Err(errors.into_iter().next().expect("at least one error"));
+                let error = errors.into_iter().next().expect("at least one error");
+                return self.rollback_or_error(&all_segments, error).await;
             }
 
             pending = next_pending;
@@ -178,11 +207,15 @@ impl ChunkAllocator {
             let expected: u32 = plan.entries.iter().map(|e| e.block_count).sum();
             let got = u32::try_from(all_segments.len()).unwrap_or(u32::MAX);
             warn!(expected, got, "allocation retries exhausted, freeing all");
-            self.free_all(&all_segments).await;
-            return Err(AllocError::PartialAllocation {
-                requested: expected,
-                got,
-            });
+            return self
+                .rollback_or_error(
+                    &all_segments,
+                    AllocError::PartialAllocation {
+                        requested: expected,
+                        got,
+                    },
+                )
+                .await;
         }
 
         info!(segment_count = all_segments.len(), "strip allocated");
@@ -191,17 +224,60 @@ impl ChunkAllocator {
 
     /// Free all allocated segments (rollback). Logs failures for the
     /// orphan scanner but does not propagate the free error.
-    async fn free_all(&self, segments: &[Segment]) {
+    pub async fn rollback_strips(&self, strips: &[ChunkStrip]) -> Result<(), AllocError> {
+        let segments: Vec<_> = strips.iter().flat_map(extract_segments).collect();
+        self.free_all(&segments).await
+    }
+
+    fn validate_segment(
+        &self,
+        segment: &Segment,
+        dg_id: u64,
+        owner_chunk: &ChunkId,
+        unit_count: u32,
+    ) -> Option<String> {
+        if segment.owner_chunk.as_ref() != Some(owner_chunk) {
+            return Some("owner_chunk does not match request".to_string());
+        }
+        if segment.unit_count != unit_count {
+            return Some(format!(
+                "requested unit_count {unit_count}, got {}",
+                segment.unit_count
+            ));
+        }
+        let Some(disk_id) = segment.disk_id.as_ref() else {
+            return Some("segment has no disk_id".to_string());
+        };
+        if self.pool.dg_for_disk(disk_id) != Some(dg_id) {
+            return Some("segment disk does not belong to requested disk_group".to_string());
+        }
+        None
+    }
+
+    async fn rollback_or_error<T>(&self, segments: &[Segment], cause: AllocError) -> Result<T, AllocError> {
+        match self.free_all(segments).await {
+            Ok(()) => Err(cause),
+            Err(rollback) => Err(AllocError::Rollback(format!("{cause}; {rollback}"))),
+        }
+    }
+
+    async fn free_all(&self, segments: &[Segment]) -> Result<(), AllocError> {
         if segments.is_empty() {
-            return;
+            return Ok(());
         }
-        if let Err(rb_err) = self.pool.free_blocks(segments.to_vec()).await {
-            warn!(
-                error = %rb_err,
-                segments = ?segments.iter().map(|s| (&s.disk_id, s.zone_index, s.unit_offset)).collect::<Vec<_>>(),
-                "rollback free_blocks failed — orphan segments logged for scanner"
-            );
-        }
+        self.pool
+            .free_blocks(segments.to_vec())
+            .await
+            .map_err(AllocError::Rollback)
+    }
+}
+
+fn extract_segments(strip: &ChunkStrip) -> Vec<Segment> {
+    use crowdb_protocol::chunkdb::rpc::Strip;
+    match &strip.strip {
+        Some(Strip::MirrorStrip(mirror)) => mirror.segments.clone(),
+        Some(Strip::EcStrip(ec)) => ec.segments.clone(),
+        None => Vec::new(),
     }
 }
 
@@ -210,7 +286,8 @@ fn assemble_strip(
     segments: &[Segment],
     strip_type: StripAllocType,
     strip_sequence: u32,
-    _plan: &PlacementPlan,
+    unit_count: u32,
+    unit_kb: u32,
 ) -> ChunkStrip {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -220,8 +297,8 @@ fn assemble_strip(
         StripAllocType::Mirror { .. } => ChunkStrip {
             chunk_offset: 0,
             strip_sequence,
-            unit_kb: 1024, // default 1MB units
-            capacity: u32::try_from(segments.len()).unwrap_or(u32::MAX),
+            unit_kb,
+            capacity: unit_count.saturating_mul(unit_kb),
             create_ts_ms: now_ms,
             sealed_ts_ms: 0,
             sealed_length: 0,
@@ -234,8 +311,10 @@ fn assemble_strip(
         StripAllocType::Ec { data_num, code_num } => ChunkStrip {
             chunk_offset: 0,
             strip_sequence,
-            unit_kb: 1024,
-            capacity: u32::try_from(segments.len()).unwrap_or(u32::MAX),
+            unit_kb,
+            capacity: unit_count
+                .saturating_mul(unit_kb)
+                .saturating_mul(u32::try_from(data_num).unwrap_or(u32::MAX)),
             create_ts_ms: now_ms,
             sealed_ts_ms: 0,
             sealed_length: 0,

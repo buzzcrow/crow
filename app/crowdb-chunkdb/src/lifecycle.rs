@@ -61,6 +61,10 @@ pub enum LifecycleError {
     LockTimeout,
     #[error("strip index {index} out of range (chunk has {len} strips)")]
     StripIndexOutOfRange { index: u32, len: usize },
+    #[error("diskdb commit failed: {0}")]
+    Commit(String),
+    #[error("diskdb cleanup failed after metadata publication: {0}")]
+    Cleanup(String),
 }
 
 /// Lock policy — how to handle contention on a per-chunk mutex.
@@ -340,6 +344,7 @@ pub struct LifecycleHandler {
     /// Per-chunk lock map + payload cache. `None` when R100 is not
     /// configured (no lifecycle section in config).
     locks: Option<Arc<ChunkLockMap>>,
+    allow_unsafe_ec: bool,
 }
 
 impl LifecycleHandler {
@@ -351,6 +356,7 @@ impl LifecycleHandler {
             topology,
             range_guard: None,
             locks: None,
+            allow_unsafe_ec: false,
         }
     }
 
@@ -365,6 +371,13 @@ impl LifecycleHandler {
     #[must_use]
     pub fn with_locks(mut self, locks: Arc<ChunkLockMap>) -> Self {
         self.locks = Some(locks);
+        self
+    }
+
+    /// Permit explicitly configured unsafe EC placement fallback.
+    #[must_use]
+    pub fn with_allow_unsafe_ec(mut self, allow: bool) -> Self {
+        self.allow_unsafe_ec = allow;
         self
     }
 
@@ -438,7 +451,7 @@ impl LifecycleHandler {
             },
         };
 
-        let constraints = PlacementConstraints::new();
+        let constraints = self.placement_constraints();
         // Convert write_granularity (KB) to unit_count using the unit
         // size from the topology snapshot. Fall back to treating KB as
         // units if unit_size_bytes is unavailable (0).
@@ -450,10 +463,18 @@ impl LifecycleHandler {
 
         let mut strips = Vec::with_capacity(strip_count as usize);
         for seq in 0..strip_count {
-            let strip = self
+            let mut strip = match self
                 .allocator
                 .allocate_strip(&snap, &id, strip_alloc_type, unit_count, seq, &constraints)
-                .await?;
+                .await
+            {
+                Ok(strip) => strip,
+                Err(error) => {
+                    self.allocator.rollback_strips(&strips).await?;
+                    return Err(error.into());
+                }
+            };
+            strip.chunk_offset = strips.iter().map(|strip: &ChunkStrip| strip.capacity).sum();
             strips.push(strip);
         }
 
@@ -461,9 +482,9 @@ impl LifecycleHandler {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
 
-        let chunk = Chunk {
+        let mut chunk = Chunk {
             id: Some(id),
-            state: ProtoChunkState::Active as i32,
+            state: ProtoChunkState::Init as i32,
             create_ts_ms: now_ms,
             sealed_ts_ms: 0,
             capacity: strips.iter().map(|s| s.capacity).sum(),
@@ -472,9 +493,14 @@ impl LifecycleHandler {
             chunk_type: chunk_type as i32,
         };
 
-        // Persist the chunk record, then commit the disk blocks.
+        // Persist a recoverable intent, commit blocks, then publish Active.
+        if let Err(error) = self.store.put_chunk(&chunk).await {
+            self.allocator.rollback_strips(&chunk.strips).await?;
+            return Err(error.into());
+        }
+        self.commit_strip_segments(&chunk.strips).await?;
+        chunk.state = ProtoChunkState::Active as i32;
         self.store.put_chunk(&chunk).await?;
-        self.commit_strip_segments(&chunk.strips).await;
 
         // Update cache.
         if let Some(ref mut g) = guard {
@@ -535,23 +561,39 @@ impl LifecycleHandler {
             },
         };
 
-        let constraints = PlacementConstraints::new();
+        let constraints = self.placement_constraints();
         let start_seq = u32::try_from(chunk.strips.len()).unwrap_or(u32::MAX);
 
+        let mut appended = Vec::with_capacity(strip_count as usize);
         for i in 0..strip_count {
             let seq = start_seq + i;
-            let strip = self
+            let mut strip = match self
                 .allocator
                 .allocate_strip(&snap, chunk_id, strip_alloc_type, unit_count, seq, &constraints)
-                .await?;
-            chunk.strips.push(strip);
+                .await
+            {
+                Ok(strip) => strip,
+                Err(error) => {
+                    self.allocator.rollback_strips(&appended).await?;
+                    return Err(error.into());
+                }
+            };
+            strip.chunk_offset = chunk
+                .capacity
+                .saturating_add(appended.iter().map(|strip: &ChunkStrip| strip.capacity).sum());
+            appended.push(strip);
         }
 
+        if let Err(error) = self.commit_strip_segments(&appended).await {
+            self.allocator.rollback_strips(&appended).await?;
+            return Err(error);
+        }
+        chunk.strips.extend(appended.iter().cloned());
         chunk.capacity = chunk.strips.iter().map(|s| s.capacity).sum();
-        self.store.put_chunk(&chunk).await?;
-        // Commit the newly-appended strip segments.
-        let new_strips = &chunk.strips[chunk.strips.len() - strip_count as usize..];
-        self.commit_strip_segments(new_strips).await;
+        if let Err(error) = self.store.put_chunk(&chunk).await {
+            self.allocator.rollback_strips(&appended).await?;
+            return Err(error.into());
+        }
 
         if let Some(ref mut g) = guard {
             g.refresh(chunk.clone());
@@ -583,6 +625,12 @@ impl LifecycleHandler {
         };
         let current_state = ChunkState::from_proto(chunk.state);
         current_state.check_can_seal()?;
+        if seal_length > chunk.capacity {
+            return Err(LifecycleError::InvalidRequest(format!(
+                "seal_length {seal_length} exceeds chunk capacity {}",
+                chunk.capacity
+            )));
+        }
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -626,25 +674,46 @@ impl LifecycleHandler {
         };
         let current_state = ChunkState::from_proto(chunk.state);
 
-        // Already deleted → not-found (error codes carry status, not
-        // return flags).
+        // A Deleted record that still owns strips is a durable cleanup intent.
         if current_state == ChunkState::Deleted {
-            return Err(LifecycleError::ChunkNotFound);
+            if chunk.strips.is_empty() {
+                return Err(LifecycleError::ChunkNotFound);
+            }
+            let segments: Vec<_> = chunk.strips.iter().flat_map(extract_segments).collect();
+            self.allocator
+                .pool()
+                .free_blocks(segments)
+                .await
+                .map_err(LifecycleError::Cleanup)?;
+            chunk.strips.clear();
+            chunk.capacity = 0;
+            self.store.put_chunk(&chunk).await?;
+            if let Some(ref mut g) = guard {
+                g.refresh(chunk.clone());
+            }
+            return Ok(chunk);
         }
 
         current_state.check_can_delete()?;
 
-        // Free all segments (best-effort, inside the lock per GAP-R100-1).
+        // Publish Deleted before making any referenced block reusable.
         let all_segments: Vec<_> = chunk.strips.iter().flat_map(extract_segments).collect();
-        if !all_segments.is_empty() {
-            if let Err(e) = self.allocator.pool().free_blocks(all_segments).await {
-                warn!(error = %e, "delete_chunk: free_blocks failed (orphan segments logged)");
-            }
-        }
-
         chunk.state = ProtoChunkState::Deleted as i32;
         self.store.put_chunk(&chunk).await?;
 
+        if let Some(ref mut g) = guard {
+            g.refresh(chunk.clone());
+        }
+        if !all_segments.is_empty() {
+            self.allocator
+                .pool()
+                .free_blocks(all_segments)
+                .await
+                .map_err(LifecycleError::Cleanup)?;
+        }
+        chunk.strips.clear();
+        chunk.capacity = 0;
+        self.store.put_chunk(&chunk).await?;
         if let Some(ref mut g) = guard {
             g.refresh(chunk.clone());
         }
@@ -664,6 +733,11 @@ impl LifecycleHandler {
         size: u32,
     ) -> Result<(), LifecycleError> {
         self.check_range(chunk_id)?;
+        if size == 0 {
+            return Err(LifecycleError::InvalidRequest(
+                "delete range size must be non-zero".into(),
+            ));
+        }
 
         let mut guard = if let Some(locks) = &self.locks {
             Some(
@@ -685,7 +759,9 @@ impl LifecycleHandler {
         let current_state = ChunkState::from_proto(chunk.state);
         current_state.check_can_append()?;
 
-        let end = offset.saturating_add(size);
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| LifecycleError::InvalidRequest("delete range overflows u32".into()))?;
         // Find strips that overlap with [offset, end).
         let (to_remove, to_keep): (Vec<_>, Vec<_>) = chunk.strips.into_iter().partition(|s| {
             let s_start = s.chunk_offset;
@@ -693,14 +769,8 @@ impl LifecycleHandler {
             s_start < end && offset < s_end
         });
 
-        // Free segments of the removed strips.
+        // Remove references durably before making their blocks reusable.
         let all_segments: Vec<_> = to_remove.iter().flat_map(extract_segments).collect();
-        if !all_segments.is_empty() {
-            if let Err(e) = self.allocator.pool().free_blocks(all_segments).await {
-                warn!(error = %e, "delete_chunk_range: free_blocks failed (orphan segments logged)");
-            }
-        }
-
         let removed_count = to_remove.len();
         chunk.strips = to_keep;
         chunk.capacity = chunk.strips.iter().map(|s| s.capacity).sum();
@@ -708,6 +778,13 @@ impl LifecycleHandler {
 
         if let Some(ref mut g) = guard {
             g.refresh(chunk.clone());
+        }
+        if !all_segments.is_empty() {
+            self.allocator
+                .pool()
+                .free_blocks(all_segments)
+                .await
+                .map_err(LifecycleError::Cleanup)?;
         }
         info!(chunk_id = ?chunk_id, offset, size, removed_strips = removed_count, "chunk range deleted");
         Ok(())
@@ -759,25 +836,63 @@ impl LifecycleHandler {
                 len: chunk.strips.len(),
             });
         }
-
-        // Free the old strip's segments.
-        let old_segments = extract_segments(&chunk.strips[idx]);
-        if !old_segments.is_empty() {
-            if let Err(e) = self.allocator.pool().free_blocks(old_segments).await {
-                warn!(error = %e, "update_chunk_strip: free_blocks failed for old strip (orphan segments logged)");
+        if new_strip.strip_sequence != chunk.strips[idx].strip_sequence {
+            return Err(LifecycleError::InvalidRequest(format!(
+                "replacement strip sequence {} does not match existing sequence {}",
+                new_strip.strip_sequence, chunk.strips[idx].strip_sequence
+            )));
+        }
+        let expected_segments = match &new_strip.strip {
+            Some(crowdb_protocol::chunkdb::rpc::Strip::MirrorStrip(mirror)) => mirror.segments.len(),
+            Some(crowdb_protocol::chunkdb::rpc::Strip::EcStrip(ec)) => {
+                let expected = usize::try_from(ec.data_num.saturating_add(ec.code_num)).unwrap_or(usize::MAX);
+                if ec.data_num == 0 || ec.code_num == 0 || ec.segments.len() != expected {
+                    return Err(LifecycleError::InvalidRequest(
+                        "replacement EC strip shape is invalid".into(),
+                    ));
+                }
+                expected
             }
+            None => {
+                return Err(LifecycleError::InvalidRequest(
+                    "replacement strip has no segments".into(),
+                ))
+            }
+        };
+        if expected_segments == 0
+            || extract_segments(&new_strip)
+                .iter()
+                .any(|segment| segment.owner_chunk.as_ref() != Some(chunk_id) || segment.unit_count == 0)
+        {
+            return Err(LifecycleError::InvalidRequest(
+                "replacement segments must be non-empty and owned by the chunk".into(),
+            ));
         }
 
-        // Commit the new strip's segments.
-        self.commit_strip_segments(std::slice::from_ref(&new_strip)).await;
+        // Commit the replacement before publishing it.
+        let old_segments = extract_segments(&chunk.strips[idx]);
+        self.commit_strip_segments(std::slice::from_ref(&new_strip))
+            .await?;
 
         // Replace the strip.
-        chunk.strips[idx] = new_strip;
+        chunk.strips[idx] = new_strip.clone();
         chunk.capacity = chunk.strips.iter().map(|s| s.capacity).sum();
-        self.store.put_chunk(&chunk).await?;
+        if let Err(error) = self.store.put_chunk(&chunk).await {
+            self.allocator
+                .rollback_strips(std::slice::from_ref(&new_strip))
+                .await?;
+            return Err(error.into());
+        }
 
         if let Some(ref mut g) = guard {
             g.refresh(chunk.clone());
+        }
+        if !old_segments.is_empty() {
+            self.allocator
+                .pool()
+                .free_blocks(old_segments)
+                .await
+                .map_err(LifecycleError::Cleanup)?;
         }
         info!(chunk_id = ?chunk_id, strip_index, "chunk strip updated");
         Ok(chunk)
@@ -806,19 +921,67 @@ impl LifecycleHandler {
             .map_err(LifecycleError::Storage)
     }
 
+    /// Finish durable `Init` allocation intents left by an interrupted commit.
+    pub async fn reconcile_pending_chunks(&self) -> Result<u64, LifecycleError> {
+        let mut start_after = None;
+        let mut reconciled = 0u64;
+        loop {
+            let chunks = self.list_chunks(start_after.as_ref(), 1_000).await?;
+            if chunks.is_empty() {
+                break;
+            }
+            for mut chunk in chunks.iter().cloned() {
+                match ChunkState::from_proto(chunk.state) {
+                    ChunkState::Init => {
+                        self.commit_strip_segments(&chunk.strips).await?;
+                        chunk.state = ProtoChunkState::Active as i32;
+                    }
+                    ChunkState::Deleted if !chunk.strips.is_empty() => {
+                        let segments = chunk.strips.iter().flat_map(extract_segments).collect();
+                        self.allocator
+                            .pool()
+                            .free_blocks(segments)
+                            .await
+                            .map_err(LifecycleError::Cleanup)?;
+                        chunk.strips.clear();
+                        chunk.capacity = 0;
+                    }
+                    _ => continue,
+                }
+                self.store.put_chunk(&chunk).await?;
+                if let (Some(locks), Some(chunk_id)) = (&self.locks, chunk.id) {
+                    locks.populate_cache(&chunk_id, chunk);
+                }
+                reconciled += 1;
+            }
+            start_after = chunks.last().and_then(|chunk| chunk.id);
+            if chunks.len() < 1_000 {
+                break;
+            }
+        }
+        Ok(reconciled)
+    }
+
     /// Commit all segments in the given strips to diskdb (two-phase
     /// commit: mark tentative blocks as permanent after chunk persist).
-    /// Best-effort — logs failures for the orphan scanner.
-    async fn commit_strip_segments(&self, strips: &[ChunkStrip]) {
+    async fn commit_strip_segments(&self, strips: &[ChunkStrip]) -> Result<(), LifecycleError> {
         let all_segments: Vec<_> = strips.iter().flat_map(extract_segments).collect();
         if all_segments.is_empty() {
-            return;
+            return Ok(());
         }
-        if let Err(e) = self.allocator.pool().commit_blocks(all_segments).await {
-            warn!(
-                error = %e,
-                "commit_blocks failed — blocks remain tentative (orphan scanner will reclaim)"
-            );
+        self.allocator
+            .pool()
+            .commit_blocks(all_segments)
+            .await
+            .map_err(LifecycleError::Commit)
+    }
+
+    fn placement_constraints(&self) -> PlacementConstraints {
+        let constraints = PlacementConstraints::new();
+        if self.allow_unsafe_ec {
+            constraints.allow_unsafe_ec()
+        } else {
+            constraints
         }
     }
 }

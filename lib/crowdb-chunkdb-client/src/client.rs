@@ -11,7 +11,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashmap::DashMap;
+use std::collections::HashMap;
+
+use arc_swap::ArcSwap;
 
 use crowdb_kv_client::{RangeBindingClient, ServiceRegistryClient};
 use crowdb_protocol::chunkdb::rpc::{
@@ -45,7 +47,7 @@ impl Default for RetryConfig {
 pub struct ChunkdbClient {
     svc: ServiceRegistryClient,
     /// `instance_id -> rpc_endpoint` cache.
-    endpoint_cache: DashMap<InstanceId, String>,
+    endpoint_cache: ArcSwap<HashMap<InstanceId, String>>,
     retry: RetryConfig,
     /// Optional range binding client for R99 sharded mode. When
     /// present, chunk IDs are routed to the owning instance. When
@@ -60,7 +62,7 @@ impl ChunkdbClient {
     pub fn new(svc: ServiceRegistryClient, rpc_transport: Arc<ChunkdbRpcTransport>) -> Self {
         Self {
             svc,
-            endpoint_cache: DashMap::new(),
+            endpoint_cache: ArcSwap::from_pointee(HashMap::new()),
             retry: RetryConfig::default(),
             range_binding: None,
             rpc_transport,
@@ -76,7 +78,7 @@ impl ChunkdbClient {
     ) -> Self {
         Self {
             svc,
-            endpoint_cache: DashMap::new(),
+            endpoint_cache: ArcSwap::from_pointee(HashMap::new()),
             retry,
             range_binding: None,
             rpc_transport,
@@ -98,34 +100,40 @@ impl ChunkdbClient {
             .read_all_instances("chunkdb")
             .await
             .map_err(|e| ChunkdbClientError::Unreachable(format!("read_all_instances: {e}")))?;
-        for (id, value) in instances {
-            self.endpoint_cache.insert(id, value.rpc_endpoint);
-        }
+        let refreshed = instances
+            .into_iter()
+            .map(|(id, value)| (id, value.rpc_endpoint))
+            .collect();
+        self.endpoint_cache.store(Arc::new(refreshed));
         Ok(())
     }
 
     /// Get the first cached endpoint (or refresh + pick first).
     async fn first_endpoint(&self) -> Result<String> {
-        if let Some(entry) = self.endpoint_cache.iter().next() {
-            return Ok(entry.value().clone());
+        if let Some(endpoint) = self.endpoint_cache.load().values().next() {
+            return Ok(endpoint.clone());
         }
         self.refresh_endpoints().await?;
         self.endpoint_cache
-            .iter()
+            .load()
+            .values()
             .next()
-            .map(|e| e.value().clone())
+            .cloned()
             .ok_or_else(|| ChunkdbClientError::Unreachable("no chunkdb instances registered".into()))
     }
 
     /// Resolve the endpoint string for the chunk ID's owning
-    /// instance. Falls back to `first_endpoint` (any instance) when
-    /// range binding is not configured or routing fails.
+    /// instance. Sharded mode fails closed when routing is unavailable.
     async fn endpoint_for_chunk(&self, chunk_id: Option<&ChunkId>) -> Result<String> {
         if let Some(binding) = &self.range_binding {
             if let Some(id) = chunk_id {
-                if let Ok(b) = binding.route(id).await {
-                    return Ok(b.rpc_endpoint);
-                }
+                return binding
+                    .route(id)
+                    .await
+                    .map(|route| route.rpc_endpoint)
+                    .map_err(|error| {
+                        ChunkdbClientError::Unreachable(format!("range routing failed: {error}"))
+                    });
             }
         }
         self.first_endpoint().await

@@ -560,6 +560,7 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
                 service_type: match s.service_type {
                     crowdb_console_shared::config::ServiceType::Kv => "kv",
                     crowdb_console_shared::config::ServiceType::Diskdb => "diskdb",
+                    crowdb_console_shared::config::ServiceType::Chunkdb => "chunkdb",
                     crowdb_console_shared::config::ServiceType::Rpc => "rpc",
                 }
                 .to_string(),

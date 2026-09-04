@@ -19,7 +19,9 @@ use crowdb_protocol::ServicePort;
 use crate::clients::http::ServerClient;
 use crate::config::{NodeEntry, RackEntry, ReplicaEntry, ServerEntry, ServiceType};
 use crate::error::{Error, Result};
-use crate::lifecycle::{self, crowdb_kv_server_bin, DeployRequest, DiskdbDeployRequest};
+use crate::lifecycle::{
+    self, crowdb_kv_server_bin, ChunkdbDeployRequest, DeployRequest, DiskdbDeployRequest,
+};
 use crate::ops::hardware::{self, AddDiskInput};
 use crate::ops::OpContext;
 
@@ -592,6 +594,203 @@ pub struct LocalDiskdbDeployConfig {
     pub zone_size_bytes: u64,
     pub unit_size_bytes: u32,
     pub data_groups: Vec<u64>,
+}
+
+/// Summary of `ChunkDB` instances attached to a local deployment.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalChunkdbDeploySummary {
+    pub instance_count: usize,
+}
+
+/// Summary of the six-node, three-rack full `ChunkDB` benchmark stack.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalCombinedDeploySummary {
+    pub kv_nodes: usize,
+    pub racks: usize,
+    pub diskdb_instances: usize,
+    pub chunkdb_instances: usize,
+}
+
+/// Deploy the canonical full-stack `ChunkDB` benchmark topology.
+///
+/// # Errors
+/// Returns an error when any KV, hardware, `DiskDB`, or `ChunkDB` provisioning phase fails.
+pub async fn local_deploy_combined(
+    ctx: &OpContext,
+    workspace: &std::path::Path,
+    tunables: Option<&KvDeployTunables>,
+    disk: &LocalDiskdbDeployConfig,
+    allow_unsafe_ec: bool,
+) -> Result<LocalCombinedDeploySummary> {
+    local_deploy(ctx, 6, Some(workspace), tunables).await?;
+    assign_benchmark_racks(ctx).await?;
+    crate::ops::kv_logical::add_group(ctx, 0, 1, 101, &[1, 2, 3]).await?;
+    let diskdb = local_deploy_diskdb(ctx, workspace, disk).await?;
+    let chunkdb = local_deploy_chunkdb(ctx, workspace, 3, allow_unsafe_ec).await?;
+    Ok(LocalCombinedDeploySummary {
+        kv_nodes: 6,
+        racks: 3,
+        diskdb_instances: diskdb.instance_count,
+        chunkdb_instances: chunkdb.instance_count,
+    })
+}
+
+async fn assign_benchmark_racks(ctx: &OpContext) -> Result<()> {
+    for rack_id in 1..=3 {
+        if ctx.config().racks.iter().all(|rack| rack.id != rack_id) {
+            ctx.config_mut().add_rack(RackEntry {
+                id: rack_id,
+                name: format!("rack-{rack_id}"),
+            })?;
+        }
+        ctx.sysmd()
+            .add_rack(
+                rack_id,
+                &RackValue {
+                    status: HwStatus::Up as i32,
+                    node_ids: Vec::new(),
+                },
+            )
+            .await?;
+    }
+    for node_id in 1..=6 {
+        let rack_id = (node_id - 1) / 2 + 1;
+        if rack_id != 1 {
+            ctx.sysmd().remove_node(1, node_id).await?;
+        }
+        if let Some(node) = ctx.config_mut().nodes.iter_mut().find(|node| node.id == node_id) {
+            node.rack_id = rack_id;
+        }
+        ctx.sysmd()
+            .add_node(
+                rack_id,
+                node_id,
+                &NodeValue {
+                    status: HwStatus::Up as i32,
+                    last_used_dg_id: 0,
+                    disk_group_ids: Vec::new(),
+                    status_changed_at_ms: 0,
+                    temp_failure_since_ms: None,
+                },
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Attach `instance_count` `ChunkDB` instances to distinct configured nodes.
+///
+/// # Errors
+/// Returns an error for invalid topology, port allocation, spawn, or readiness failures.
+pub async fn local_deploy_chunkdb(
+    ctx: &OpContext,
+    workspace: &std::path::Path,
+    instance_count: usize,
+    allow_unsafe_ec: bool,
+) -> Result<LocalChunkdbDeploySummary> {
+    let mut nodes = ctx.config().nodes.clone();
+    nodes.sort_by_key(|node| node.id);
+    if instance_count == 0 || nodes.len() < instance_count {
+        return Err(Error::Validation {
+            field: "chunkdb_instances".into(),
+            message: format!("need at least {instance_count} configured nodes"),
+        });
+    }
+    let seeds = ctx
+        .config()
+        .servers
+        .iter()
+        .filter(|server| server.service_type == ServiceType::Kv)
+        .map(|server| server.url.clone())
+        .collect::<Vec<_>>();
+    if seeds.is_empty() {
+        return Err(Error::Validation {
+            field: "kv_servers".into(),
+            message: "deploy KV before ChunkDB".into(),
+        });
+    }
+    let port_config = PortAllocConfig::new(workspace);
+    let count = u16::try_from(instance_count).unwrap_or(u16::MAX);
+    let http_ports =
+        port_alloc::alloc_port_range(ServicePort::ChunkdbHttp, 0, count, &port_config).map_err(|error| {
+            Error::Validation {
+                field: "port_alloc".into(),
+                message: error.to_string(),
+            }
+        })?;
+    let rpc_ports =
+        port_alloc::alloc_port_range(ServicePort::ChunkdbRpc, 0, count, &port_config).map_err(|error| {
+            Error::Validation {
+                field: "port_alloc".into(),
+                message: error.to_string(),
+            }
+        })?;
+    let deployments = futures::future::join_all(nodes.into_iter().take(instance_count).enumerate().map(
+        |(index, node)| {
+            let instance_id = 20_000 + u64::try_from(index).unwrap_or(u64::MAX);
+            let server_id = format!("chunkdb-{instance_id}");
+            let node_dir = workspace
+                .join(format!("rack{}", node.rack_id))
+                .join(format!("node{}", node.id))
+                .join(&server_id);
+            let request = ChunkdbDeployRequest {
+                server_id: server_id.clone(),
+                instance_id,
+                http_port: http_ports[index],
+                rpc_port: rpc_ports[index],
+                kv_server_mgmt_seeds: seeds.clone(),
+                allow_unsafe_ec,
+            };
+            async move {
+                let deployed = lifecycle::deploy_chunkdb_local(&request, &node, &node_dir).await?;
+                Ok::<_, Error>((index, node, server_id, deployed))
+            }
+        },
+    ))
+    .await;
+    for deployment in deployments {
+        let (index, node, server_id, deployed) = deployment?;
+        ctx.config_mut().add_server(ServerEntry {
+            id: server_id,
+            url: deployed.endpoint.clone(),
+            node_id: Some(node.id),
+            rpc_url: Some(deployed.endpoint),
+            rest_port: Some(http_ports[index]),
+            rpc_port: Some(rpc_ports[index]),
+            auto_start: true,
+            binary: None,
+            election_profile: None,
+            pid: Some(deployed.pid),
+            service_type: ServiceType::Chunkdb,
+            rpc_workers: None,
+            no_fsync: false,
+        })?;
+    }
+    wait_for_chunkdb_registration(ctx, instance_count).await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    Ok(LocalChunkdbDeploySummary { instance_count })
+}
+
+async fn wait_for_chunkdb_registration(ctx: &OpContext, expected: usize) -> Result<()> {
+    let discovery = ctx.discovery_or_error()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        discovery.invalidate(Some("chunkdb"));
+        if discovery
+            .discover_all("chunkdb")
+            .await
+            .is_ok_and(|instances| instances.len() >= expected)
+        {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::UpstreamRpc {
+                node_id: "group0-service-registry".into(),
+                status: format!("expected {expected} living chunkdb instances before timeout"),
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 /// Attach one `DiskDB` instance per configured KV node and provision its disks.

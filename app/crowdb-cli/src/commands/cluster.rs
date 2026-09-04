@@ -29,7 +29,7 @@ pub enum ClusterVerb {
     LocalDeploy {
         #[arg(short = 'n', long, default_value_t = 3)]
         nodes: usize,
-        /// Service type: `kv` (default), `diskdb`, or `rpc`.
+        /// Service type: `kv`, `diskdb`, `chunkdb`, `combined`, or `rpc`.
         #[arg(short = 't', long, default_value = "kv")]
         service_type: String,
         /// [rpc] Listen port. 0 = auto-allocate.
@@ -97,6 +97,12 @@ pub enum ClusterVerb {
         /// [diskdb] Existing store-0 KV groups used for allocation records.
         #[arg(long, value_delimiter = ',', default_value = "1")]
         data_groups: Vec<u64>,
+        /// [chunkdb] Number of instances to deploy.
+        #[arg(long, default_value_t = 3)]
+        chunkdb_instances: usize,
+        /// [chunkdb] Permit unsafe EC placement fallback.
+        #[arg(long, default_value_t = false)]
+        allow_unsafe_ec: bool,
     },
     /// Tear down the entire cluster (all groups, stores, servers, sysdata).
     Destroy,
@@ -204,7 +210,68 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
             disk_zone_size_bytes,
             disk_unit_size_bytes,
             data_groups,
+            chunkdb_instances,
+            allow_unsafe_ec,
         } => match service_type.as_str() {
+            "combined" => {
+                let ctx = match op_context(cli) {
+                    Ok(context) => context,
+                    Err(code) => return code,
+                };
+                let workspace =
+                    deploy_workspace(cli).unwrap_or_else(|| std::path::PathBuf::from("cli-deploy"));
+                let tunables = crowdb_console_shared::ops::cluster::KvDeployTunables {
+                    rpc_workers: nonzero(rpc_workers),
+                    peer_pool_size: nonzero(peer_pool_size),
+                    max_inflight: nonzero(max_inflight),
+                    coalesce_max_keys: nonzero(coalesce_max_keys),
+                    coalesce_drain_threshold: nonzero(coalesce_drain_threshold),
+                    event_write: event_write.then_some(true),
+                    send_queue_capacity: nonzero(send_queue_capacity),
+                    metrics_interval: nonzero(metrics_interval),
+                    kv_backend: (!kv_backend.is_empty()).then_some(kv_backend),
+                    wal_backend: (!wal_backend.is_empty()).then_some(wal_backend),
+                    no_fsync: no_fsync.then_some(true),
+                };
+                let disk = crowdb_console_shared::ops::cluster::LocalDiskdbDeployConfig {
+                    disk_groups_per_node,
+                    disks_per_group,
+                    capacity_bytes: disk_capacity_bytes,
+                    zone_size_bytes: disk_zone_size_bytes,
+                    unit_size_bytes: disk_unit_size_bytes,
+                    data_groups,
+                };
+                match crowdb_console_shared::ops::cluster::local_deploy_combined(
+                    &ctx,
+                    &workspace,
+                    Some(&tunables),
+                    &disk,
+                    allow_unsafe_ec,
+                )
+                .await
+                {
+                    Ok(summary) => {
+                        if let Err(code) = commit_config(cli, &ctx) {
+                            return code;
+                        }
+                        if cli.json {
+                            return print_json(cli, &summary);
+                        }
+                        println!(
+                            "local-deploy combined: {} KV nodes, {} racks, {} DiskDB, {} ChunkDB",
+                            summary.kv_nodes,
+                            summary.racks,
+                            summary.diskdb_instances,
+                            summary.chunkdb_instances
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("error: local-deploy combined: {error}");
+                        ExitCode::from(2)
+                    }
+                }
+            }
             "kv" => {
                 let ctx = match op_context(cli) {
                     Ok(c) => c,
@@ -345,9 +412,40 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                     }
                 }
             }
+            "chunkdb" => {
+                let ctx = match op_context(cli) {
+                    Ok(context) => context,
+                    Err(code) => return code,
+                };
+                let workspace =
+                    deploy_workspace(cli).unwrap_or_else(|| std::path::PathBuf::from("cli-deploy"));
+                match crowdb_console_shared::ops::cluster::local_deploy_chunkdb(
+                    &ctx,
+                    &workspace,
+                    chunkdb_instances,
+                    allow_unsafe_ec,
+                )
+                .await
+                {
+                    Ok(summary) => {
+                        if let Err(code) = commit_config(cli, &ctx) {
+                            return code;
+                        }
+                        if cli.json {
+                            return print_json(cli, &summary);
+                        }
+                        println!("local-deploy chunkdb: {} instances", summary.instance_count);
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("error: local-deploy chunkdb: {error}");
+                        ExitCode::from(2)
+                    }
+                }
+            }
             other => {
                 eprintln!(
-                    "error: local-deploy: unsupported service type `{other}` (expected kv, diskdb, or rpc)"
+                    "error: local-deploy: unsupported service type `{other}` (expected kv, diskdb, chunkdb, combined, or rpc)"
                 );
                 ExitCode::from(1)
             }

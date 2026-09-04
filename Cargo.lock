@@ -639,6 +639,7 @@ dependencies = [
 name = "crowdb-chunkdb-client"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "bytes",
  "crowdb-kv-client",
  "crowdb-protocol",
@@ -658,6 +659,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossbeam-channel",
+ "crowdb-chunkdb-client",
  "crowdb-common",
  "crowdb-console-shared",
  "crowdb-diskdb-client",

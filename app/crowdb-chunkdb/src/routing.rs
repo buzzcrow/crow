@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use arc_swap::ArcSwap;
 use tracing::warn;
 
 use crowdb_protocol::chunk_id::ChunkIdParts;
@@ -80,42 +80,42 @@ impl BindingTable {
 /// Thread-safe binding cache.
 #[derive(Clone)]
 pub struct BindingCache {
-    inner: Arc<RwLock<BindingTable>>,
+    inner: Arc<ArcSwap<BindingTable>>,
 }
 
 impl BindingCache {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(BindingTable::default())),
+            inner: Arc::new(ArcSwap::from_pointee(BindingTable::default())),
         }
     }
 
     /// Replace the entire binding table.
     pub fn replace(&self, table: BindingTable) {
-        *self.inner.write() = table;
+        self.inner.store(Arc::new(table));
     }
 
     /// Route a chunk ID to its binding.
     pub fn route(&self, chunk_id: &ChunkId) -> Option<BucketBinding> {
         let parts = chunk_id_to_parts(chunk_id);
         let bucket = parts.hash_to_bucket();
-        self.inner.read().route(bucket).cloned()
+        self.inner.load().route(bucket).cloned()
     }
 
     /// Route a bucket directly.
     pub fn route_bucket(&self, bucket: u16) -> Option<BucketBinding> {
-        self.inner.read().route(bucket).cloned()
+        self.inner.load().route(bucket).cloned()
     }
 
     /// Check if the cache is empty.
     pub fn is_empty(&self) -> bool {
-        self.inner.read().is_empty()
+        self.inner.load().is_empty()
     }
 
     /// Get a snapshot of the binding table.
     pub fn snapshot(&self) -> BindingTable {
-        self.inner.read().clone()
+        (**self.inner.load()).clone()
     }
 }
 

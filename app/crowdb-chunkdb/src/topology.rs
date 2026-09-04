@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use arc_swap::ArcSwap;
 use tracing::warn;
 
 use crowdb_protocol::common::HwStatus;
@@ -73,6 +73,11 @@ impl TopologySnapshot {
         self.disk_groups.get(&dg_id)
     }
 
+    /// Complete disk-group entries for synchronizing dependent route caches.
+    pub fn disk_groups(&self) -> Vec<DiskGroupEntry> {
+        self.disk_groups.values().cloned().collect()
+    }
+
     /// Nodes in a given rack.
     pub fn nodes_in_rack(&self, rack_id: RackId) -> Vec<NodeId> {
         self.racks
@@ -113,38 +118,48 @@ impl TopologySnapshot {
 /// Thread-safe topology cache with point-in-time snapshots.
 #[derive(Clone)]
 pub struct TopologyCache {
-    inner: Arc<RwLock<TopologySnapshot>>,
+    inner: Arc<ArcSwap<TopologySnapshot>>,
 }
 
 impl TopologyCache {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(TopologySnapshot::default())),
+            inner: Arc::new(ArcSwap::from_pointee(TopologySnapshot::default())),
         }
     }
 
     /// Get a point-in-time snapshot clone for placement.
     pub fn snapshot(&self) -> TopologySnapshot {
-        self.inner.read().clone()
+        (*self.inner.load_full()).clone()
     }
 
     /// Replace the entire snapshot (periodic refresh).
     pub fn replace(&self, snapshot: TopologySnapshot) {
-        *self.inner.write() = snapshot;
+        self.inner.store(Arc::new(snapshot));
     }
 
     /// Update a single disk-group entry (watch/notify fine-grained update).
+    #[allow(clippy::needless_pass_by_value)]
     pub fn update_disk_group(&self, entry: DiskGroupEntry) {
-        self.inner.write().disk_groups.insert(entry.dg_id, entry);
+        self.inner.rcu(|current| {
+            let mut next = (**current).clone();
+            next.disk_groups.insert(entry.dg_id, entry.clone());
+            next
+        });
     }
 
     /// Remove a disk-group entry (deleted disk-group).
     pub fn remove_disk_group(&self, dg_id: DiskGroupId) {
-        self.inner.write().disk_groups.remove(&dg_id);
+        self.inner.rcu(|current| {
+            let mut next = (**current).clone();
+            next.disk_groups.remove(&dg_id);
+            next
+        });
     }
 
     /// Update a node's status.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn update_node_status(
         &self,
         rack_id: RackId,
@@ -152,20 +167,26 @@ impl TopologyCache {
         status: i32,
         dg_ids: Vec<DiskGroupId>,
     ) {
-        self.inner
-            .write()
-            .nodes
-            .insert((rack_id, node_id), (status, dg_ids));
+        self.inner.rcu(|current| {
+            let mut next = (**current).clone();
+            next.nodes.insert((rack_id, node_id), (status, dg_ids.clone()));
+            next
+        });
     }
 
     /// Update a rack's status + node list.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn update_rack(&self, rack_id: RackId, status: i32, node_ids: Vec<NodeId>) {
-        self.inner.write().racks.insert(rack_id, (status, node_ids));
+        self.inner.rcu(|current| {
+            let mut next = (**current).clone();
+            next.racks.insert(rack_id, (status, node_ids.clone()));
+            next
+        });
     }
 
     /// Check if the cache is empty (no topology loaded yet).
     pub fn is_empty(&self) -> bool {
-        self.inner.read().is_empty()
+        self.inner.load().is_empty()
     }
 }
 
@@ -205,6 +226,14 @@ pub async fn build_snapshot(hw: &crowdb_kv_client::HardwareClient) -> Option<Top
         }
     };
 
+    let disks = match hw.list_all_disks().await {
+        Ok(disks) => disks,
+        Err(error) => {
+            warn!(%error, "topology refresh: list_all_disks failed");
+            return None;
+        }
+    };
+
     if racks.is_empty() && nodes.is_empty() && disk_groups.is_empty() {
         warn!("topology refresh: all lists empty, keeping previous snapshot");
         return None;
@@ -218,20 +247,18 @@ pub async fn build_snapshot(hw: &crowdb_kv_client::HardwareClient) -> Option<Top
         snap.nodes
             .insert((rack_id, node_id), (nv.status, nv.disk_group_ids));
     }
-    for dg in disk_groups {
+    for mut dg in disk_groups {
+        dg.value.disk_ids = disks
+            .iter()
+            .filter(|disk| {
+                disk.rack_id == dg.rack_id && disk.node_id == dg.node_id && disk.disk_group_id == dg.dg_id
+            })
+            .map(|disk| disk.disk_id)
+            .collect();
         snap.disk_groups.insert(dg.dg_id, dg);
     }
 
-    // Read unit_size_bytes from the first available disk. All disks
-    // in the cluster use the same unit size, so one sample suffices.
-    for dg in snap.disk_groups.values() {
-        if let Some(disk_id) = dg.value.disk_ids.first() {
-            if let Ok(Some(disk)) = hw.get_disk(dg.rack_id, dg.node_id, dg.dg_id, disk_id).await {
-                snap.unit_size_bytes = disk.unit_size_bytes;
-                break;
-            }
-        }
-    }
+    snap.unit_size_bytes = disks.first().map_or(0, |disk| disk.value.unit_size_bytes);
 
     Some(snap)
 }

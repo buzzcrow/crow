@@ -21,6 +21,7 @@ crowdb-common = { path = "../../lib/crowdb-common/rust" }
 crowdb-protocol = { path = "../../lib/crowdb-protocol" }
 crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi" }
 crowdb-diskdb-client = { path = "../../lib/crowdb-diskdb-client" }
+crowdb-chunkdb-client = { path = "../../lib/crowdb-chunkdb-client" }
 flatbuffers = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
@@ -81,3 +82,7 @@ path = "tests/diskdb_bench_test.rs"
 [[test]]
 name = "diskdb_workload_test"
 path = "tests/diskdb_workload_test.rs"
+
+[[test]]
+name = "chunkdb_bench_test"
+path = "tests/chunkdb_bench_test.rs"

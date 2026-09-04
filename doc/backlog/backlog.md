@@ -22,17 +22,6 @@ complexity, and dependency. Before implementation, follow the
   behind the existing RPC service interface. Preserve the completed behavior
   and lock-free hot paths with feature-grouped component coverage.
 
-- **[R133](R133-chunkdb-behavior-conformance.md)** — chunkdb behavioral
-  conformance and benchmark — Area: chunkdb / client / diskdb / console —
-  review the completed ChunkDB implementation against its lifecycle,
-  placement, routing, persistence, and RPC designs; fix straightforward
-  gaps and split complex findings into focused backlog items. Organize
-  component E2E coverage around the public `ChunkdbClient`, including
-  mirror and EC allocation, append/alter, seal, delete/free, rollback,
-  restart, routing, and concurrent transitions. Add `crowdb-cli bench
-  chunkdb` plus a timestamped regression script that deploys a six-storage-
-  node, three-rack topology with KV, DiskDB, and ChunkDB services and verifies
-  both chunk metadata and DiskDB space accounting.
 - **[R131](R131-diskdb-allocate-performance.md)** — diskdb allocation
   throughput — Area: diskdb / client / kv / RPC — Trace and measure the
   complete allocation path, isolate bitmap, persistence, scheduling,

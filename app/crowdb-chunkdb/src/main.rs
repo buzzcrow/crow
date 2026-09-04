@@ -16,12 +16,14 @@ use crowdb_chunkdb::range_guard::RangeGuard;
 use crowdb_chunkdb::routing::{default_binding_table, BindingCache};
 use crowdb_chunkdb::service::ChunkdbRpcService;
 use crowdb_chunkdb::storage::ChunkStore;
-use crowdb_chunkdb::topology::{notify::NotifyHandler, refresh::run_refresh_loop, TopologyCache};
+use crowdb_chunkdb::topology::{
+    build_snapshot, notify::NotifyHandler, refresh::run_refresh_loop, TopologyCache,
+};
 use crowdb_kv_client::{
     ClientConfig, CrowdbKvClient, HardwareClient, RangeBindingClient, ServiceRegistryClient,
     WatchNotifyClient,
 };
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// CROWDB chunkdb server CLI.
 #[derive(Parser, Debug)]
@@ -153,6 +155,12 @@ async fn main() {
     let cache = TopologyCache::new();
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
 
+    let Some(initial_topology) = build_snapshot(&refresh_hw).await else {
+        error!("initial topology refresh failed; refusing readiness");
+        return;
+    };
+    cache.replace(initial_topology);
+
     let refresh_cache = cache.clone();
     let refresh_interval = Duration::from_secs(u64::from(config.topology.refresh_interval_secs));
     let refresh_stop = stop_rx.clone();
@@ -211,8 +219,42 @@ async fn main() {
         stop_rx.clone(),
     );
 
+    let range_refresh_guard = Arc::clone(&range_guard);
+    let range_refresh_kv = Arc::clone(&kv);
+    let range_refresh_stop = stop_rx.clone();
+    let range_refresh_instance = config
+        .server
+        .instance_id
+        .as_ref()
+        .and_then(|value| value.parse::<u64>().ok());
+    let range_refresh_handle = tokio::spawn(async move {
+        let Some(instance_id) = range_refresh_instance else {
+            return;
+        };
+        let mut stop = range_refresh_stop;
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if let Err(error) = range_refresh_guard.load_from_group0(&range_refresh_kv, instance_id).await {
+                        warn!(%error, instance_id, "periodic range guard refresh failed");
+                    }
+                }
+                changed = stop.changed() => {
+                    if changed.is_ok() && *stop.borrow() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+
     // Diskdb client pool + chunk allocator.
     let pool = Arc::new(DiskdbClientPool::new(svc));
+    if let Err(error) = pool.refresh_endpoints().await {
+        error!(%error, "initial diskdb discovery failed; refusing readiness");
+        return;
+    }
     let allocator = Arc::new(ChunkAllocator::new(Arc::clone(&pool)));
 
     // Per-chunk lock map + payload cache (R100).
@@ -236,8 +278,16 @@ async fn main() {
     let handler = Arc::new(
         LifecycleHandler::new(Arc::clone(&store), allocator, cache)
             .with_range_guard(Arc::clone(&range_guard))
-            .with_locks(Arc::clone(&lock_map)),
+            .with_locks(Arc::clone(&lock_map))
+            .with_allow_unsafe_ec(config.placement.allow_unsafe_ec),
     );
+    match handler.reconcile_pending_chunks().await {
+        Ok(count) => info!(count, "pending chunk allocations reconciled"),
+        Err(error) => {
+            error!(%error, "pending chunk allocation reconciliation failed");
+            return;
+        }
+    }
 
     // Build the crowdb-rpc server. The RpcServer listens on the RPC
     // port and dispatches to ChunkdbRpcService handlers.
@@ -265,6 +315,7 @@ async fn main() {
     let _ = http_handle.await;
     let _ = refresh_handle.await;
     let _ = notify_handle.await;
+    let _ = range_refresh_handle.await;
     let _ = sweep_handle.await;
     if let Some(h) = keepalive_handle {
         let _ = h.await;

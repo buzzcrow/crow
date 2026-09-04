@@ -130,7 +130,7 @@ fn ec_select_8_4_unsafe_fallback_3_nodes() {
 
     // 8+4 = 12 blocks, 2 nodes, safe mode max 4 per node = 8 capacity
     // → unsafe mode needed (max 12 per node).
-    let plan = EcPlacement::select(&snap, 8, 4, &PlacementConstraints::new()).unwrap();
+    let plan = EcPlacement::select(&snap, 8, 4, &PlacementConstraints::new().allow_unsafe_ec()).unwrap();
     assert_eq!(plan.entries.len(), 12);
     assert!(!plan.safe_mode);
 }
@@ -143,7 +143,7 @@ fn ec_select_unsafe_mode_succeeds_with_single_node() {
     // 8+4 = 12 blocks, 1 node. Safe mode fails (max 4 per node = 4
     // capacity < 12), but unsafe mode sets max_per_node = 12, so 1
     // node can hold all 12 blocks.
-    let plan = EcPlacement::select(&snap, 8, 4, &PlacementConstraints::new()).unwrap();
+    let plan = EcPlacement::select(&snap, 8, 4, &PlacementConstraints::new().allow_unsafe_ec()).unwrap();
     assert_eq!(plan.entries.len(), 12);
     assert!(!plan.safe_mode);
 }
@@ -155,6 +155,27 @@ fn ec_select_no_healthy_dgs() {
 
     let result = EcPlacement::select(&snap, 4, 2, &PlacementConstraints::new());
     assert!(result.is_err());
+}
+
+#[test]
+fn ec_select_rejects_implicit_unsafe_fallback() {
+    let cache = build_topology(&[(1, &[10, 11])]);
+    let result = EcPlacement::select(&cache.snapshot(), 8, 4, &PlacementConstraints::new());
+
+    assert!(matches!(
+        result,
+        Err(crowdb_chunkdb::selector::PlacementError::UnsafePlacementRequired)
+    ));
+}
+
+#[test]
+fn selectors_reject_zero_width_shapes() {
+    let cache = build_topology(&[(1, &[10])]);
+    let snap = cache.snapshot();
+
+    assert!(MirrorPlacement::select(&snap, 0, &PlacementConstraints::new()).is_err());
+    assert!(EcPlacement::select(&snap, 0, 1, &PlacementConstraints::new()).is_err());
+    assert!(EcPlacement::select(&snap, 1, 0, &PlacementConstraints::new()).is_err());
 }
 
 #[test]

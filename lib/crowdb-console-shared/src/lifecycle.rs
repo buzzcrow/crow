@@ -98,6 +98,17 @@ pub struct DeployedDiskdb {
     pub pid: u32,
 }
 
+/// Inputs for a local `ChunkDB` deployment.
+#[derive(Debug, Clone)]
+pub struct ChunkdbDeployRequest {
+    pub server_id: String,
+    pub instance_id: u64,
+    pub http_port: u16,
+    pub rpc_port: u16,
+    pub kv_server_mgmt_seeds: Vec<String>,
+    pub allow_unsafe_ec: bool,
+}
+
 /// Spawn `crowdb-kv-server` locally. The `node.host` is folded into the
 /// returned URLs so the rest of the console can address the instance
 /// uniformly with the SSH path coming in C4.
@@ -672,6 +683,29 @@ pub fn crowdb_diskdb_bin() -> Option<PathBuf> {
     None
 }
 
+/// Resolve the path to the `crowdb-chunkdb` binary.
+#[must_use]
+pub fn crowdb_chunkdb_bin() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("CROWDB_CHUNKDB_BIN") {
+        return Some(PathBuf::from(path));
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            let mut path = directory.to_path_buf();
+            for _ in 0..3 {
+                let candidate = path.join("crowdb-chunkdb");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+                if !path.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    find_in_path(std::ffi::OsStr::new("crowdb-chunkdb"))
+}
+
 /// Locate the standalone `crowdb-rpc-fb-server` C++ binary (built via
 /// `pixi run build-cpp`). Search order: `$CROWDB_RPC_FB_SERVER_BIN`,
 /// `lib/crowdb-rpc/build/crowdb-rpc-fb-server` relative to the repo
@@ -930,6 +964,87 @@ pub async fn deploy_diskdb_local(
     wait_for_diskdb_ready(&mut child, &mgmt_url, &to, pid, Duration::from_secs(30)).await?;
     // Detach only after readiness succeeds so the child can be polled for an
     // early exit without changing ownership of a successful process.
+    std::mem::forget(child);
+    Ok(DeployedDiskdb {
+        server_id: req.server_id.clone(),
+        endpoint,
+        pid,
+    })
+}
+
+/// Spawn `crowdb-chunkdb` locally and wait for HTTP readiness.
+///
+/// # Errors
+/// Returns an error for invalid ports, missing binaries, I/O failures, or readiness timeout.
+pub async fn deploy_chunkdb_local(
+    req: &ChunkdbDeployRequest,
+    node: &NodeEntry,
+    workspace_dir: &Path,
+) -> Result<DeployedDiskdb> {
+    if req.http_port == 0 || req.rpc_port == 0 || req.http_port == req.rpc_port {
+        return Err(Error::Validation {
+            field: "port".into(),
+            message: "chunkdb HTTP and RPC ports must be non-zero and distinct".into(),
+        });
+    }
+    let binary = crowdb_chunkdb_bin().ok_or_else(|| Error::NotFound {
+        kind: "binary".into(),
+        id: "crowdb-chunkdb (set CROWDB_CHUNKDB_BIN)".into(),
+    })?;
+    let launch_binary = stage_server_binary(&binary, workspace_dir)?;
+    let config_dir = workspace_dir.join("conf");
+    let log_dir = workspace_dir.join("log");
+    std::fs::create_dir_all(&config_dir)?;
+    std::fs::create_dir_all(&log_dir)?;
+    let config_path = config_dir.join("crowdb_chunkdb_config.toml");
+    let seeds = req
+        .kv_server_mgmt_seeds
+        .iter()
+        .map(|seed| format!("{seed:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let config = format!(
+        "[server]\nhttp_listen_addr = \"{}:{}\"\nrpc_listen_addr = \"{}:{}\"\ninstance_id = \"{}\"\nkv_server_mgmt_seeds = [{}]\nkeepalive_interval_secs = 1\n\n[topology]\nrefresh_interval_secs = 1\n\n[range_guard]\nallow_all_when_empty = false\n\n[lifecycle]\ncache_capacity = 10000\nsweep_chunk_lock_interval_secs = 60\nlock_hold_warn_threshold_ms = 1000\n\n[placement]\nallow_unsafe_ec = {}\n",
+        node.host,
+        req.http_port,
+        node.host,
+        req.rpc_port,
+        req.instance_id,
+        seeds,
+        req.allow_unsafe_ec,
+    );
+    std::fs::write(&config_path, config)?;
+
+    let endpoint = format!("http://{}:{}", node.host, req.rpc_port);
+    let management = format!("http://{}:{}", node.host, req.http_port);
+    let output_path = log_dir.join("crowdb-chunkdb.stdout.log");
+    let output = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&output_path)?;
+    let mut command = Command::new(launch_binary);
+    command
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--log-dir")
+        .arg(&log_dir)
+        .current_dir(workspace_dir)
+        .stdout(Stdio::from(output.try_clone()?))
+        .stderr(Stdio::from(output))
+        .kill_on_drop(false);
+    let mut child = command.spawn()?;
+    let pid = child.id().ok_or_else(|| Error::Validation {
+        field: "pid".into(),
+        message: "spawned ChunkDB child has no pid".into(),
+    })?;
+    wait_for_diskdb_ready(
+        &mut child,
+        &management,
+        &output_path,
+        pid,
+        Duration::from_secs(30),
+    )
+    .await?;
     std::mem::forget(child);
     Ok(DeployedDiskdb {
         server_id: req.server_id.clone(),

@@ -669,7 +669,9 @@ fn map_error(e: &LifecycleError) -> (FBChunkdbRetCode, String, u32, u32) {
         LifecycleError::ChunkNotFound => (FBChunkdbRetCode::NotFound, e.to_string(), 0, 0),
         LifecycleError::ChunkAlreadyExists => (FBChunkdbRetCode::AlreadyExists, e.to_string(), 0, 0),
         LifecycleError::StateConflict => (FBChunkdbRetCode::Aborted, e.to_string(), 0, 0),
-        LifecycleError::Allocation(_) => (FBChunkdbRetCode::Internal, e.to_string(), 0, 0),
+        LifecycleError::Allocation(_) | LifecycleError::Commit(_) | LifecycleError::Cleanup(_) => {
+            (FBChunkdbRetCode::Internal, e.to_string(), 0, 0)
+        }
         LifecycleError::Storage(_) => (FBChunkdbRetCode::Internal, e.to_string(), 0, 0),
         LifecycleError::InvalidRequest(_) => (FBChunkdbRetCode::InvalidArgument, e.to_string(), 0, 0),
         LifecycleError::LockBusy | LifecycleError::LockTimeout => {

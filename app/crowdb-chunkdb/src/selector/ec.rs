@@ -37,6 +37,11 @@ impl EcPlacement {
         code_num: usize,
         constraints: &PlacementConstraints,
     ) -> Result<PlacementPlan, PlacementError> {
+        if data_num == 0 || code_num == 0 {
+            return Err(PlacementError::InvalidShape(
+                "EC data_num and code_num must both be non-zero".to_string(),
+            ));
+        }
         let total_blocks = data_num + code_num;
         let dgs = healthy_dgs(snap, constraints);
         if dgs.is_empty() {
@@ -58,6 +63,10 @@ impl EcPlacement {
                 entries,
                 safe_mode: true,
             });
+        }
+
+        if !constraints.allow_unsafe_ec {
+            return Err(PlacementError::UnsafePlacementRequired);
         }
 
         // Fall back to unsafe mode: max `total_blocks` per node (i.e.

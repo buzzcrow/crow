@@ -21,6 +21,45 @@ pub enum BenchVerb {
     /// Distributed disk-block allocation benchmark.
     #[command(subcommand)]
     Diskdb(DiskdbBenchVerb),
+    /// Distributed chunk lifecycle benchmark.
+    #[command(subcommand)]
+    Chunkdb(ChunkdbBenchVerb),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ChunkdbBenchVerb {
+    /// Allocate chunks until the time limit.
+    Allocate(ChunkdbArgs),
+    /// Run a deterministic lifecycle operation mix.
+    Mix(ChunkdbArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct ChunkdbArgs {
+    #[arg(long, default_value_t = 10)]
+    pub duration_secs: u64,
+    #[arg(long, default_value_t = 4)]
+    pub concurrency: usize,
+    #[arg(long, default_value_t = 1)]
+    pub strip_count: u32,
+    #[arg(long, default_value_t = 1024)]
+    pub write_granularity_kb: u32,
+    #[arg(long, value_enum, default_value_t = ChunkdbStripMode::Mirror)]
+    pub strip_type: ChunkdbStripMode,
+    #[arg(long, default_value_t = 3)]
+    pub copy_count: u32,
+    #[arg(long, default_value_t = 4)]
+    pub data_num: u32,
+    #[arg(long, default_value_t = 2)]
+    pub code_num: u32,
+    #[arg(long, default_value_t = 1)]
+    pub seed: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ChunkdbStripMode {
+    Mirror,
+    Ec,
 }
 
 #[derive(Subcommand, Debug)]
@@ -274,6 +313,7 @@ pub async fn run_bench_verb(cli: &Cli, verb: BenchVerb) -> ExitCode {
     match verb {
         BenchVerb::Rpc(args) => super::rpc::run(cli, args).await,
         BenchVerb::Diskdb(verb) => super::diskdb::run(cli, verb).await,
+        BenchVerb::Chunkdb(verb) => super::chunkdb::run(cli, verb).await,
         BenchVerb::Kv(kv) => match kv {
             KvBenchVerb::Prepare(args) => super::kv_prepare::run(cli, args).await,
             KvBenchVerb::Read(args) => super::kv_read::run(cli, args).await,

@@ -26,6 +26,8 @@ pub struct PlacementConstraints {
     pub exclude_racks: Vec<RackId>,
     /// Disk-groups to exclude.
     pub exclude_disk_groups: Vec<DiskGroupId>,
+    /// Permit EC placement that exceeds the safe per-node failure bound.
+    pub allow_unsafe_ec: bool,
 }
 
 impl PlacementConstraints {
@@ -49,6 +51,12 @@ impl PlacementConstraints {
     #[must_use]
     pub fn exclude_disk_group(mut self, dg: DiskGroupId) -> Self {
         self.exclude_disk_groups.push(dg);
+        self
+    }
+
+    #[must_use]
+    pub fn allow_unsafe_ec(mut self) -> Self {
+        self.allow_unsafe_ec = true;
         self
     }
 
@@ -100,6 +108,10 @@ pub enum PlacementError {
     InsufficientCapacity,
     #[error("no healthy disk-groups available")]
     NoHealthyDiskGroups,
+    #[error("safe EC placement is unavailable and unsafe placement was not enabled")]
+    UnsafePlacementRequired,
+    #[error("invalid placement shape: {0}")]
+    InvalidShape(String),
 }
 
 /// Filter healthy disk-groups from the snapshot, applying exclusion hints.

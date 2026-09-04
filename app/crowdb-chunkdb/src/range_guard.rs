@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use arc_swap::ArcSwap;
 
 use crowdb_protocol::chunk_id::ChunkIdParts;
 use crowdb_protocol::common::{ChunkId, ChunkdbRangeBindingValue};
@@ -49,7 +49,7 @@ pub struct NotMyRange {
 /// single-instance behavior before R99. When `false`, an empty guard
 /// rejects all mutating requests until the binding table is loaded.
 pub struct RangeGuard {
-    owned: Arc<RwLock<Vec<OwnedRange>>>,
+    owned: Arc<ArcSwap<Vec<OwnedRange>>>,
     allow_all_when_empty: bool,
 }
 
@@ -58,7 +58,7 @@ impl RangeGuard {
     #[must_use]
     pub fn new(allow_all_when_empty: bool) -> Self {
         Self {
-            owned: Arc::new(RwLock::new(Vec::new())),
+            owned: Arc::new(ArcSwap::from_pointee(Vec::new())),
             allow_all_when_empty,
         }
     }
@@ -78,7 +78,7 @@ impl RangeGuard {
     /// `allow_all_when_empty` is `false`.
     pub fn check(&self, chunk_id: &ChunkId) -> Result<(), NotMyRange> {
         let bucket = hash_to_bucket(chunk_id);
-        let ranges = self.owned.read();
+        let ranges = self.owned.load();
         if ranges.is_empty() {
             if self.allow_all_when_empty {
                 return Ok(());
@@ -97,7 +97,7 @@ impl RangeGuard {
     pub fn replace(&self, ranges: Vec<OwnedRange>) {
         let mut sorted = ranges;
         sorted.sort_by_key(|r| r.start);
-        *self.owned.write() = sorted;
+        self.owned.store(Arc::new(sorted));
     }
 
     /// Load owned ranges from group-0 binding table for this instance.
@@ -159,19 +159,19 @@ impl RangeGuard {
             }
         }
         new_ranges.sort_by_key(|r| r.start);
-        *self.owned.write() = new_ranges;
+        self.owned.store(Arc::new(new_ranges));
         Ok(())
     }
 
     /// Get a snapshot of the owned ranges.
     pub fn snapshot(&self) -> Vec<OwnedRange> {
-        self.owned.read().clone()
+        (**self.owned.load()).clone()
     }
 
     /// Check if the guard has any owned ranges loaded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.owned.read().is_empty()
+        self.owned.load().is_empty()
     }
 }
 

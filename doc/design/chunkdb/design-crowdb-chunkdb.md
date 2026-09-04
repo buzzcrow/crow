@@ -173,9 +173,9 @@ in addition to periodic refresh:
 
 - **Watch registration**: chunkdb registers for group-0 watch on disk-group
   and node status keys via the crowdb-kv watch/notify client.
-- **Immediate updates**: On notification (disk failure, maintenance mode change,
-  capacity update), affected entries in TopologyCache are updated immediately,
-  without waiting for the periodic refresh interval.
+- **Immediate updates**: A notification coalesces into a complete group-0
+  topology rebuild. The immutable snapshot is published with one `ArcSwap`
+  operation, so allocation never observes a mixture of generations.
 - **Fallback mechanism**: Periodic refresh (30s default) continues as a fallback
   for missed notifications and consistency verification.
 - **Placement impact**: Real-time updates enable placement decisions to reflect
@@ -563,9 +563,8 @@ Site (data center)
   default 30s) fetches full topology from group-0 via `HardwareClient` for
   consistency and missed notification recovery.
 - **Watch/notify integration**: Register for group-0 watch on disk-group and
-  node status keys via crowdb-kv watch/notify client. On notification, update
-  affected entries in TopologyCache immediately for real-time responsiveness
-  to disk failures, maintenance changes, and capacity updates.
+  node status keys via crowdb-kv watch/notify client. Notifications coalesce
+  into a complete refresh; no point mutation is published.
 - Fetch all nodes with status and rack assignment
 - Fetch all disk-groups with capacity and node assignment
 - Fetch all racks with site assignment
@@ -609,8 +608,10 @@ with per-node block limits:
 **Safe mode**: Ensures no single node failure exceeds code_num, guaranteeing
 recoverability. Requires enough nodes to satisfy constraints.
 
-**Unsafe mode**: Relaxes per-node limits when cluster is too small. Used
-only in exceptional circumstances (e.g., degraded cluster).
+**Unsafe mode**: Relaxes per-node limits when cluster is too small. It is
+disabled by default and requires the explicit `placement.allow_unsafe_ec`
+server setting. Insufficient topology otherwise returns a typed placement
+error without allocating blocks.
 
 **Example**: 8+4 EC on 12-node cluster → 12 blocks across ≥3 racks, max 4
 blocks per node. On 3-node cluster (unsafe mode) → 12 blocks, 4 per node.
@@ -626,17 +627,18 @@ blocks per node. On 3-node cluster (unsafe mode) → 12 blocks, 4 per node.
    - Call placement selector to get node/disk-group assignments
    - Call diskdb to allocate blocks in parallel
    - On failure: rollback (free all allocated blocks), return error
-5. Build chunk metadata with strips and state = Active
-6. Persist chunk metadata to KV
-7. Return chunk to caller
+5. Persist chunk metadata with state = Init as a durable allocation intent
+6. Commit every segment in its exact DiskDB group
+7. Persist state = Active and return the chunk to the caller
 
 **Parallel allocation**: Strips are allocated in parallel to minimize
 latency. Diskdb calls within a strip are also parallel (all blocks in a
 mirror strip, all data+parity blocks in an EC strip).
 
-**Rollback**: If any strip allocation fails, all successfully allocated
-blocks are freed via diskdb before returning an error. This ensures no
-leaked blocks on partial failure.
+**Rollback**: If allocation or commit fails, every segment from every prior
+strip is freed through its exact DiskDB group before returning. A failed
+rollback is surfaced. A surviving Init record is reconciled at startup, so a
+crash between persistence and activation retains a durable recovery intent.
 
 ## 9. Chunk Lifecycle
 
@@ -649,17 +651,19 @@ Init ──> Active ──> Sealed ──> Deleted
 | Init    | Internal transient state during allocation. Not visible to callers. |
 | Active  | Chunk is open for writes. Strips can be appended. Returned by AllocateChunk. |
 | Sealed  | Chunk is read-only. Records final length and seal timestamp. |
-| Deleted | Chunk marked for deletion. All disk blocks freed via diskdb.  |
+| Deleted | Durable cleanup intent; retained segments still need freeing. |
 
 **State transitions**:
-- `Init → Active`: After successful block allocation and KV persistence.
+- `Init → Active`: After every allocated segment is committed.
 - `Active → Sealed`: Via `SealChunk` RPC. Validates state, updates sealed_length.
-- `Active → Deleted`: Via `DeleteChunk` RPC. Frees disk blocks.
-- `Sealed → Deleted`: Via `DeleteChunk` RPC. Frees disk blocks.
+- `Active → Deleted`: Persist cleanup intent, free segments, persist tombstone.
+- `Sealed → Deleted`: Persist cleanup intent, free segments, persist tombstone.
 - Invalid transitions (e.g., `Sealed → Active`) return errors.
 
-**Concurrency**: KV CAS or state machine guards prevent conflicting
-transitions. Last writer wins with validation.
+**Concurrency**: An approved bounded `tokio::Mutex` per chunk serializes the
+read-modify-write lifecycle. Locks for different chunks are independent and
+tests prove cross-chunk progress. Immutable topology, routing, range, endpoint,
+and disk-group reverse-map snapshots remain lock-free on their read paths.
 
 ## 10. Per-Chunk-ID Lifecycle Lock + Chunk Cache
 
@@ -833,17 +837,15 @@ mutating RPC acquires the per-chunk lock before its RMW cycle:
 - `append_chunk`: `check_range` → `acquire` → state check, allocate
   strips, `put_chunk`, `commit_strip_segments` → `guard.refresh(chunk)`.
 - `seal_chunk`: same as append but no diskdb calls (fast path).
-- `delete_chunk`: `check_range` → `acquire` → state check (already
-  deleted → `ChunkNotFound`) → free segments (`free_blocks` — inside
-  the lock) → `put_chunk`, `guard.refresh(chunk)` (keeps Deleted chunk
-  cached).
-- `delete_chunk_range`: `check_range` → `acquire` → state check (must
-  be Active) → partition strips by overlap with `[offset, offset+size)`
-  → free removed strips' segments → `put_chunk`, `guard.refresh(chunk)`.
-- `update_chunk_strip`: `check_range` → `acquire` → state check (must
-  be Active or Sealed — EC parity rebuild can happen after seal) →
-  validate `strip_index` → free old strip's segments → commit new
-  strip's segments → replace strip → `put_chunk`, `guard.refresh(chunk)`.
+- `delete_chunk`: `check_range` → `acquire` → state check → persist Deleted
+  with segments as cleanup intent → free segments → clear the segment list
+  and persist the tombstone → `guard.refresh(chunk)`.
+- `delete_chunk_range`: `check_range` → `acquire` → validate a nonzero,
+  nonoverflowing range → persist the retained strips → free the removed
+  strips' segments → `guard.refresh(chunk)`.
+- `update_chunk_strip`: `check_range` → `acquire` → validate state, shape,
+  sequence, capacity, and owner → commit the replacement segments → publish
+  metadata → free the old strip → `guard.refresh(chunk)`.
 - `query_chunk` / `list_chunks` — unchanged (no lock, no cache).
 
 ### 10.7 Error variants + service mapping
@@ -1012,7 +1014,7 @@ Key configuration parameters:
 | mirror_copy_count          | 3       | Number of replicas for mirror strips  |
 | default_ec_scheme          | 6+3     | Default EC scheme (data+parity)       |
 | topology_refresh_interval  | 30 s    | Topology cache refresh interval       |
-| placement_safe_mode        | true    | Enforce safe EC placement constraints |
+| placement.allow_unsafe_ec  | false   | Permit explicit degraded EC placement |
 | max_allocation_parallelism | 10      | Max parallel strip allocations        |
 | lifecycle.cache_capacity   | 10_000  | Per-chunk payload cache capacity (§10) |
 | lifecycle.sweep_chunk_lock_interval_secs | 60 | Idle lock reap interval (§10) |
@@ -1021,7 +1023,30 @@ Key configuration parameters:
 
 Configuration is loaded from CLI args or config file at startup.
 
-## 15. Implementation Scope
+## 15. Full-Stack Deployment and Benchmark
+
+`crowdb-cli cluster local-deploy -t combined` creates the canonical local
+ChunkDB profile: six KV/storage nodes split evenly across three racks, one
+four-disk group and one DiskDB instance per node, one three-replica data
+group, three ChunkDB instances, and complete bucket ownership. Services share
+one configured log root and are registered before readiness is reported.
+
+`crowdb-cli bench chunkdb allocate` measures mirror or EC allocation with
+configurable shape, duration, seed, and concurrency. `bench chunkdb mix` uses
+a deterministic allocate/query/append/seal/delete distribution. Both query
+every surviving chunk through the public client, validate state, owner tags,
+and nonoverlapping physical segments, and require the exact referenced byte
+total to equal the DiskDB busy-space delta after compaction. Capacity
+exhaustion is a successful stop reason; any correctness error invalidates the
+sample.
+
+`tools/bench-chunkdb-regression.sh` builds all four release binaries and uses
+a fresh timestamped combined cluster for mirror, EC 4+2, EC 8+4, lifecycle
+mix, concurrency, and capacity-exhaustion cases. It retains each case's logs,
+destroys each cluster, runs all later cases after a failure, and returns a
+nonzero aggregate status.
+
+## 16. Implementation Scope
 
 **v1 (R85)**:
 - Basic chunkdb server and client
@@ -1043,6 +1068,6 @@ Configuration is loaded from CLI args or config file at startup.
 - Console/CLI integration
 - Custom RPC for performance
 
-## 16. References
+## 17. References
 
 - CROWDB diskdb design: `doc/design/diskdb/design-crowdb-diskdb.md`

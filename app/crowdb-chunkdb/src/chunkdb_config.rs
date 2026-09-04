@@ -18,6 +18,15 @@ pub struct ChunkdbConfig {
     pub range_guard: RangeGuardConfig,
     #[serde(default)]
     pub lifecycle: LifecycleConfig,
+    #[serde(default)]
+    pub placement: PlacementConfig,
+}
+
+/// Placement safety policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PlacementConfig {
+    /// Permit EC layouts that exceed the safe per-node failure bound.
+    pub allow_unsafe_ec: bool,
 }
 
 impl BaseConfig for ChunkdbConfig {

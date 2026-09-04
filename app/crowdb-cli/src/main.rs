@@ -108,6 +108,7 @@ impl Cli {
                     BenchVerb::Kv(_) => "kv",
                     BenchVerb::Rpc(_) => "rpc",
                     BenchVerb::Diskdb(_) => "diskdb",
+                    BenchVerb::Chunkdb(_) => "chunkdb",
                 };
                 format!("bench-{v}")
             }

@@ -20,4 +20,5 @@ bytes = "1"
 flatbuffers = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+arc-swap = "1.9"
 dashmap = "6"

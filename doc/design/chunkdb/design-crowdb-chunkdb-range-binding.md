@@ -263,8 +263,8 @@ This follows the `NotLeaderHint` pattern in
 ### 2.5 Edge cases
 
 - Binding cache empty on startup → first `route` triggers synchronous
-  `refresh`; if refresh fails, returns `NoBinding` (caller falls back
-  to "any instance" or errors).
+  `refresh`; if refresh fails or the bucket is unbound, sharded mode fails
+  closed. It never sends a mutation to an arbitrary instance.
 - Stale cache (sub-range moved) → server returns `NotMyRange` with
   hint; client refreshes + retries.
 - All instances for a sub-range down → client exhausts retries;

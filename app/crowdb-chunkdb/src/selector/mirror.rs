@@ -33,6 +33,11 @@ impl MirrorPlacement {
         copy_count: usize,
         constraints: &PlacementConstraints,
     ) -> Result<PlacementPlan, PlacementError> {
+        if copy_count == 0 {
+            return Err(PlacementError::InvalidShape(
+                "mirror copy_count must be non-zero".to_string(),
+            ));
+        }
         let dgs = healthy_dgs(snap, constraints);
         if dgs.is_empty() {
             return Err(PlacementError::NoHealthyDiskGroups);
