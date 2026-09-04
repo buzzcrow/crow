@@ -358,7 +358,12 @@ mod tests {
         let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!("crowdb-port-alloc-test-{id}"));
         let _ = fs::remove_dir_all(&dir);
-        PortAllocConfig::new(&dir)
+        // Each test gets a unique offset starting at 30000 so probes
+        // land in a high range unlikely to collide with real services
+        // or other test binaries. 500-port windows per test.
+        // id is bounded by the test count (~10), so truncation is safe.
+        let offset = 30000 + ((id & 0xFF) as u16) * 500;
+        PortAllocConfig::new(&dir).with_offset(offset)
     }
 
     fn cleanup(cfg: &PortAllocConfig) {
@@ -368,8 +373,9 @@ mod tests {
     #[test]
     fn alloc_single_port() {
         let cfg = unique_cfg();
+        let base = ServicePort::KvServerMgmt.base() + cfg.offset;
         let port = alloc_port(ServicePort::KvServerMgmt, 0, &cfg).unwrap();
-        assert_eq!(port, 10000);
+        assert_eq!(port, base);
         let claimed = read_claimed_ports(&cfg).unwrap();
         assert!(claimed.contains(&port));
         cleanup(&cfg);
@@ -378,32 +384,35 @@ mod tests {
     #[test]
     fn alloc_second_instance() {
         let cfg = unique_cfg();
+        let base = ServicePort::KvServerMgmt.base() + cfg.offset;
         let p0 = alloc_port(ServicePort::KvServerMgmt, 0, &cfg).unwrap();
         let p1 = alloc_port(ServicePort::KvServerMgmt, 1, &cfg).unwrap();
-        assert_eq!(p0, 10000);
-        assert_eq!(p1, 10001);
+        assert_eq!(p0, base);
+        assert_eq!(p1, base + 1);
         cleanup(&cfg);
     }
 
     #[test]
     fn alloc_skips_claimed() {
         let cfg = unique_cfg();
+        let base = ServicePort::KvServerMgmt.base() + cfg.offset;
         let p0 = alloc_port(ServicePort::KvServerMgmt, 0, &cfg).unwrap();
-        assert_eq!(p0, 10000);
+        assert_eq!(p0, base);
         // Allocating instance 0 again should skip to instance 1.
         let p1 = alloc_port(ServicePort::KvServerMgmt, 0, &cfg).unwrap();
-        assert_eq!(p1, 10001);
+        assert_eq!(p1, base + 1);
         cleanup(&cfg);
     }
 
     #[test]
     fn alloc_range() {
         let cfg = unique_cfg();
+        let base = ServicePort::KvServerListen.base() + cfg.offset;
         let ports = alloc_port_range(ServicePort::KvServerListen, 0, 3, &cfg).unwrap();
         assert_eq!(ports.len(), 3);
-        assert_eq!(ports[0], 10100);
-        assert_eq!(ports[1], 10101);
-        assert_eq!(ports[2], 10102);
+        assert_eq!(ports[0], base);
+        assert_eq!(ports[1], base + 1);
+        assert_eq!(ports[2], base + 2);
         let claimed = read_claimed_ports(&cfg).unwrap();
         for p in &ports {
             assert!(claimed.contains(p));
@@ -422,9 +431,10 @@ mod tests {
     #[test]
     fn mark_failed_skips_port() {
         let cfg = unique_cfg();
-        mark_failed(10000, &cfg).unwrap();
+        let base = ServicePort::KvServerMgmt.base() + cfg.offset;
+        mark_failed(base, &cfg).unwrap();
         let port = alloc_port(ServicePort::KvServerMgmt, 0, &cfg).unwrap();
-        assert_ne!(port, 10000, "failed port must be skipped");
+        assert_ne!(port, base, "failed port must be skipped");
         cleanup(&cfg);
     }
 
@@ -442,9 +452,12 @@ mod tests {
 
     #[test]
     fn offset_shifts_base() {
-        let cfg = unique_cfg().with_offset(50);
+        let base_cfg = unique_cfg();
+        let extra = 50;
+        let base_offset = base_cfg.offset;
+        let cfg = base_cfg.with_offset(base_offset + extra);
         let port = alloc_port(ServicePort::KvServerMgmt, 0, &cfg).unwrap();
-        assert_eq!(port, 10050);
+        assert_eq!(port, ServicePort::KvServerMgmt.base() + base_offset + extra);
         cleanup(&cfg);
     }
 
