@@ -180,6 +180,20 @@ impl AppState {
             .copied()
     }
 
+    /// Snapshot of all tracked `DiskDB` PIDs, keyed by node id.
+    ///
+    /// # Panics
+    /// Panics if the runtime PID mutex is poisoned.
+    #[must_use]
+    pub fn diskdb_pid_snapshot(&self) -> std::collections::HashMap<u64, u32> {
+        self.runtime_pids
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(key, pid)| key.strip_prefix("diskdb-")?.parse().ok().map(|id| (id, *pid)))
+            .collect()
+    }
+
     /// Set the runtime PID for a diskdb instance on a node (R77).
     ///
     /// # Panics

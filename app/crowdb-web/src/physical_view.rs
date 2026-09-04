@@ -33,6 +33,7 @@ use serde::Serialize;
 use crowdb_console_shared::cluster::{
     NodeHealth, NodeId, NodeStore, ProcState, RackId, ReplicaId, ReplicaRole, ReplicaState, ServerProcess,
 };
+use crowdb_console_shared::config::ServiceType;
 use crowdb_console_shared::config::{ConsoleConfig, NodeEntry, RackEntry, ServerEntry};
 use crowdb_console_shared::expand::{Expandable, Truncation};
 use crowdb_console_shared::monitor::NodeRecord;
@@ -59,9 +60,23 @@ pub struct NodeView {
     pub ssh_port: u16,
     pub has_server: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub server: Option<ServerProcess>,
+    pub kv_server: Option<ServerProcess>,
+    /// `DiskDB` projection intentionally has no `mgmt_url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diskdb_server: Option<DiskdbServerProcess>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stores: Option<Vec<StoreOnNodeView>>,
+}
+
+/// Physical `DiskDB` service projection. `DiskDB` exposes only its service
+/// endpoint; it has no HTTP management URL.
+#[derive(Debug, Serialize)]
+pub struct DiskdbServerProcess {
+    pub endpoint: String,
+    pub state: ProcState,
+    pub health: NodeHealth,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
 }
 
 /// A per-node store entry with an optional inlined group list. Distinct
@@ -146,6 +161,7 @@ pub struct PhysicalBuilder<'a> {
     pub cfg: &'a ConsoleConfig,
     pub snap: &'a BTreeMap<NodeId, NodeRecord>,
     pub pids: &'a HashMap<NodeId, u32>,
+    pub diskdb_pids: &'a HashMap<NodeId, u32>,
     truncation: Truncation,
     path: Vec<String>,
 }
@@ -185,6 +201,24 @@ impl<'a> PhysicalBuilder<'a> {
             cfg,
             snap,
             pids,
+            diskdb_pids: pids,
+            truncation: Truncation::default(),
+            path: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn new_with_diskdb_pids(
+        cfg: &'a ConsoleConfig,
+        snap: &'a BTreeMap<NodeId, NodeRecord>,
+        pids: &'a HashMap<NodeId, u32>,
+        diskdb_pids: &'a HashMap<NodeId, u32>,
+    ) -> Self {
+        Self {
+            cfg,
+            snap,
+            pids,
+            diskdb_pids,
             truncation: Truncation::default(),
             path: Vec::new(),
         }
@@ -229,11 +263,35 @@ impl<'a> PhysicalBuilder<'a> {
     pub fn build_node(&mut self, node: &NodeEntry, remaining: u8) -> NodeView {
         self.path.push(format!("node:{}", node.id));
         let rec = self.snap.get(&node.id);
-        let server = self.cfg.server_for_node(node.id).map(|entry| {
-            let has_pid = self.pids.get(&node.id).is_some();
-            Self::build_server_process(entry, rec, has_pid)
-        });
-        let has_server = server.is_some();
+        let kv_server = self
+            .cfg
+            .servers
+            .iter()
+            .find(|entry| entry.node_id == Some(node.id) && entry.service_type == ServiceType::Kv)
+            .map(|entry| {
+                let has_pid = self.pids.contains_key(&node.id);
+                Self::build_server_process(entry, rec, has_pid)
+            });
+        let diskdb_server = self
+            .cfg
+            .servers
+            .iter()
+            .find(|entry| entry.node_id == Some(node.id) && entry.service_type == ServiceType::Diskdb)
+            .map(|entry| {
+                let pid = self.diskdb_pids.get(&node.id).copied();
+                let health = pid.map_or(NodeHealth::Down, |_| NodeHealth::Up);
+                DiskdbServerProcess {
+                    endpoint: entry.rpc_url.clone().unwrap_or_else(|| entry.url.clone()),
+                    state: if pid.is_some() {
+                        ProcState::Running
+                    } else {
+                        ProcState::Failed
+                    },
+                    health,
+                    pid,
+                }
+            });
+        let has_server = kv_server.is_some() || diskdb_server.is_some();
         let has_stores = rec.is_some_and(|r| !r.stores.is_empty());
         let stores = if remaining >= 1 {
             let list: Vec<StoreOnNodeView> = rec
@@ -257,7 +315,8 @@ impl<'a> PhysicalBuilder<'a> {
             ssh_user: node.ssh_user.clone(),
             ssh_port: node.ssh_port,
             has_server,
-            server,
+            kv_server,
+            diskdb_server,
             stores,
         }
     }

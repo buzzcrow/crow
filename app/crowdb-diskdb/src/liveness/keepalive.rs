@@ -558,6 +558,23 @@ impl KeepAlive {
         // prevents a sync tick from flipping Init → Up with zero or
         // partially-loaded zones (making the disk allocatable early).
         if old_status == HwStatus::Init {
+            // Deferred zone load: the disk was added while the
+            // disk-group was unbound (bind == (0,0)). If the bind is
+            // now set, spawn the zone load task that was deferred in
+            // disk_add_init.
+            let bind = *dg.bind.read().unwrap();
+            if bind != (0, 0) {
+                if let Some(ref kv) = self.kv {
+                    if disk.try_claim_zone_load() {
+                        info!(
+                            disk = ?disk_id,
+                            dg_id = dg.disk_group_id,
+                            "reconcile: Init disk now bound; spawning deferred zone load"
+                        );
+                        self.spawn_zone_load(dg, &disk, disk_value, bind, kv.clone());
+                    }
+                }
+            }
             return;
         }
         let raw_disk_status = HwStatus::try_from(disk_value.status).unwrap_or(HwStatus::Up);
@@ -891,6 +908,13 @@ impl KeepAlive {
     /// then spawn a background zone load task. The task loads zones
     /// via `load_zone_inner` (strategy 2 + strategy 1 fallback) and
     /// transitions `Init → disk_value.status` on success.
+    ///
+    /// If the disk-group is unbound (`bind == (0, 0)`), the zone load
+    /// is deferred — the disk stays in Init state until a bind is set
+    /// (detected by `reconcile_existing_disk` on a later sync tick).
+    /// This prevents binary `ZoneValue` baseline writes from landing
+    /// in group-0 (store 0, group 0), which is the system group and
+    /// must only contain text-path keys + JSON values.
     fn disk_add_init(&self, dg: &Arc<DdbDiskGroup>, disk_id: DiskId, disk_value: &DiskValue) {
         let mut disk = DdbDisk::new(
             disk_id,
@@ -907,32 +931,21 @@ impl KeepAlive {
         dg.add_disk(disk.clone());
         dg.rebuild_allocating_disks();
 
-        // Spawn background zone load if we have a kv client.
+        // Spawn background zone load if we have a kv client and the
+        // disk-group is bound to a real data group.
         if let Some(ref kv) = self.kv {
             let bind = *dg.bind.read().unwrap();
-            let zone_rotate_count = self.config.zone_rotate_count;
-            let status_machine = self.status_machine.clone();
-            let dg = Arc::clone(dg);
-            let disk = Arc::clone(&disk);
-            let kv = Arc::new(kv.clone());
-            let cas_retry_metric = self.cas_retry_metric.clone();
-            let disk_value_owned = disk_value.clone();
-            let hw = self.hw.clone();
-            tokio::spawn(async move {
-                Self::background_zone_load(
-                    bind,
-                    disk_id,
-                    disk_value_owned,
-                    kv,
-                    cas_retry_metric,
-                    zone_rotate_count,
-                    status_machine,
-                    dg,
-                    disk,
-                    hw,
-                )
-                .await;
-            });
+            if bind == (0, 0) {
+                info!(
+                    disk = ?disk_id,
+                    dg_id = dg.disk_group_id,
+                    "disk-add init: disk-group unbound; deferring zone load until bind is set"
+                );
+                return;
+            }
+            if disk.try_claim_zone_load() {
+                self.spawn_zone_load(dg, &disk, disk_value, bind, kv.clone());
+            }
         } else {
             // No kv client (test mode) — transition Init → Up with
             // empty zones so the disk becomes allocatable.
@@ -953,6 +966,44 @@ impl KeepAlive {
             disk.rebuild_active_zones(self.config.zone_rotate_count);
             dg.rebuild_allocating_disks();
         }
+    }
+
+    /// Spawn the background zone load task for a disk. Extracted from
+    /// `disk_add_init` so it can also be called from
+    /// `reconcile_existing_disk` when a deferred Init disk's bind
+    /// becomes set.
+    fn spawn_zone_load(
+        &self,
+        dg: &Arc<DdbDiskGroup>,
+        disk: &Arc<DdbDisk>,
+        disk_value: &DiskValue,
+        bind: Bind,
+        kv: DdbKvClient,
+    ) {
+        let disk_id = disk.disk_id;
+        let zone_rotate_count = self.config.zone_rotate_count;
+        let status_machine = self.status_machine.clone();
+        let dg = Arc::clone(dg);
+        let disk = Arc::clone(disk);
+        let kv = Arc::new(kv);
+        let cas_retry_metric = self.cas_retry_metric.clone();
+        let disk_value_owned = disk_value.clone();
+        let hw = self.hw.clone();
+        tokio::spawn(async move {
+            Self::background_zone_load(
+                bind,
+                disk_id,
+                disk_value_owned,
+                kv,
+                cas_retry_metric,
+                zone_rotate_count,
+                status_machine,
+                dg,
+                disk,
+                hw,
+            )
+            .await;
+        });
     }
 
     /// Background zone load task for a new Init-state disk. Loads all

@@ -5,7 +5,7 @@ import { Suspense, useState, useCallback, useMemo, lazy, useEffect, useRef, type
 import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive, Boxes, CheckCircle2, XCircle, PowerOff, Wrench, AlertTriangle, EyeOff, HelpCircle } from 'lucide-react';
 import type { CenterPanelMode } from './shell/Header';
 import { DomainProvider, useDomain } from './contexts/DomainContext';
-import { SelectionProvider, useSelection } from './contexts/SelectionContext';
+import { SelectionProvider, useSelection, type SelectedEntity } from './contexts/SelectionContext';
 import { ToastProvider, useToast } from './contexts/ToastContext';
 import { ActivityProvider, useActivity } from './contexts/ActivityContext';
 import { useClusterTree } from './data/useClusterTree';
@@ -16,7 +16,6 @@ import { Sidebar } from './shell/Sidebar';
 import { ToastContainer } from './components/ToastContainer';
 import { TreeNode } from './components/Tree';
 import { ContextMenu, useContextMenu, MenuItemOrSeparator } from './components/ContextMenu';
-import { cn } from './utils/cn';
 import type { MenuTarget } from './topology/TopologyCanvas';
 import {
   AddRackDialog,
@@ -60,16 +59,14 @@ import {
   listServers,
 } from './api';
 import { deployPortDefaultsForNode, diskdbPortDefaultsForNode, nextIdFromSuffix, nextNumericId } from './components/dialogs/defaults';
-import { buildCrowdbKVServers, crowdbKvServerNodeIds } from './data/crowdbKvServers';
+import { buildCrowdbKVServers, crowdbKvServerNodeIds, extractPort } from './data/crowdbKvServers';
 import { isCrowdbKVServerAvailable } from './data/crowdbKvServers';
 import { toUiHealth, HW_STATUS_NAMES } from './utils/entityDisplay';
+import { ClusterView } from './views/ClusterView';
+import { KvView } from './views/KvView';
+import { ChunkView } from './views/ChunkView';
 
-const TopologyCanvas = lazy(() =>
-  import('./topology/TopologyCanvas').then((m) => ({ default: m.TopologyCanvas })),
-);
 const Inspector = lazy(() => import('./shell/Inspector').then((m) => ({ default: m.Inspector })));
-const KvOperatorPanel = lazy(() => import('./panels/KvOperatorPanel').then((m) => ({ default: m.KvOperatorPanel })));
-const CapacityPanel = lazy(() => import('./panels/CapacityPanel').then((m) => ({ default: m.CapacityPanel })));
 
 export interface CrowdbConsoleProps {
   /** API prefix for all backend calls (default "/api"). */
@@ -88,7 +85,7 @@ export interface CrowdbConsoleProps {
 
 function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: CrowdbConsoleProps) {
   const { domain } = useDomain();
-  const { selectedEntity } = useSelection();
+  const { selectedEntity, selectEntity, clearSelection } = useSelection();
   const { success, error } = useToast();
   const { log } = useActivity();
 
@@ -108,6 +105,22 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
   const [inspectorWidth, setInspectorWidth] = useState(320);
   const [resizing, setResizing] = useState<'left' | 'right' | null>(null);
   const [canvasFocusRequest, setCanvasFocusRequest] = useState<{ targetId: string; subtree: boolean; nonce: number } | null>(null);
+  // When a cross-jump drives the domain change, it sets a pending
+  // selection that must survive the domain-change effect (which
+  // otherwise clears the selection). The ref is checked once, then
+  // reset, so subsequent manual domain switches still clear.
+  const pendingSelectionRef = useRef<SelectedEntity | null>(null);
+
+  useEffect(() => {
+    if (pendingSelectionRef.current) {
+      const pending = pendingSelectionRef.current;
+      pendingSelectionRef.current = null;
+      selectEntity(pending);
+    } else {
+      clearSelection();
+    }
+    setCanvasFocusRequest(null);
+  }, [domain, clearSelection, selectEntity]);
 
   const [dialog, setDialog] = useState<{
     addRack?: boolean;
@@ -160,6 +173,13 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
     }
     return merged;
   }, [capNodeDiskGroups, clusterDiskGroups]);
+  const existingDiskGroupIds = useMemo(
+    () => Array.from(new Set([
+      ...Object.values(nodeDiskGroups).flatMap((entry) => entry.diskGroups.map((dg) => dg.id)),
+      ...(hardwareCapacity?.disk_groups || []).map((group) => group.disk_group_id),
+    ])),
+    [nodeDiskGroups, hardwareCapacity],
+  );
 
   const loading = physLoading || logLoading || capLoading;
   const dataError = physError || logError || capError;
@@ -198,6 +218,21 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
     }
     return m;
   }, [allServers]);
+  const diskdbInstanceIdByNodeId = useMemo(() => {
+    const instanceByPort = new Map(
+      diskdbInstances
+        .map((instance) => [extractPort(instance.rpc_endpoint), instance.instance_id] as const)
+        .filter((entry): entry is readonly [number, string] => entry[0] != null),
+    );
+    const result = new Map<number, string>();
+    for (const server of allServers) {
+      if (server.service_type !== 'diskdb' || server.node_id == null) continue;
+      const port = extractPort(server.endpoint || server.rpc_url);
+      const instanceId = port == null ? undefined : instanceByPort.get(port);
+      if (instanceId != null) result.set(server.node_id, instanceId);
+    }
+    return result;
+  }, [allServers, diskdbInstances]);
   // Cluster is initialized once the system store (store 0) exists.
   const clusterInitialized = useMemo(
     () => stores.some((s) => String(s.store_id) === '0'),
@@ -294,10 +329,15 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
       delete: {
         type: 'Cluster',
         id: 'all',
-        onDelete: async () => { await runMutation('Reset Cluster', 'all', () => resetCluster()); },
+        onDelete: async () => {
+          await runMutation('Reset Cluster', 'all', async () => {
+            await resetCluster();
+            clearSelection();
+          });
+        },
       },
     }));
-  }, [runMutation]);
+  }, [runMutation, clearSelection]);
 
   // Status icons for the "Change Status" submenu.
   const statusIcons: Record<string, ReactNode> = {
@@ -408,6 +448,20 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
               });
             }),
           });
+        } else if (t.type === 'DiskGroup') {
+          const dgId = Number(t.rawId);
+          const nodeId = Number(p.node_id);
+          const rackId = Number(p.rack_id);
+          items.push({ id: 'add-disk', label: 'Add Disk', icon: <HardDrive className="tw-h-4 tw-w-4" />, onSelect: () => setDialog((d) => ({ ...d, addDisk: { nodeId, dgId } })) });
+          items.push({ id: 'dg-status', label: 'Change Status', icon: <Activity className="tw-h-4 tw-w-4" />, submenu: buildStatusSubmenu((status) => runMutation(`Set DG ${status}`, t.label || t.id, () => setDiskGroupStatus(rackId, nodeId, dgId, status))) });
+          items.push({ id: 'assign-dg', label: 'Assign to DiskDB', icon: <Server className="tw-h-4 tw-w-4" />, onSelect: () => setDialog((d) => ({ ...d, assignDiskGroup: { rackId, nodeId, dgId, dgName: t.label } })) });
+          items.push({ id: 'del-dg', label: 'Delete Disk Group', icon: <Trash2 className="tw-h-4 tw-w-4" />, destructive: true, onSelect: () => requestDelete('Disk Group', dgId, async () => { await runMutation('Delete Disk Group', t.label || t.id, () => removeDiskGroup(nodeId, dgId)); }, 'All disks in this disk group will also be removed.') });
+        } else if (t.type === 'Disk') {
+          const diskId = String(p.disk_id || t.rawId || t.id);
+          const nodeId = Number(p.node_id);
+          const dgId = Number(p.disk_group_id);
+          items.push({ id: 'disk-status', label: 'Change Status', icon: <Activity className="tw-h-4 tw-w-4" />, submenu: buildStatusSubmenu((status) => runMutation(`Set Disk ${status}`, t.label || t.id, () => setDiskStatus(diskId, status))) });
+          items.push({ id: 'del-disk', label: 'Delete Disk', icon: <Trash2 className="tw-h-4 tw-w-4" />, destructive: true, onSelect: () => requestDelete('Disk', diskId, async () => { await runMutation('Delete Disk', diskId, () => removeDisk(nodeId, dgId, diskId)); }) });
         } else if (t.type === 'Server') {
           // Server context menu: dispatch on serviceType (KV vs DiskDB).
           const nodeId = Number(p.node_id);
@@ -933,6 +987,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
         nodeDiskGroups={nodeDiskGroups}
         diskdbNodeIds={diskdbNodeIds}
         diskdbHealthById={diskdbHealthById}
+        diskdbInstanceIdByNodeId={diskdbInstanceIdByNodeId}
       />
 
       <div
@@ -949,94 +1004,55 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
           marginRight: selectedEntity ? inspectorWidth : 0,
         }}
       >
-        {/* Per-domain center-panel tab bar / toggle */}
+        {domain === Domain.Cluster && (
+          <ClusterView
+            racks={racks}
+            nodes={nodes}
+            servers={servers}
+            stores={stores}
+            nodeStores={nodeStores}
+            nodeHealthById={nodeHealthById}
+            diskdbNodeIds={diskdbNodeIds}
+            diskdbInstances={diskdbInstances}
+            diskdbInstanceIdByNodeId={diskdbInstanceIdByNodeId}
+            nodeDiskGroups={nodeDiskGroups}
+            refreshToken={lastRefreshTime.getTime()}
+            focusRequest={canvasFocusRequest}
+            onEntityContextMenu={onCanvasContextMenu}
+          />
+        )}
         {domain === Domain.KV && kvEnabled && (
-          <div className="tw-flex tw-items-center tw-gap-1 tw-px-4 tw-py-1.5 tw-border-b tw-border-border tw-bg-panel">
-            <button
-              data-testid="kv-tab-cluster"
-              onClick={() => setCenterPanel('topology')}
-              className={cn(
-                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
-                centerPanel === 'topology' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
-              )}
-              aria-pressed={centerPanel === 'topology'}
-            >
-              Cluster
-            </button>
-            <button
-              data-testid="kv-tab-kv"
-              onClick={() => setCenterPanel('kv')}
-              className={cn(
-                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
-                centerPanel === 'kv' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
-              )}
-              aria-pressed={centerPanel === 'kv'}
-            >
-              KV
-            </button>
-          </div>
+          <KvView stores={stores} selectedEntity={selectedEntity} readonly={readonly} backendError={!!dataError} loading={loading} />
         )}
         {domain === Domain.Chunk && (
-          <div className="tw-flex tw-items-center tw-gap-1 tw-px-4 tw-py-1.5 tw-border-b tw-border-border tw-bg-panel">
-            <button
-              data-testid="chunk-tab-capacity"
-              onClick={() => setCenterPanel('capacity')}
-              className={cn(
-                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
-                centerPanel === 'capacity' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
-              )}
-              aria-pressed={centerPanel === 'capacity'}
-            >
-              Capacity
-            </button>
-            <button
-              data-testid="chunk-tab-chunk"
-              onClick={() => setCenterPanel('chunk')}
-              className={cn(
-                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
-                centerPanel === 'chunk' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
-              )}
-              aria-pressed={centerPanel === 'chunk'}
-            >
-              Chunk
-            </button>
-          </div>
+          <ChunkView
+            centerPanel={centerPanel}
+            onCenterPanelChange={setCenterPanel}
+            instances={diskdbInstances}
+            usage={capacityUsage}
+            hardwareCapacity={hardwareCapacity}
+            scanStatus={capacityScanStatus}
+            loading={capLoading}
+            readonly={readonly}
+            onRefresh={refreshCapacity}
+            selectedEntity={selectedEntity}
+            racks={racks}
+            nodes={nodes}
+            servers={servers}
+            stores={stores}
+            nodeStores={nodeStores}
+            nodeHealthById={nodeHealthById}
+            diskdbNodeIds={diskdbNodeIds}
+            nodeDiskGroups={nodeDiskGroups}
+            refreshToken={lastRefreshTime.getTime()}
+            focusRequest={canvasFocusRequest}
+            onEntityContextMenu={onCanvasContextMenu}
+          />
         )}
-        <Suspense fallback={<BodyFallback />}>
-          {domain === Domain.Chunk && centerPanel === 'capacity' ? (
-            <CapacityPanel
-              instances={diskdbInstances}
-              usage={capacityUsage}
-              hardwareCapacity={hardwareCapacity}
-              scanStatus={capacityScanStatus}
-              loading={capLoading}
-              readonly={readonly}
-              onRefresh={refreshCapacity}
-              selectedEntity={selectedEntity}
-            />
-          ) : domain === Domain.KV && centerPanel === 'kv' && kvEnabled ? (
-            <KvOperatorPanel stores={stores} selectedEntity={selectedEntity} readonly={readonly} backendError={!!dataError} loading={loading} />
-          ) : (
-            <TopologyCanvas
-              racks={racks}
-              nodes={nodes}
-              servers={servers}
-              stores={stores}
-              nodeStores={nodeStores}
-              nodeHealthById={nodeHealthById}
-              diskdbNodeIds={diskdbNodeIds}
-              diskdbInstances={diskdbInstances}
-              nodeDiskGroups={nodeDiskGroups}
-              refreshToken={lastRefreshTime.getTime()}
-              focusRequest={canvasFocusRequest}
-              onEntityContextMenu={onCanvasContextMenu}
-            />
-          )}
-        </Suspense>
       </main>
 
       <Suspense fallback={null}>
-        <Inspector readonly={readonly} modules={modules} nodes={nodes} racks={racks} servers={servers} stores={stores} capacityUsage={capacityUsage} hardwareCapacity={hardwareCapacity} diskdbInstances={diskdbInstances} width={inspectorWidth} />
+        <Inspector readonly={readonly} modules={modules} nodes={nodes} racks={racks} servers={servers} stores={stores} capacityUsage={capacityUsage} hardwareCapacity={hardwareCapacity} diskdbInstances={diskdbInstances} width={inspectorWidth} pendingSelectionRef={pendingSelectionRef} />
       </Suspense>
 
       {selectedEntity && (
@@ -1068,6 +1084,10 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
           defaultRpcPort={addNodeDeployDefaults.defaultRpcPort}
           defaultDiskdbRpcPort={addNodeDeployDefaults.defaultDiskdbRpcPort}
           onCreatedRackId={(rackId) => setLastUsedRackId(Number(rackId))}
+          onDiskdbPortReserved={(port) => setRememberedDeployPorts((prev) => ({
+            ...prev,
+            diskdbRpc: prev.diskdbRpc.includes(port) ? prev.diskdbRpc : [...prev.diskdbRpc, port],
+          }))}
           onSuccess={handleRefresh}
         />
       )}
@@ -1147,10 +1167,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
           isOpen
           onClose={closeDialogs}
           nodeId={dialog.addDiskGroup.nodeId}
-          existingDgIds={[
-            ...(nodeDiskGroups[dialog.addDiskGroup.nodeId]?.diskGroups || []).map((dg) => dg.id),
-            ...(hardwareCapacity?.disk_groups || []).map((g) => g.disk_group_id),
-          ]}
+          existingDgIds={existingDiskGroupIds}
           onSuccess={handleRefresh}
         />
       )}
@@ -1226,14 +1243,6 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
       )}
 
       <ToastContainer />
-    </div>
-  );
-}
-
-function BodyFallback() {
-  return (
-    <div className="tw-w-full tw-h-full tw-flex tw-items-center tw-justify-center tw-text-muted tw-text-sm">
-      Loading…
     </div>
   );
 }

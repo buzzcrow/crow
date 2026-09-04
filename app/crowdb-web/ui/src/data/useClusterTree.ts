@@ -83,10 +83,10 @@ export function useClusterTree({
 
       // Determine which nodes host a server.
       const serverNodeIds = new Set<number>();
-      for (const n of nodeList) if (n.server) serverNodeIds.add(n.id);
+      for (const n of nodeList) if (n.kv_server) serverNodeIds.add(n.id);
       for (const rack of Array.isArray(racksData) ? racksData : []) {
         for (const entry of rack.nodes || []) {
-          if (entry.has_server || entry.server) {
+          if (entry.has_server || entry.kv_server) {
             serverNodeIds.add(entry.id);
           }
         }

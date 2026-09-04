@@ -13,7 +13,6 @@ const apiBase = consoleBaseURL();
 async function openKvPanel(page: any) {
   await step('kv: goto', () => page.goto('/'));
   await page.getByTestId('domain-kv').click();
-  await page.getByTestId('kv-tab-kv').click();
   await page.getByTestId('kv-store-select').selectOption('99');
   await page.getByTestId('kv-group-select').selectOption('990');
 }
@@ -170,5 +169,69 @@ test.describe('kv ops · put/get/scan/delete', () => {
       expect(getResponse.ok(), await getResponse.text()).toBeTruthy();
       await expect(page.getByTestId('kv-not-found')).toBeVisible({ timeout: 3_000 });
     });
+  });
+
+  test('auto-scan fires on initial group selection (G-0 shows data without manual Scan)', async ({ page }) => {
+    // Regression: selecting a group used to not auto-scan on the
+    // first selection because a `userSelectedRef` guard suppressed
+    // the scan until the user manually changed the group. This left
+    // G-0 (the system store) showing no data until the user clicked
+    // Scan. The fix removed the guard so auto-scan fires on every
+    // group selection, including the initial one.
+    const errors: string[] = [];
+    page.on('pageerror', (err) => errors.push(String(err)));
+
+    // --- Part 1: G-0 (system store) auto-scans on initial selection ---
+    // G-0 is read-only (no Put/Delete), but Scan + Get work. The
+    // auto-scan must fire when the user selects store 0 / group 0
+    // without clicking Scan.
+    await step('kv: goto + select G-0', async () => {
+      await page.goto('/');
+      await page.getByTestId('domain-kv').click();
+      // Select store 0 (system store) and group 0. The auto-scan
+      // checkbox is ON by default, so selecting the group must
+      // trigger a scan automatically — no manual Scan click needed.
+      const scanResponse = page.waitForResponse(
+        (response) => response.url().includes('/stores/0/groups/0/kv/scan'),
+        { timeout: 10_000 },
+      );
+      await page.getByTestId('kv-store-select').selectOption('0');
+      await page.getByTestId('kv-group-select').selectOption('0');
+      await scanResponse;
+    });
+
+    // The scan table must be visible — even if G-0 has 0 rows, the
+    // table DOM is rendered after scan completes. The key assertion
+    // is that a scan fired and the table appeared without clicking Scan.
+    await expect(page.getByTestId('kv-scan-table')).toBeVisible({ timeout: 3_000 });
+    // G-0 is read-only — the system group warning must be visible.
+    await expect(page.getByText(/system group.*topology metadata/i)).toBeVisible({ timeout: 3_000 });
+
+    // --- Part 2: writable group auto-scans on re-selection ---
+    // Switch to store 99 / group 990, put a key, then re-select the
+    // group to verify auto-scan fires again and picks up the new key.
+    await step('kv: put into G-990', async () => {
+      await page.getByTestId('kv-store-select').selectOption('99');
+      await page.getByTestId('kv-group-select').selectOption('990');
+      await page.getByLabel('Put key').fill('autoscan-reselect-key');
+      await page.getByLabel('Put value').fill('autoscan-reselect-value');
+      const putResponse = page.waitForResponse((response) => response.url().includes('/kv/put'));
+      await page.getByRole('button', { name: /^Put$/ }).click();
+      const putResp = await putResponse;
+      expect(putResp.ok(), await putResp.text()).toBeTruthy();
+    });
+
+    // Re-select group 990 — auto-scan must fire and show the key.
+    await step('kv: re-select G-990 triggers auto-scan', async () => {
+      const rescanResponse = page.waitForResponse(
+        (response) => response.url().includes('/stores/99/groups/990/kv/scan'),
+        { timeout: 10_000 },
+      );
+      await page.getByTestId('kv-group-select').selectOption('990');
+      await rescanResponse;
+      await expect(page.getByTestId('kv-scan-table').getByText('autoscan-reselect-key')).toBeVisible({ timeout: 3_000 });
+    });
+
+    expect(errors, errors.join('\n')).toHaveLength(0);
   });
 });

@@ -20,7 +20,6 @@ import { step } from '../fixtures/stepTimer';
 async function openKvPanel(page: any, storeId: string, groupId: string) {
   await step('inspector: goto', () => page.goto('/'));
   await page.getByTestId('domain-kv').click();
-  await page.getByTestId('kv-tab-kv').click();
   await page.getByTestId('kv-store-select').selectOption(storeId);
   await page.getByTestId('kv-group-select').selectOption(groupId);
 }
@@ -90,10 +89,11 @@ test.describe('inspector · activity log', () => {
 
     // --- async op feedback: ping / restart / stop toasts + activity entries ---
     await step('inspector: resetAll', () => resetAll(baseURL!));
-    await step('inspector: create rack/node', () => Promise.all([
-      createRack(baseURL!, { id: 47, name: 'r47' }),
-      createNode(baseURL!, { id: 47, rack_id: 47 }),
-    ]));
+    // Sequential: createNode depends on createRack being committed first.
+    await step('inspector: create rack/node', async () => {
+      await createRack(baseURL!, { id: 47, name: 'r47' });
+      await createNode(baseURL!, { id: 47, rack_id: 47 });
+    });
     await step('inspector: deploy server 47', () => deployNodeServer(baseURL!, 47, freePort(), freePort()));
 
     try {
@@ -111,9 +111,9 @@ test.describe('inspector · activity log', () => {
       const pingToast = page.getByRole('alert').filter({ hasText: /ping/i });
       await expect(pingToast).toBeVisible({ timeout: 10_000 });
 
-      // Restart and Stop are on the server (KV) context menu. KV-xxx
-      // tree items are in the KV domain, not the Cluster domain.
-      await page.getByTestId('domain-kv').click();
+      // Restart and Stop are on the KV server context menu. KV-xxx
+      // tree items are in the Cluster domain under their physical node.
+      await page.getByTestId('domain-cluster').click();
       const serverItem = page.getByRole('treeitem').filter({ hasText: 'KV-47' });
       await expect(serverItem).toBeVisible({ timeout: 5_000 });
 
@@ -153,5 +153,33 @@ test.describe('inspector · activity log', () => {
     } finally {
       await step('inspector: stop server 47', () => stopNodeServer(baseURL!, 47));
     }
+  });
+
+  test('clears stale properties when the domain changes or the cluster resets', async ({ page, baseURL }) => {
+    await step('inspector: seed reset node', () => seedRackAndNode(baseURL!, 48, 48));
+    await step('inspector: open selected node', async () => {
+      await page.goto('/');
+      const node = page.getByRole('treeitem').filter({ hasText: 'N-48' });
+      await expect(node).toBeVisible();
+      await node.getByRole('button', { name: 'N-48' }).click();
+      await expect(page.getByRole('complementary', { name: 'Entity inspector' })).toBeVisible();
+
+      await page.getByTestId('domain-kv').click();
+      await expect(page.getByRole('complementary', { name: 'Entity inspector' })).toHaveCount(0);
+
+      await page.getByTestId('domain-cluster').click();
+      await node.getByRole('button', { name: 'N-48' }).click();
+      await expect(page.getByRole('complementary', { name: 'Entity inspector' })).toBeVisible();
+    });
+
+    await step('inspector: reset clears selection', async () => {
+      await page.getByRole('button', { name: /^Reset$/ }).click();
+      const dialog = page.getByRole('dialog', { name: 'Delete Cluster' });
+      await expect(dialog).toBeVisible();
+      const responsePromise = page.waitForResponse((response) => response.url().includes('/api/cluster/destroy'));
+      await dialog.getByRole('button', { name: 'Delete Cluster' }).click();
+      expect((await responsePromise).ok()).toBeTruthy();
+      await expect(page.getByRole('complementary', { name: 'Entity inspector' })).toHaveCount(0);
+    });
   });
 });

@@ -188,8 +188,10 @@ test.describe('cluster · rack + node CRUD', () => {
         });
 
         await step('rack-CRUD: DDB inspect UI', async () => {
-          // DDB-xxx tree items are in the Chunk domain, not the Cluster domain.
-          await page.getByTestId('domain-chunk').click();
+          // DDB-xxx tree items live in the Cluster domain alongside KV
+          // servers. The Capacity view only shows the physical disk
+          // hierarchy (DG > Disk), not service items.
+          await page.getByTestId('domain-cluster').click();
           const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
           const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
           if (await expandNode.count() > 0) await expandNode.first().click();
@@ -197,7 +199,7 @@ test.describe('cluster · rack + node CRUD', () => {
 
           // The DDB item should have a health badge (regression: previously
           // no health icon). The badge renders with a title attribute set
-          // to the health status (Healthy/Degraded/Failed/Unknown).
+          // to the health status (Healthy/Degraded|Failed|Unknown).
           const ddbItem = aside.getByRole('treeitem').filter({ hasText: `DDB-${nodeId}` });
           await expect(ddbItem.getByTitle(/Healthy|Degraded|Failed|Unknown/)).toBeVisible({ timeout: 10_000 });
 
@@ -211,9 +213,10 @@ test.describe('cluster · rack + node CRUD', () => {
           await expect(ddbTypeDd).toHaveText('DiskDB', { timeout: 3_000 });
           await expect(inspector.getByText(/service_type/i)).toHaveCount(0);
 
-          // Selecting the KV item shows Type = "KV". KV-xxx tree items
-          // are in the KV domain, not the Cluster domain.
-          await page.getByTestId('domain-kv').click();
+          // Selecting the KV server shows Type = "KV". KV servers live
+          // beneath their physical node in the Cluster domain.
+          const clusterNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` });
+          if (await clusterNode.getByRole('button', { name: 'Expand' }).count()) await clusterNode.getByRole('button', { name: 'Expand' }).first().click();
           await aside.getByText(`KV-${nodeId}`, { exact: true }).click();
           const kvTypeDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Type' }) }).locator('dd');
           await expect(kvTypeDd).toHaveText('KV', { timeout: 3_000 });

@@ -20,6 +20,7 @@ export interface AddNodeDialogProps {
   defaultRpcPort?: string;
   defaultDiskdbRpcPort?: string;
   onCreatedRackId?: (rackId: number) => void;
+  onDiskdbPortReserved?: (port: number) => void;
   onSuccess?: () => void | Promise<void>;
 }
 
@@ -37,6 +38,7 @@ export function AddNodeDialog({
   defaultRpcPort = '19920',
   defaultDiskdbRpcPort = '29920',
   onCreatedRackId,
+  onDiskdbPortReserved,
   onSuccess,
 }: AddNodeDialogProps) {
   const initialRackId = defaultRackId || racks[0]?.id || '';
@@ -83,24 +85,10 @@ export function AddNodeDialog({
         ...(sshKeyPath.trim() ? { ssh_key: sshKeyPath.trim() } : {}),
       });
 
-      if (enableCrowdbKV) {
-        await deployServer(numericNodeId, {
-          rest_port: Number(restPort),
-          rpc_port: Number(rpcPort),
-        });
-      }
-
-      if (enableDiskdb) {
-        await deployDiskdb(numericNodeId, {
-          rpc_port: Number(diskdbRpcPort),
-        });
-      }
-
-      const parts = [`Node "${trimmedNodeId}" created`];
-      if (enableCrowdbKV) parts.push('CrowDB Storage enabled');
-      if (enableDiskdb) parts.push('DiskDB enabled');
-      success(parts.join(', '));
+      // Node creation is durable independently of service deployment. Close
+      // the dialog now so a retryable service failure cannot strand it open.
       onCreatedRackId?.(Number(rackId));
+      if (enableDiskdb) onDiskdbPortReserved?.(Number(diskdbRpcPort));
       setRackId(initialRackId);
       setNodeId(initialNodeId);
       setHost(defaultHost);
@@ -112,6 +100,38 @@ export function AddNodeDialog({
       setEnableDiskdb(true);
       setDiskdbRpcPort(defaultDiskdbRpcPort);
       onClose();
+      await onSuccess?.();
+
+      const serviceErrors: string[] = [];
+      if (enableCrowdbKV) {
+        try {
+          await deployServer(numericNodeId, {
+            rest_port: Number(restPort),
+            rpc_port: Number(rpcPort),
+          });
+        } catch (err) {
+          serviceErrors.push(`CrowDB Storage: ${err instanceof Error ? err.message : 'deployment failed'}`);
+        }
+      }
+
+      if (enableDiskdb) {
+        try {
+          await deployDiskdb(numericNodeId, {
+            rpc_port: Number(diskdbRpcPort),
+          });
+        } catch (err) {
+          serviceErrors.push(`DiskDB: ${err instanceof Error ? err.message : 'deployment failed'}`);
+        }
+      }
+
+      if (serviceErrors.length > 0) {
+        error(`Node "${trimmedNodeId}" created, but ${serviceErrors.join('; ')}`);
+      } else {
+        const parts = [`Node "${trimmedNodeId}" created`];
+        if (enableCrowdbKV) parts.push('CrowDB Storage enabled');
+        if (enableDiskdb) parts.push('DiskDB enabled');
+        success(parts.join(', '));
+      }
       await onSuccess?.();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create node';

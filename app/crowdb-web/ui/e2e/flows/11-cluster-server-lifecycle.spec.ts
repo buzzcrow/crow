@@ -92,8 +92,8 @@ test.describe('cluster · server lifecycle', () => {
 
       await step('ctx-menu: server-node UI', async () => {
         await page.goto('/');
-        // KV-xxx tree items are in the KV domain, not the Cluster domain.
-        await page.getByTestId('domain-kv').click();
+        // KV-xxx tree items are in the Cluster domain under their physical node.
+        await page.getByTestId('domain-cluster').click();
 
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         // Wait for the server node to appear.
@@ -181,8 +181,8 @@ test.describe('cluster · server lifecycle', () => {
       });
 
       // Restart and Stop are on the server (KV) context menu, not the
-      // node. KV-xxx tree items are in the KV domain, not the Cluster domain.
-      await page.getByTestId('domain-kv').click();
+      // node. KV-xxx tree items are in the Cluster domain under the node.
+      await page.getByTestId('domain-cluster').click();
       const serverItem = page.getByRole('treeitem').filter({ hasText: 'KV-27' });
       await expect(serverItem).toBeVisible({ timeout: 5_000 });
 
@@ -286,8 +286,8 @@ test.describe('cluster · server lifecycle', () => {
 
       await step('cascade: delete svc UI', async () => {
         await page.goto('/');
-        // KV-xxx tree items are in the KV domain, not the Cluster domain.
-        await page.getByTestId('domain-kv').click();
+        // KV-xxx tree items are in the Cluster domain under their physical node.
+        await page.getByTestId('domain-cluster').click();
 
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         await expect(aside.getByText('KV-494')).toBeVisible({ timeout: 10_000 });

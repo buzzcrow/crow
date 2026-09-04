@@ -304,19 +304,43 @@ async fn start_cluster_inner(ids: &[u64], leader_id: u64, force_classic: bool) -
 
 #[allow(dead_code)]
 pub async fn assert_all_accepted(cluster: &TestCluster, slot: u64, expected_payload: &[u8]) {
-    for node in cluster.nodes() {
-        let group = node.get_group(1).expect("group exists");
-        let replica = group.local_replica();
-        let accepted = replica
-            .accepted_at(slot)
-            .await
-            .unwrap_or_else(|| panic!("replica {} missing slot {}", replica.id, slot));
-        assert_eq!(
-            accepted.payload.as_ref(),
-            expected_payload,
-            "replica {} has wrong payload at slot {}",
-            replica.id,
-            slot
-        );
+    // The chosen notification is asynchronous — after propose returns
+    // Chosen, non-leader replicas may not have applied the value yet.
+    // Retry for up to 2 seconds before failing.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let mut all_ok = true;
+        for node in cluster.nodes() {
+            let group = node.get_group(1).expect("group exists");
+            let replica = group.local_replica();
+            match replica.accepted_at(slot).await {
+                Some(accepted) => {
+                    assert_eq!(
+                        accepted.payload.as_ref(),
+                        expected_payload,
+                        "replica {} has wrong payload at slot {}",
+                        replica.id,
+                        slot
+                    );
+                }
+                None => {
+                    all_ok = false;
+                }
+            }
+        }
+        if all_ok {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            for node in cluster.nodes() {
+                let group = node.get_group(1).expect("group exists");
+                let replica = group.local_replica();
+                let _ = replica
+                    .accepted_at(slot)
+                    .await
+                    .unwrap_or_else(|| panic!("replica {} missing slot {}", replica.id, slot));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }

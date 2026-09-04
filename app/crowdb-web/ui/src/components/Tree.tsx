@@ -85,7 +85,7 @@ function TreeNodeComponent({
   );
 
   return (
-    <div>
+    <div data-testid={`tree-node-${node.id}`}>
       <div
         onContextMenu={handleContextMenu}
         className={cn(

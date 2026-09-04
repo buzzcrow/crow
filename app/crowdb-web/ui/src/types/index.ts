@@ -38,6 +38,14 @@ export interface ServerProcess {
   last_seen_ms: number;
 }
 
+/** Physical DiskDB projection; DiskDB has no management URL. */
+export interface DiskdbServerProcess {
+  endpoint: string;
+  pid?: number;
+  state: ProcState;
+  health: NodeHealth;
+}
+
 // Physical View Types
 export interface Rack {
   id: RackId;
@@ -50,7 +58,9 @@ export interface Node {
   rack_id: RackId;
   host: string;
   ssh: SshCreds;
-  server?: ServerProcess;
+  /** KV service projection; DiskDB is exposed separately below. */
+  kv_server?: ServerProcess;
+  diskdb_server?: DiskdbServerProcess;
   // Present on the recursive `GET /api/racks?recursive=N` and flat
   // `GET /api/nodes` responses (mirrors `crowdb_web::physical_view::NodeView`
   // / the manually-built node JSON in `lifecycle`). Absent on the bare
@@ -286,7 +296,7 @@ export interface DiskEntry {
 }
 
 export interface DiskdbInstanceInfo {
-  instance_id: number;
+  instance_id: string;
   rpc_endpoint: string;
   last_heartbeat_ms: number;
   owned_dg_ids: number[];
@@ -413,8 +423,7 @@ export interface RebuildResultResponse {
 
 export interface DiskdbDeployResult {
   node_id: number;
-  mgmt_url: string;
-  rpc_url: string;
+  endpoint: string;
   pid: number;
 }
 

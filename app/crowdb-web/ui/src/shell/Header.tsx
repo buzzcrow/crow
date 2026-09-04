@@ -94,7 +94,7 @@ export function Header({
           )}
           aria-pressed={domain === Domain.Chunk}
         >
-          <HardDrive className="tw-h-3.5 tw-w-3.5" /> Chunk
+          <HardDrive className="tw-h-3.5 tw-w-3.5" /> Capacity
         </button>
       </div>
 

@@ -204,9 +204,11 @@ loc = "tokei . .github --exclude swagger-ui --exclude 'lib/crowdb-tree/build-*' 
 clean = { cmd = '''
 bash -c '
 set -e
-pkill -f crowdb-kv-server || true
-pkill -f crowdb-web || true
-pkill -f crowdb-cli || true
+# Kill leftover server/cli processes via a helper script. A bare pkill -f
+# here would self-match: this task runs as bash -c <body>, so the bash
+# cmdline contains these names and pkill -f would SIGTERM the script.
+# The helper runs as "bash tools/kill-servers.sh" (no binary names).
+bash tools/kill-servers.sh
 
 # ── Rust build artifacts ──
 echo "[clean] cargo clean"

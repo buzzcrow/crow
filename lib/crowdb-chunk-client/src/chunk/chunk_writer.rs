@@ -170,33 +170,64 @@ impl ChunkWriter {
     /// Open the next strip on the current chunk. First drains the
     /// prefetch channel (non-blocking) to pick up any pre-appended
     /// chunks. If the next strip is in `chunk.strips`, opens it
-    /// directly. Otherwise falls back to inline `append_chunk` RPC.
+    /// directly. Otherwise waits for the prefetch channel to deliver
+    /// it (blocking) — this avoids a race where both the prefetch task
+    /// and an inline `append_chunk` RPC append the same strip. Falls
+    /// back to inline `append_chunk` only if the channel is closed
+    /// (prefetch task finished or errored).
     async fn open_next_strip(&mut self) -> Result<()> {
         let next_index = self.write_cursor + 1;
         // Drain prefetch channel (non-blocking) — pick up latest chunk.
         self.drain_prefetch();
-        let chunk = self
-            .chunk
-            .as_ref()
-            .ok_or_else(|| IoError::Internal("open_next_strip with no chunk".into()))?;
-        if (next_index as usize) < chunk.strips.len() {
-            // Next strip is pre-appended — open it directly. No
-            // Arc-swap needed; the chunk is the same Arc.
-            let strip = EcStripWriter::new(
-                Arc::clone(chunk),
-                next_index,
-                self.disk_writer.clone(),
-                self.ec_scheme,
-            );
-            self.write_cursor = next_index;
-            self.write_cursor_shared.store(next_index, Ordering::Relaxed);
-            self.current_strip = Some(StripWriter::Ec(strip));
-        } else {
-            // Prefetch fell behind — append a new strip inline.
-            let new_chunk = self.append_strip().await?;
-            self.continue_strip(new_chunk)?;
+        loop {
+            let ready = {
+                let chunk = self
+                    .chunk
+                    .as_ref()
+                    .ok_or_else(|| IoError::Internal("open_next_strip with no chunk".into()))?;
+                (next_index as usize) < chunk.strips.len()
+            };
+            if ready {
+                // Next strip is pre-appended — open it directly.
+                let chunk = self
+                    .chunk
+                    .as_ref()
+                    .ok_or_else(|| IoError::Internal("open_next_strip with no chunk".into()))?;
+                let strip = EcStripWriter::new(
+                    Arc::clone(chunk),
+                    next_index,
+                    self.disk_writer.clone(),
+                    self.ec_scheme,
+                );
+                self.write_cursor = next_index;
+                self.write_cursor_shared.store(next_index, Ordering::Relaxed);
+                self.current_strip = Some(StripWriter::Ec(strip));
+                return Ok(());
+            }
+            // Next strip not ready — wait for the prefetch task to
+            // deliver it instead of appending inline (avoids duplicate
+            // append_chunk calls).
+            let Some(rx) = self.prefetch_rx.as_mut() else {
+                // No prefetch channel — inline append as last resort.
+                let new_chunk = self.append_strip().await?;
+                self.continue_strip(new_chunk)?;
+                return Ok(());
+            };
+            match rx.recv().await {
+                Some(Ok(new_chunk)) => {
+                    self.chunk = Some(Arc::new(new_chunk));
+                    // Loop back: check if the next strip is now available.
+                }
+                Some(Err(e)) => return Err(e),
+                None => {
+                    // Channel closed — prefetch is done. Inline append.
+                    self.prefetch_rx = None;
+                    let new_chunk = self.append_strip().await?;
+                    self.continue_strip(new_chunk)?;
+                    return Ok(());
+                }
+            }
         }
-        Ok(())
     }
 
     /// Drain the prefetch channel (non-blocking) and Arc-swap to the
@@ -487,7 +518,8 @@ fn compute_strips_remaining(
     let unit_bytes = u64::from((config.read_buffer_size / 1024) as u32) * 1024;
     let strip_data_capacity = ec_scheme.data_num as u64 * unit_bytes;
     let total_strips = total.div_ceil(strip_data_capacity) as usize;
-    Some(total_strips)
+    // Subtract 1 for the initial strip from allocate_chunk.
+    Some(total_strips.saturating_sub(1))
 }
 
 /// Append 1 strip to an existing chunk and return the full cumulative

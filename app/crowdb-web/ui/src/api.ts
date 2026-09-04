@@ -1026,7 +1026,7 @@ export async function setDiskGroupOwner(
   rackId: number,
   nodeId: number,
   dgId: number,
-  body: { instance_id: number; lease_expiry_ms: number },
+  body: { instance_id: string; lease_expiry_ms: number },
   options?: RequestOptions,
 ): Promise<void> {
   const resp = await fetchWithOptions(`/api/disk-groups/${rackId}/${nodeId}/${dgId}/owner`, {
@@ -1183,7 +1183,8 @@ export async function removeDisk(nodeId: number, dgId: number, diskId: string, o
 /** `GET /api/servers` — list all deployed server entries. */
 export interface ServerSummary {
   node_id?: number;
-  mgmt_url: string;
+  mgmt_url?: string;
+  endpoint?: string;
   rpc_url?: string;
   pid?: number;
   health: string;

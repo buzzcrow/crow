@@ -11,6 +11,7 @@ interface CrowdbKVNodeData {
   kind: 'Datacenter' | 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica' | 'DiskGroup' | 'Disk';
   label: string;
   sublabel?: string;
+  diskLabels?: string[];
   health?: string;
   role?: string;
   /** Remote-replica reachability; false renders a warning glyph. */
@@ -118,6 +119,16 @@ function CrowdbKVNodeBase({ data }: NodeProps<CrowdbKVNodeData>) {
           />
         )}
       </div>
+      {data.diskLabels && data.diskLabels.length > 0 && (
+        <div data-testid="compact-disk-stack" className="tw-mt-2 tw-space-y-1">
+          {data.diskLabels.map((label) => (
+            <div key={label} className="tw-flex tw-items-center tw-gap-1.5 tw-border tw-border-border tw-rounded tw-bg-bg/60 tw-px-2 tw-py-1 tw-text-[10px] tw-text-muted tw-font-mono">
+              <HardDrive className="tw-h-3 tw-w-3 tw-flex-shrink-0 tw-text-accent2" />
+              {label}
+            </div>
+          ))}
+        </div>
+      )}
       <Handle type="source" position={Position.Bottom} className="tw-opacity-0" />
     </div>
   );

@@ -17,7 +17,6 @@ const apiBase = consoleBaseURL();
 async function openKvPanel(page: any, storeId: string, groupId?: string) {
   await step('kv: goto', () => page.goto('/'));
   await page.getByTestId('domain-kv').click();
-  await page.getByTestId('kv-tab-kv').click();
   await page.getByTestId('kv-store-select').selectOption(storeId);
   if (groupId !== undefined) {
     await page.getByTestId('kv-group-select').selectOption(groupId);

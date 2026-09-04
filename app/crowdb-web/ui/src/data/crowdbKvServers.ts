@@ -11,7 +11,7 @@ export function isCrowdbKVServerAvailable(server: Pick<CrowdbKVServerView, 'proc
   return isAvailableProcess(server?.process);
 }
 
-function extractPort(urlOrAddr?: string | null): number | null {
+export function extractPort(urlOrAddr?: string | null): number | null {
   const value = (urlOrAddr || '').trim();
   if (!value) return null;
 
@@ -28,21 +28,21 @@ function extractPort(urlOrAddr?: string | null): number | null {
   }
 }
 
-function toServerView(node: { id: number; rack_id: number; host: string; server?: ServerProcess } | null | undefined): CrowdbKVServerView | null {
-  if (!node?.server) return null;
+function toServerView(node: { id: number; rack_id: number; host: string; kv_server?: ServerProcess } | null | undefined): CrowdbKVServerView | null {
+  if (!node?.kv_server) return null;
   return {
     id: serverLabel(String(node.id)),
     node_id: node.id,
     rack_id: node.rack_id,
     host: node.host,
-    process: node.server,
-    rest_port: extractPort(node.server.mgmt_url),
-    rpc_port: extractPort(node.server.rpc_url),
+    process: node.kv_server,
+    rest_port: extractPort(node.kv_server.mgmt_url),
+    rpc_port: extractPort(node.kv_server.rpc_url),
   };
 }
 
 export function buildCrowdbKVServers(nodes: Node[], racks: Rack[]): CrowdbKVServerView[] {
-  const nodeMap = new Map<number, { id: number; rack_id: number; host: string; server?: ServerProcess }>();
+  const nodeMap = new Map<number, { id: number; rack_id: number; host: string; kv_server?: ServerProcess }>();
 
   for (const node of nodes) {
     nodeMap.set(node.id, node);
@@ -56,7 +56,7 @@ export function buildCrowdbKVServers(nodes: Node[], racks: Rack[]): CrowdbKVServ
         id: entry.id,
         rack_id: entry.rack_id || existing?.rack_id || rack.id,
         host: entry.host || existing?.host || '',
-        server: entry.server || existing?.server,
+        kv_server: entry.kv_server || existing?.kv_server,
       });
     }
   }

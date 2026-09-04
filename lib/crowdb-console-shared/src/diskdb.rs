@@ -158,8 +158,8 @@ pub struct RebuildResultResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DiskdbDeployResult {
     pub node_id: u64,
-    pub mgmt_url: String,
-    pub rpc_url: String,
+    /// Public crowdb-rpc endpoint used by `DiskDB` clients.
+    pub endpoint: String,
     pub pid: u32,
 }
 

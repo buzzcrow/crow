@@ -129,12 +129,13 @@ test.describe('cluster · node inspect & cross-jump', () => {
           await expander.click();
         }
 
-        // Local replica on n26a and the remote proxy pointing at n26b's 26601.
+        // Logical tree: both replicas appear as LR entries under the
+        // store → group hierarchy. No RR (remote replica) entries — the
+        // KV view is logical-only per the design spec.
         await expect(aside.getByText('LR-26600', { exact: true })).toBeVisible({ timeout: 3_000 });
-        await expect(aside.getByText('RR-26601', { exact: true })).toBeVisible({ timeout: 3_000 });
-        // The mirror side: n26b hosts 26601 locally and a remote proxy for 26600.
         await expect(aside.getByText('LR-26601', { exact: true })).toBeVisible({ timeout: 3_000 });
-        await expect(aside.getByText('RR-26600', { exact: true })).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('RR-26601', { exact: true })).toHaveCount(0);
+        await expect(aside.getByText('RR-26600', { exact: true })).toHaveCount(0);
       });
 
       // Remove the remote on n26a out-of-band (simulated mis-wiring).
@@ -143,12 +144,13 @@ test.describe('cluster · node inspect & cross-jump', () => {
         expect(del.ok(), await del.text()).toBeTruthy();
       });
 
-      // After a poll the dashed peer row under n26a is gone; n26b's mirror
-      // remote (RR-26600) is untouched.
-      await step('xjump: verify remote gone', async () => {
+      // In the logical tree, deleting a remote proxy doesn't remove the
+      // replica from the group — it still exists on its home node (262).
+      // Both replicas remain visible.
+      await step('xjump: verify replicas still present', async () => {
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
-        await expect(aside.getByText('RR-26601', { exact: true })).toHaveCount(0, { timeout: 3_000 });
-        await expect(aside.getByText('RR-26600', { exact: true })).toBeVisible();
+        await expect(aside.getByText('LR-26600', { exact: true })).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('LR-26601', { exact: true })).toBeVisible({ timeout: 3_000 });
       });
     } finally {
       await api.dispose();

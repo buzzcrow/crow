@@ -2,11 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { Node, Edge, MarkerType } from 'reactflow';
-import { Rack, Node as NodeEntity, EnrichedStoreView, NodeStore, Domain, CrowdbKVServerView, NodeHealth, ReplicaState, DiskGroupEntry, DiskEntry } from '../types';
+import { Rack, Node as NodeEntity, EnrichedStoreView, Domain, CrowdbKVServerView, NodeHealth, DiskGroupEntry, DiskEntry } from '../types';
 import type { SelectedEntity } from '../contexts/SelectionContext';
 import { crowdbKvServerByNodeId } from '../data/crowdbKvServers';
 import { DEFAULT_DC_ID, DEFAULT_DC_NAME } from '../data/defaultDatacenter';
-import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel, serverLabel, storeLabel, toDisplayState, toUiReplicaRole } from '../utils/entityDisplay';
+import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, serverLabel, storeLabel, toDisplayState, toUiReplicaRole } from '../utils/entityDisplay';
 
 export interface NodeDiskGroups {
   diskGroups: DiskGroupEntry[];
@@ -22,6 +22,7 @@ export interface FlowNodeData {
   kind: 'Datacenter' | 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica' | 'DiskGroup' | 'Disk';
   label: string;
   sublabel?: string;
+  diskLabels?: string[];
   health?: string;
   role?: string;
   /** Remote-replica reachability (physical view); false renders a warning. */
@@ -54,20 +55,6 @@ function pushDatacenterRoot(flowNodes: Node[], sublabel: string): { dcId: string
   return { dcId: DC_NODE_ID };
 }
 
-function physicalGroupHealth(group: NodeStore['groups'][number]): string {
-  const state = String(group.local.state || '').toLowerCase();
-  if (state === ReplicaState.Failed || state === ReplicaState.Draining) {
-    return 'unavailable';
-  }
-  if (group.leader_hint == null) {
-    return 'degraded';
-  }
-  if (state === ReplicaState.Running) {
-    return 'healthy';
-  }
-  return 'unknown';
-}
-
 const LEADER_EDGE = {
   type: 'smoothstep',
   animated: true,
@@ -75,33 +62,23 @@ const LEADER_EDGE = {
   markerEnd: { type: MarkerType.ArrowClosed },
 };
 
-const REMOTE_EDGE = {
-  type: 'smoothstep',
-  style: { stroke: 'var(--color-remote, #8b5cf6)', strokeDasharray: '4 3' },
-  markerEnd: { type: MarkerType.ArrowClosed, color: '#8b5cf6' },
-};
-
-/** Local-replica node id for the physical view. */
-function localId(nodeId: string, storeId: string | number, groupId: string | number, replicaId: string | number) {
-  return `LR-${nodeId}-${storeId}-${groupId}-${replicaId}`;
-}
-
 /**
- * Physical view: Rack -> Node -> Server -> PxStore -> PxGroup ->
- * { LocalReplica, RemoteReplica }. Remote replicas draw a dashed edge to the
- * matching LocalReplica on the peer node — a missing edge is exactly the
- * mis-wiring this view exists to surface. Source is the per-node store detail
- * (`nodeStores`), which carries each node's true local + remotes list.
+ * Cluster physical view: Rack -> Node -> services, with assigned disk groups
+ * nested under their owning DiskDB instance. KV servers also show their
+ * hosted Store > Group > Replica hierarchy so users can see which logical
+ * entities each server owns.
  */
 export function buildPhysicalFlow(
   racks: Rack[],
   nodes: NodeEntity[],
   servers: CrowdbKVServerView[],
-  nodeStores: Record<string, NodeStore[]> = {},
+  _nodeStores: Record<string, unknown> = {},
   nodeHealthById: Record<string, NodeHealth> = {},
   diskdbNodeIds: Set<number> = new Set(),
-  diskdbInstances: { instance_id: number; owned_dg_ids: number[] }[] = [],
+  diskdbInstances: { instance_id: string; owned_dg_ids: number[] }[] = [],
+  diskdbInstanceIdByNodeId: Map<number, string> = new Map(),
   nodeDiskGroups: Record<number, NodeDiskGroups> = {},
+  stores: EnrichedStoreView[] = [],
 ): { nodes: Node[]; edges: Edge[] } {
   const flowNodes: Node[] = [];
   const flowEdges: Edge[] = [];
@@ -135,158 +112,107 @@ export function buildPhysicalFlow(
     );
     flowEdges.push({ id: `e-R-${node.rack_id}-N-${node.id}`, source: `R-${node.rack_id}`, target: `N-${node.id}`, type: 'smoothstep' });
 
-    if (!server) continue;
-
-    const serverNodeId = `KV-${node.id}`;
-    flowNodes.push(
-      mkNode(serverNodeId, {
-        kind: 'Server',
-        label: serverLabel(String(node.id)),
-        sublabel: toDisplayState(server.process.state),
-        health: server.process.health,
-        layer: 3,
-        entity: { type: 'Server', id: server.id, parentIds: { rack_id: node.rack_id, node_id: node.id }, serviceType: 'kv' },
-      }),
-    );
-    flowEdges.push({ id: `e-N-${node.id}-KV`, source: `N-${node.id}`, target: serverNodeId, type: 'smoothstep' });
-
-    for (const store of nodeStores[node.id] || []) {
-      const sid = String(store.store_id);
-      const storeNodeId = `S-${node.id}-${sid}`;
+    if (server) {
+      const serverNodeId = `KV-${node.id}`;
       flowNodes.push(
-        mkNode(storeNodeId, {
-          kind: 'Store',
-          label: storeLabel(sid),
-          sublabel: `${store.groups?.length ?? 0} group(s)`,
-          layer: 4,
-          entity: { type: 'Store', id: sid, parentIds: { rack_id: node.rack_id, node_id: node.id } },
+        mkNode(serverNodeId, {
+          kind: 'Server',
+          label: serverLabel(String(node.id)),
+          sublabel: toDisplayState(server.process.state),
+          health: server.process.health,
+          layer: 3,
+          entity: { type: 'Server', id: server.id, parentIds: { rack_id: node.rack_id, node_id: node.id }, serviceType: 'kv' },
         }),
       );
-      flowEdges.push({ id: `e-${serverNodeId}-${storeNodeId}`, source: serverNodeId, target: storeNodeId, type: 'smoothstep' });
+      flowEdges.push({ id: `e-N-${node.id}-KV`, source: `N-${node.id}`, target: serverNodeId, type: 'smoothstep' });
 
-      for (const group of store.groups || []) {
-        const gid = String(group.group_id);
-        const groupNodeId = `G-${node.id}-${sid}-${gid}`;
-        const leaderRid = group.leader_hint != null ? String(group.leader_hint) : null;
-        flowNodes.push(
-          mkNode(groupNodeId, {
+      // Store > Group > Replica for replicas hosted on this node.
+      for (const store of stores) {
+        const sid = String(store.store_id);
+        const storeNodeId = `S-${node.id}-${sid}`;
+        let storeHasReplica = false;
+        for (const group of store.groups || []) {
+          const gid = String(group.group_id);
+          const replicasOnNode = (group.replicas || []).filter((r) => String(r.node_id) === String(node.id));
+          if (replicasOnNode.length === 0) continue;
+          if (!storeHasReplica) {
+            storeHasReplica = true;
+            flowNodes.push(mkNode(storeNodeId, {
+              kind: 'Store',
+              label: store.name ? `${storeLabel(sid)} (${store.name})` : storeLabel(sid),
+              sublabel: `${store.groups?.length ?? 0} group(s)`,
+              layer: 4,
+              entity: { type: 'Store', id: sid, name: store.name, parentIds: { node_id: node.id } },
+            }));
+            flowEdges.push({ id: `e-${serverNodeId}-${storeNodeId}`, source: serverNodeId, target: storeNodeId, type: 'smoothstep' });
+          }
+          const groupNodeId = `G-${node.id}-${sid}-${gid}`;
+          flowNodes.push(mkNode(groupNodeId, {
             kind: 'Group',
             label: groupLabel(gid),
-            sublabel: leaderRid ? `leader ${leaderRid}` : `${group.remotes?.length ?? 0} peer(s)`,
-            health: physicalGroupHealth(group),
+            sublabel: group.leader ? `leader ${group.leader}` : `${replicasOnNode.length} replica(s)`,
+            health: group.state,
             layer: 5,
-            entity: { type: 'Group', id: gid, parentIds: { rack_id: node.rack_id, node_id: node.id, store_id: sid } },
-          }),
-        );
-        flowEdges.push({ id: `e-${storeNodeId}-${groupNodeId}`, source: storeNodeId, target: groupNodeId, type: 'smoothstep' });
+            entity: { type: 'Group', id: gid, parentIds: { node_id: node.id, store_id: sid } },
+          }));
+          flowEdges.push({ id: `e-${storeNodeId}-${groupNodeId}`, source: storeNodeId, target: groupNodeId, type: 'smoothstep' });
 
-        // Local replica.
-        const local = group.local;
-        const localNodeId = localId(String(node.id), sid, gid, local.replica_id);
-        flowNodes.push(
-          mkNode(localNodeId, {
-            kind: 'LocalReplica',
-            label: localReplicaLabel(local.replica_id),
-            sublabel: toDisplayState(String(local.role)),
-            health: local.state,
-            role: local.role,
-            leader: leaderRid === String(local.replica_id),
-            layer: 6,
-            entity: {
-              type: 'Replica',
-              id: String(local.replica_id),
-              parentIds: { rack_id: node.rack_id, node_id: node.id, store_id: sid, group_id: gid, role: local.role },
-            },
-          }),
-        );
-        flowEdges.push({ id: `e-${groupNodeId}-${localNodeId}`, source: groupNodeId, target: localNodeId, type: 'smoothstep' });
-
-        // Remote replicas (peer proxies). Dashed edge to the peer's local glyph.
-        for (const remote of group.remotes || []) {
-          const remoteNodeId = `RR-${node.id}-${sid}-${gid}-${remote.replica_id}`;
-          flowNodes.push(
-            mkNode(remoteNodeId, {
-              kind: 'RemoteReplica',
-              label: remoteReplicaLabel(remote.replica_id),
-              sublabel: nodeLabel(String(remote.node_id)),
-              reachable: remote.reachable,
+          const leaderNodeId = group.leader != null ? `LR-${node.id}-${sid}-${gid}-${group.leader}` : null;
+          for (const r of replicasOnNode) {
+            const rid = String(r.replica_id);
+            const replicaNodeId = `LR-${node.id}-${sid}-${gid}-${rid}`;
+            flowNodes.push(mkNode(replicaNodeId, {
+              kind: 'Replica',
+              label: localReplicaLabel(rid),
+              sublabel: nodeLabel(String(r.node_id)),
+              health: r.state,
+              role: toUiReplicaRole(String(r.role), String(r.state)),
+              leader: group.leader === r.replica_id,
               layer: 6,
-              entity: {
-                type: 'Replica',
-                id: String(remote.replica_id),
-                parentIds: {
-                  rack_id: node.rack_id,
-                  node_id: remote.node_id,
-                  store_id: sid,
-                  group_id: gid,
-                  remote_on: node.id,
-                  reachable: String(remote.reachable),
-                },
-              },
-            }),
-          );
-          flowEdges.push({ id: `e-${groupNodeId}-${remoteNodeId}`, source: groupNodeId, target: remoteNodeId, type: 'smoothstep' });
-          // Peer-wiring edge to the matching LocalReplica on the peer node.
-          flowEdges.push({
-            id: `e-peer-${remoteNodeId}`,
-            source: remoteNodeId,
-            target: localId(String(remote.node_id), sid, gid, remote.replica_id),
-            ...REMOTE_EDGE,
-          });
+              entity: { type: 'Replica', id: rid, parentIds: { node_id: node.id, store_id: sid, group_id: gid } },
+            }));
+            flowEdges.push({ id: `e-${groupNodeId}-${replicaNodeId}`, source: groupNodeId, target: replicaNodeId, type: 'smoothstep' });
+            if (leaderNodeId && leaderNodeId !== replicaNodeId) {
+              flowEdges.push({ id: `e-leader-${node.id}-${gid}-${rid}`, source: leaderNodeId, target: replicaNodeId, ...LEADER_EDGE });
+            }
+          }
         }
       }
     }
 
-    // DiskDB server node + owned disk-group → disk children.
+    // DiskDB server node owns its assigned disk-group projection.
     if (diskdbNodeIds.has(node.id)) {
       const ddbNodeId = `DDB-${node.id}`;
-      const ddbInstance = diskdbInstances.find((i) => i.instance_id === node.id);
-      const ownedDgIds = ddbInstance?.owned_dg_ids || [];
-      const ndg = nodeDiskGroups[node.id];
+      const diskdbInstanceId = diskdbInstanceIdByNodeId.get(node.id);
+      const diskdbInstance = diskdbInstances.find((instance) => instance.instance_id === diskdbInstanceId);
+      const ownedDgIds = new Set(diskdbInstance?.owned_dg_ids || []);
+      const diskGroups = Object.values(nodeDiskGroups).flatMap((entry) =>
+        entry.diskGroups
+          .filter((dg) => ownedDgIds.has(dg.id))
+          .map((dg) => ({ dg, disks: entry.disksByDg[dg.id] || [] })),
+      );
       flowNodes.push(
         mkNode(ddbNodeId, {
           kind: 'Server',
           label: `DDB-${node.id}`,
-          sublabel: ownedDgIds.length > 0 ? `${ownedDgIds.length} DG(s)` : 'no DGs',
+          sublabel: 'DiskDB',
           layer: 3,
           entity: { type: 'Server', id: `DDB-${node.id}`, parentIds: { rack_id: node.rack_id, node_id: node.id }, serviceType: 'diskdb' },
         }),
       );
       flowEdges.push({ id: `e-N-${node.id}-DDB`, source: `N-${node.id}`, target: ddbNodeId, type: 'smoothstep' });
 
-      for (const dgId of ownedDgIds) {
-        const dgNodeId = `DDBG-${node.id}-${dgId}`;
-        const dgEntry = ndg?.diskGroups.find((d) => d.id === dgId);
-        const disks = ndg?.disksByDg[dgId] || [];
-        flowNodes.push(
-          mkNode(dgNodeId, {
-            kind: 'DiskGroup',
-            label: dgEntry?.name ? `${dgEntry.name} (DG-${dgId})` : `DG-${dgId}`,
-            sublabel: disks.length > 0 ? `${disks.length} disk(s)` : '',
-            layer: 4,
-            entity: { type: 'DiskGroup', id: String(dgId), parentIds: { rack_id: node.rack_id, node_id: node.id, disk_group_id: dgId } },
-          }),
-        );
+      for (const { dg, disks } of diskGroups) {
+        const dgNodeId = `CL-DG-${dg.node_id}-${dg.id}`;
+        flowNodes.push(mkNode(dgNodeId, {
+          kind: 'DiskGroup',
+          label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
+          sublabel: `${disks.length} disk(s)`,
+          diskLabels: disks.map((disk) => disk.disk_id.slice(0, 12) + '…'),
+          layer: 4,
+          entity: { type: 'DiskGroup', id: String(dg.id), parentIds: { rack_id: dg.rack_id, node_id: dg.node_id, disk_group_id: dg.id } },
+        }));
         flowEdges.push({ id: `e-${ddbNodeId}-${dgNodeId}`, source: ddbNodeId, target: dgNodeId, type: 'smoothstep' });
-
-        // Disk children (cylinder icon + short UUID prefix).
-        for (const disk of disks) {
-          const diskNodeId = `D-${node.id}-${dgId}-${disk.disk_id}`;
-          flowNodes.push(
-            mkNode(diskNodeId, {
-              kind: 'Disk',
-              label: disk.disk_id.slice(0, 12) + '…',
-              sublabel: '',
-              layer: 5,
-              entity: {
-                type: 'Disk',
-                id: disk.disk_id,
-                parentIds: { rack_id: node.rack_id, node_id: node.id, disk_group_id: dgId, disk_id: disk.disk_id },
-              },
-            }),
-          );
-          flowEdges.push({ id: `e-${dgNodeId}-${diskNodeId}`, source: dgNodeId, target: diskNodeId, type: 'smoothstep' });
-        }
       }
     }
   }
@@ -463,15 +389,16 @@ export function buildFlowForDomain(
   nodes: NodeEntity[],
   servers: CrowdbKVServerView[],
   stores: EnrichedStoreView[],
-  nodeStores: Record<string, NodeStore[]> = {},
+  _nodeStores: Record<string, unknown> = {},
   nodeHealthById: Record<string, NodeHealth> = {},
   diskdbNodeIds: Set<number> = new Set(),
-  diskdbInstances: { instance_id: number; owned_dg_ids: number[] }[] = [],
+  diskdbInstances: { instance_id: string; owned_dg_ids: number[] }[] = [],
+  diskdbInstanceIdByNodeId: Map<number, string> = new Map(),
   nodeDiskGroups: Record<number, NodeDiskGroups> = {},
 ): { nodes: Node[]; edges: Edge[] } {
   switch (domain) {
     case Domain.Cluster:
-      return buildPhysicalFlow(racks, nodes, servers, nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances, nodeDiskGroups);
+      return buildPhysicalFlow(racks, nodes, servers, _nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances, diskdbInstanceIdByNodeId, nodeDiskGroups, stores);
     case Domain.Chunk:
       return buildCapacityFlow(racks, nodes, diskdbNodeIds, nodeHealthById, nodeDiskGroups);
     default:

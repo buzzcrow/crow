@@ -4,7 +4,7 @@
 //! `DdbDisk` — disk struct with zone management and the disk-level
 //! round-robin allocator (`disk_allocate`, `rotate_active_zones`).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crowdb_protocol::common::{DiskId, HwStatus};
@@ -39,6 +39,10 @@ pub struct DdbDisk {
     /// track metrics; attached during `disk_add_init` and
     /// `load_disk_group`.
     pub metrics: Option<Arc<DiskMetrics>>,
+    /// Whether a background zone load task has been spawned for this
+    /// disk. Set atomically before spawning to prevent duplicate
+    /// spawns from `reconcile_existing_disk` across sync ticks.
+    zone_load_spawned: AtomicBool,
 }
 
 impl DdbDisk {
@@ -61,12 +65,23 @@ impl DdbDisk {
             pos_v_zone_ctx: AtomicU64::new(0),
             effective_status: RwLock::new(HwStatus::Init),
             metrics: None,
+            zone_load_spawned: AtomicBool::new(false),
         }
     }
 
     /// Add a zone to this disk.
     pub fn add_zone(&self, zone: Arc<DdbZone>) {
         self.zones.write().unwrap().push(zone);
+    }
+
+    /// Atomically claim the right to spawn a background zone load task.
+    /// Returns `true` if this call is the first to claim (the caller
+    /// should spawn the task), `false` if a task was already spawned.
+    #[must_use]
+    pub fn try_claim_zone_load(&self) -> bool {
+        self.zone_load_spawned
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     /// Whether this disk can accept allocations.

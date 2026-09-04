@@ -713,7 +713,7 @@ async fn progressive_setup_multiple_stores_groups_replicas() {
 
 use bytes::Bytes;
 use common::test_client::TestKvClient;
-use crowdb_kv::rpc::{KvGetRequest, KvSetRequest};
+use crowdb_kv::rpc::{KvGetRequest, KvResponse, KvSetRequest};
 
 /// Normalize a `listen_addr` from topology (`0.0.0.0:port`) to a
 /// loopback URL the test client can dial.
@@ -758,6 +758,45 @@ async fn wait_for_leader(base: &str, store_id: u64, group_id: u64) -> Value {
     panic!("no leader elected for store {store_id} group {group_id}");
 }
 
+/// Retry a KV put until it succeeds or the deadline expires. Under CI
+/// load, the RPC path may not be ready immediately after the HTTP
+/// topology reports a leader — the reaper times out the first request
+/// before the leader's proposal handler is fully wired.
+async fn kv_put_with_retry(kv: &TestKvClient, req: KvSetRequest, deadline_secs: u64) -> KvResponse {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(deadline_secs);
+    loop {
+        match kv.put(req.clone()).await {
+            Ok(resp) => return resp.into_inner(),
+            Err(e) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "kv put retry exhausted: {}",
+                    e.message()
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+}
+
+/// Retry a KV get until it succeeds or the deadline expires.
+async fn kv_get_with_retry(kv: &TestKvClient, req: KvGetRequest, deadline_secs: u64) -> KvResponse {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(deadline_secs);
+    loop {
+        match kv.get(req.clone()).await {
+            Ok(resp) => return resp.into_inner(),
+            Err(e) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "kv get retry exhausted: {}",
+                    e.message()
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+}
+
 /// `wipe-user-data` on a populated single-replica group wipes the WAL
 /// + engine user data; a subsequent get returns `not_found`, the
 /// topology is unchanged (group0 preserved), and a new put succeeds
@@ -774,9 +813,11 @@ async fn wipe_user_data_clears_keys_and_preserves_group0() {
     let endpoint = format!("http://{}", node_endpoint(&topo));
     let kv = TestKvClient::connect(endpoint).await;
 
-    // Write a key.
-    let resp = kv
-        .put(KvSetRequest {
+    // Write a key (retry — under CI load the RPC path may not be
+    // ready immediately after the HTTP topology reports a leader).
+    let resp = kv_put_with_retry(
+        &kv,
+        KvSetRequest {
             version: 1,
             key: Bytes::from_static(b"wipe-test-key"),
             value: Bytes::from_static(b"wipe-test-value"),
@@ -786,14 +827,16 @@ async fn wipe_user_data_clears_keys_and_preserves_group0() {
             request_id: 2001,
             request_create_ms: 20001,
             group_id: GROUP,
-        })
-        .await
-        .expect("put before wipe");
-    assert!(resp.into_inner().ok, "put should succeed");
+        },
+        15,
+    )
+    .await;
+    assert!(resp.ok, "put should succeed");
 
     // Verify the key is readable.
-    let resp = kv
-        .get(KvGetRequest {
+    let inner = kv_get_with_retry(
+        &kv,
+        KvGetRequest {
             version: 1,
             key: Bytes::from_static(b"wipe-test-key"),
             request_id: 2002,
@@ -801,10 +844,10 @@ async fn wipe_user_data_clears_keys_and_preserves_group0() {
             group_id: GROUP,
             read_mode: 0,
             min_slot: 0,
-        })
-        .await
-        .expect("get before wipe");
-    let inner = resp.into_inner();
+        },
+        15,
+    )
+    .await;
     assert!(inner.ok, "key should be found before wipe");
     assert_eq!(inner.value, Bytes::from_static(b"wipe-test-value"));
 
@@ -837,8 +880,9 @@ async fn wipe_user_data_clears_keys_and_preserves_group0() {
     // The key is gone — get returns not_found.
     let endpoint_after = format!("http://{}", node_endpoint(&topo_after));
     let kv_after = TestKvClient::connect(endpoint_after).await;
-    let resp = kv_after
-        .get(KvGetRequest {
+    let inner = kv_get_with_retry(
+        &kv_after,
+        KvGetRequest {
             version: 1,
             key: Bytes::from_static(b"wipe-test-key"),
             request_id: 2003,
@@ -846,10 +890,10 @@ async fn wipe_user_data_clears_keys_and_preserves_group0() {
             group_id: GROUP,
             read_mode: 0,
             min_slot: 0,
-        })
-        .await
-        .expect("get after wipe");
-    let inner = resp.into_inner();
+        },
+        15,
+    )
+    .await;
     assert!(
         inner.not_found,
         "key should be gone after wipe: ok={} not_found={} value={:?}",
@@ -857,8 +901,9 @@ async fn wipe_user_data_clears_keys_and_preserves_group0() {
     );
 
     // The cluster is functional post-wipe: a new put succeeds.
-    let resp = kv_after
-        .put(KvSetRequest {
+    let resp = kv_put_with_retry(
+        &kv_after,
+        KvSetRequest {
             version: 1,
             key: Bytes::from_static(b"wipe-post-key"),
             value: Bytes::from_static(b"wipe-post-value"),
@@ -868,10 +913,11 @@ async fn wipe_user_data_clears_keys_and_preserves_group0() {
             request_id: 2004,
             request_create_ms: 20004,
             group_id: GROUP,
-        })
-        .await
-        .expect("put after wipe");
-    assert!(resp.into_inner().ok, "put after wipe should succeed");
+        },
+        15,
+    )
+    .await;
+    assert!(resp.ok, "put after wipe should succeed");
 }
 
 #[tokio::test]

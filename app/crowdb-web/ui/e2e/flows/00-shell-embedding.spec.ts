@@ -5,8 +5,6 @@
 import { test, expect } from '../fixtures/realBackend';
 import {
   addGroup,
-  createNode,
-  createRack,
   createStore,
   deployNodeServer,
   freePort,
