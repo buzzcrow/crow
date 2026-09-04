@@ -120,12 +120,12 @@ function CrowdbKVNodeBase({ data }: NodeProps<CrowdbKVNodeData>) {
         )}
       </div>
       {data.diskLabels && data.diskLabels.length > 0 && (
-        <div data-testid="compact-disk-stack" className="tw-mt-2 tw-flex tw-flex-wrap tw-gap-1 tw-max-w-[280px]">
+        <div data-testid="compact-disk-stack" className="tw-mt-2 tw-space-y-1">
           {data.diskLabels.map((label) => (
-            <span key={label} className="tw-inline-flex tw-items-center tw-gap-1 tw-rounded tw-bg-bg/60 tw-px-1.5 tw-py-0.5 tw-text-[9px] tw-text-muted">
-              <HardDrive className="tw-h-2.5 tw-w-2.5 tw-flex-shrink-0" />
+            <div key={label} className="tw-flex tw-items-center tw-gap-1.5 tw-border tw-border-border tw-rounded tw-bg-bg/60 tw-px-2 tw-py-1 tw-text-[10px] tw-text-muted tw-font-mono">
+              <HardDrive className="tw-h-3 tw-w-3 tw-flex-shrink-0 tw-text-accent2" />
               {label}
-            </span>
+            </div>
           ))}
         </div>
       )}

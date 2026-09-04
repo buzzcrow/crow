@@ -171,8 +171,10 @@ function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, hard
   // Logical Replica: dig the full ReplicaView (role/state/engine_healthy/
   // crowtree_stats) out of `stores`. `stores` is `EnrichedStoreView[]`,
   // so `groups[].replicas` is typed `ReplicaView[]` — no cast needed.
+  // Works in both KV and Cluster domains — Cluster selections carry the
+  // same store_id/group_id parentIds.
   const replica =
-    entity.type === 'Replica' && entity.domain === Domain.KV
+    entity.type === 'Replica' && (entity.domain === Domain.KV || entity.domain === Domain.Cluster)
       ? stores
           .find((s) => String(s.store_id) === entity.parentIds?.store_id)
           ?.groups.find((g) => String(g.group_id) === entity.parentIds?.group_id)
@@ -181,11 +183,11 @@ function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, hard
 
   // Logical Group: dig the full GroupView (read_state) out of `stores`.
   const groupView =
-    entity.type === 'Group' && entity.domain === Domain.KV
+    entity.type === 'Group' && (entity.domain === Domain.KV || entity.domain === Domain.Cluster)
       ? stores
           .find((s) => String(s.store_id) === entity.parentIds?.store_id)
           ?.groups.find((g) => String(g.group_id) === entity.id)
-      : entity.type === 'Replica' && entity.domain === Domain.KV
+      : entity.type === 'Replica' && (entity.domain === Domain.KV || entity.domain === Domain.Cluster)
         ? stores
             .find((s) => String(s.store_id) === entity.parentIds?.store_id)
             ?.groups.find((g) => String(g.group_id) === entity.parentIds?.group_id)
@@ -435,6 +437,27 @@ function buildCrossJump(
         label: `Show store ${store.store_id} in cluster`,
         go: () => {
           const target: SelectedEntity = { type: 'Store', id: String(store.store_id), domain: Domain.KV, name: store.name };
+          if (pendingSelectionRef) pendingSelectionRef.current = target;
+          setDomain(Domain.KV);
+          selectEntity(target);
+        },
+      };
+    }
+  }
+  // Cluster Store/Group/Replica -> KV view ("show in KV").
+  if (entity.domain === Domain.Cluster && (entity.type === 'Store' || entity.type === 'Group' || entity.type === 'Replica')) {
+    const sid = entity.parentIds?.store_id;
+    if (sid) {
+      return {
+        label: `Show ${entity.type.toLowerCase()} in KV`,
+        go: () => {
+          const target: SelectedEntity = {
+            type: entity.type,
+            id: entity.id,
+            domain: Domain.KV,
+            parentIds: { store_id: String(sid), ...(entity.parentIds?.group_id ? { group_id: String(entity.parentIds.group_id) } : {}) },
+            name: entity.name,
+          };
           if (pendingSelectionRef) pendingSelectionRef.current = target;
           setDomain(Domain.KV);
           selectEntity(target);

@@ -634,12 +634,11 @@ test.describe('chunk · capacity · disk-group', () => {
         }
       }
 
-      // --- reload, verify Restart/Stop DiskDB visible in Chunk domain ---
-      // Capacity view no longer exposes Restart/Stop/Delete DiskDB on
-      // the node context menu — those are Chunk-domain operations on
-      // the DDB-{nodeId} server item.
+      // --- reload, verify Restart/Stop DiskDB visible in Cluster domain ---
+      // DDB server is shown in the Cluster domain (not Capacity —
+      // Capacity only shows the physical disk hierarchy).
       await page.goto('/');
-      await page.getByTestId('domain-chunk').click();
+      await page.getByTestId('domain-cluster').click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       const expandNodeForMenu = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNodeForMenu.count() > 0) await expandNodeForMenu.first().click();
@@ -652,7 +651,7 @@ test.describe('chunk · capacity · disk-group', () => {
       await expect(page.getByRole('menuitem', { name: /deploy diskdb/i })).toHaveCount(0);
       await page.keyboard.press('Escape');
 
-      // --- restart DDB via Chunk domain DDB context menu ---
+      // --- restart DDB via Cluster domain DDB context menu ---
       const restartResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/restart'));
       await clickMenuItem(page, aside.getByText(`DDB-${nodeId}`, { exact: true }), /restart diskdb/i);
       await restartResponse;
@@ -677,7 +676,7 @@ test.describe('chunk · capacity · disk-group', () => {
         }
       }
 
-      // --- stop DDB via Chunk domain DDB context menu ---
+      // --- stop DDB via Cluster domain DDB context menu ---
       const stopResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/stop'));
       await clickMenuItem(page, aside.getByText(`DDB-${nodeId}`, { exact: true }), /stop diskdb/i);
       await stopResponse;
@@ -706,8 +705,9 @@ test.describe('chunk · capacity · disk-group', () => {
       // stayed green even after the process was killed.
       // Note: HealthBadge renders in compact mode (icon only, no text),
       // so we assert on the title attribute, not text content.
+      // DDB server is shown in the Cluster domain (not Capacity).
       await page.goto('/');
-      await page.getByTestId('domain-chunk').click();
+      await page.getByTestId('domain-cluster').click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       const expandNodeForDdb = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNodeForDdb.count() > 0) await expandNodeForDdb.first().click();
@@ -726,9 +726,9 @@ test.describe('chunk · capacity · disk-group', () => {
       await expect(kvItemAfterDdbStop.getByTitle('Healthy')).toBeVisible({ timeout: 10_000 });
 
       // --- restart DDB after stop (verifies entry was preserved) ---
-      // Chunk domain: right-click DDB-{nodeId} → Restart DiskDB.
+      // Cluster domain: right-click DDB-{nodeId} → Restart DiskDB.
       await page.goto('/');
-      await page.getByTestId('domain-chunk').click();
+      await page.getByTestId('domain-cluster').click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       const expandNodeForRestart = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNodeForRestart.count() > 0) await expandNodeForRestart.first().click();
@@ -800,8 +800,8 @@ test.describe('chunk · capacity · disk-group', () => {
       // node record (which refresh_node_cache flips to Down by probing the
       // now-stopped KV), so the DDB badge dropped even though the DDB
       // process was still running.
-      // Switch to Chunk domain to check DDB health badge.
-      await page.getByTestId('domain-chunk').click();
+      // DDB server is shown in the Cluster domain (not Capacity).
+      await page.getByTestId('domain-cluster').click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       const expandNodeForDdbCheck = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNodeForDdbCheck.count() > 0) await expandNodeForDdbCheck.first().click();
@@ -839,9 +839,9 @@ test.describe('chunk · capacity · disk-group', () => {
       // so we assert on the title attribute, not text content.
       await expect(kvItem.getByTitle('Healthy')).toBeVisible({ timeout: 20_000 });
 
-      // --- delete DiskDB via Chunk-domain context menu (confirm dialog) ---
-      // Switch to Chunk domain to delete DiskDB.
-      await page.getByTestId('domain-chunk').click();
+      // --- delete DiskDB via Cluster-domain context menu (confirm dialog) ---
+      // DDB server is shown in the Cluster domain (not Capacity).
+      await page.getByTestId('domain-cluster').click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       const expandNodeForDelete = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNodeForDelete.count() > 0) await expandNodeForDelete.first().click();
@@ -857,8 +857,7 @@ test.describe('chunk · capacity · disk-group', () => {
       // Regression: delete DDB appeared to delete both because the
       // restart bug had already removed the KV entry.
       await expect(aside.getByText(`DDB-${nodeId}`, { exact: true })).toHaveCount(0, { timeout: 10_000 });
-      // Switch to Cluster domain to verify the KV server still exists.
-      await page.getByTestId('domain-cluster').click();
+      // Already in Cluster domain — verify the KV server still exists.
       await expect(aside.getByText(`KV-${nodeId}`, { exact: true })).toBeVisible();
 
       {

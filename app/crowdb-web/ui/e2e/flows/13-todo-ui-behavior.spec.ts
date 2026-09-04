@@ -178,6 +178,32 @@ test.describe('todo-ui behavior · service deployment and view ownership', () =>
         await expect(canvasDiskGroup.getByTestId('compact-disk-stack')).toContainText(DISK_ID.slice(0, 12));
       });
 
+      await step('todo-ui: cluster shows Store/Group/Replica under KV server', async () => {
+        // The KV server in the Cluster domain must show its hosted
+        // Store > Group > Replica hierarchy so users can see which
+        // logical entities each server owns.
+        const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+        const kvItem = aside.getByRole('treeitem').filter({ hasText: `KV-${NODE_IDS[0]}` });
+        const kvExpand = kvItem.locator('button[aria-label="Expand"]');
+        if (await kvExpand.count() > 0) await kvExpand.click();
+        // Store 770 should appear under the KV server.
+        const storeItem = aside.getByTestId(`tree-node-S-${NODE_IDS[0]}-${STORE_ID}`);
+        await expect(storeItem).toBeVisible({ timeout: 10_000 });
+        const storeExpand = storeItem.locator('button[aria-label="Expand"]');
+        if (await storeExpand.count() > 0) await storeExpand.click();
+        // Group 7700 should appear under the store.
+        const groupItem = aside.getByTestId(`tree-node-G-${NODE_IDS[0]}-${STORE_ID}-${GROUP_ID}`);
+        await expect(groupItem).toBeVisible({ timeout: 5_000 });
+        const groupExpand = groupItem.locator('button[aria-label="Expand"]');
+        if (await groupExpand.count() > 0) await groupExpand.click();
+        // Replica 77000 should appear under the group.
+        await expect(aside.getByText(`LR-${REPLICA_ID}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+
+        // The canvas should also show the Store node under the KV server.
+        const canvasStore = page.locator('.react-flow__node').filter({ hasText: `S-${STORE_ID}` });
+        await expect(canvasStore).toBeVisible({ timeout: 10_000 });
+      });
+
       await step('todo-ui: KV logical tree, operations center, and inspector', async () => {
         await page.getByTestId('domain-kv').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
@@ -202,7 +228,10 @@ test.describe('todo-ui behavior · service deployment and view ownership', () =>
         await expect(inspector.locator('div.tw-font-semibold').filter({ hasText: `G-${GROUP_ID}` })).toBeVisible();
       });
 
-      await step('todo-ui: chunk keeps DiskDB childless', async () => {
+      await step('todo-ui: chunk hides DiskDB server', async () => {
+        // Capacity view must NOT show the DDB server — it's a service
+        // item that belongs in the Cluster domain only. The physical
+        // disk hierarchy (DG > Disk) remains.
         await page.getByTestId('domain-chunk').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         const rack = aside.getByRole('treeitem').filter({ hasText: `R-${RACK_ID}` });
@@ -211,10 +240,8 @@ test.describe('todo-ui behavior · service deployment and view ownership', () =>
         await expect(node).toBeVisible({ timeout: 10_000 });
         if (await node.getByRole('button', { name: 'Expand' }).count()) await node.getByRole('button', { name: 'Expand' }).click();
         await expect(aside.getByText(/Physical Group.*DG-7710/)).toBeVisible();
-        await expect(aside.getByText(`DDB-${NODE_IDS[0]}`, { exact: true })).toBeVisible();
-        const ddb = aside.getByRole('treeitem').filter({ hasText: `DDB-${NODE_IDS[0]}` });
-        await expect(ddb.getByRole('button', { name: 'Expand' })).toHaveCount(0);
-        await expect(ddb.getByText(/DG-7710/)).toHaveCount(0);
+        // DDB server must NOT appear in the Capacity view.
+        await expect(aside.getByText(`DDB-${NODE_IDS[0]}`, { exact: true })).toHaveCount(0, { timeout: 5_000 });
       });
     } finally {
       await resetAll(baseURL!);

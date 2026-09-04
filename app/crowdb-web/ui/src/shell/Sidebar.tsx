@@ -115,6 +115,49 @@ export function Sidebar({
           // Cluster projects services and DiskDB-owned disk groups.
           const server = serverByNodeId.get(nodeId);
           if (server) {
+            // Build Store > Group > Replica children for replicas hosted
+            // on this node, so users can see which logical entities each
+            // KV server owns.
+            const storeChildren: TreeNode[] = [];
+            for (const store of stores) {
+              const sid = String(store.store_id);
+              const groupChildren: TreeNode[] = [];
+              for (const group of store.groups || []) {
+                const gid = String(group.group_id);
+                const replicasOnNode = (group.replicas || []).filter((r) => String(r.node_id) === String(nodeId));
+                if (replicasOnNode.length === 0) continue;
+                groupChildren.push({
+                  id: `G-${nodeId}-${sid}-${gid}`,
+                  rawId: gid,
+                  label: groupLabel(gid),
+                  type: 'Group' as const,
+                  icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
+                  health: toUiHealth(group.state),
+                  parentIds: { node_id: nodeId, store_id: sid },
+                  children: replicasOnNode.map((r) => ({
+                    id: `LR-${nodeId}-${sid}-${gid}-${r.replica_id}`,
+                    rawId: String(r.replica_id),
+                    label: localReplicaLabel(String(r.replica_id)),
+                    type: 'Replica' as const,
+                    icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+                    role: toUiReplicaRole(String(r.role), String(r.state)),
+                    health: toUiHealth(String(r.state)),
+                    parentIds: { node_id: nodeId, store_id: sid, group_id: gid },
+                  })),
+                });
+              }
+              if (groupChildren.length > 0) {
+                storeChildren.push({
+                  id: `S-${nodeId}-${sid}`,
+                  rawId: sid,
+                  label: store.name ? `${storeLabel(sid)} (${store.name})` : storeLabel(sid),
+                  type: 'Store' as const,
+                  icon: <Database className="tw-h-4 tw-w-4 tw-text-muted" />,
+                  parentIds: { node_id: nodeId },
+                  children: groupChildren,
+                });
+              }
+            }
             children.push({
               id: `KV-${nodeId}`,
               rawId: server.id,
@@ -124,6 +167,7 @@ export function Sidebar({
               health: toUiHealth(server.process.health),
               serviceType: 'kv',
               parentIds: { rack_id: rack.id, node_id: nodeId },
+              children: storeChildren.length > 0 ? storeChildren : undefined,
             });
           }
 
@@ -270,18 +314,6 @@ export function Sidebar({
                 hwStatus: diskStatusById.get(d.disk_id) ?? undefined,
                 parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id, disk_id: d.disk_id },
               })),
-            });
-          }
-          if (diskdbNodeIds?.has(nodeId)) {
-            children.push({
-              id: `DDB-${nodeId}`,
-              rawId: `${nodeId}-ddb`,
-              label: `DDB-${nodeId}`,
-              type: 'Server',
-              icon: <Cog className="tw-h-4 tw-w-4 tw-text-muted" />,
-              health: toUiHealth(diskdbHealthById?.get(nodeId)),
-              serviceType: 'diskdb',
-              parentIds: { rack_id: rack.id, node_id: nodeId },
             });
           }
 

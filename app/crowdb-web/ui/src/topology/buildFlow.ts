@@ -64,7 +64,9 @@ const LEADER_EDGE = {
 
 /**
  * Cluster physical view: Rack -> Node -> services, with assigned disk groups
- * nested under their owning DiskDB instance.
+ * nested under their owning DiskDB instance. KV servers also show their
+ * hosted Store > Group > Replica hierarchy so users can see which logical
+ * entities each server owns.
  */
 export function buildPhysicalFlow(
   racks: Rack[],
@@ -76,6 +78,7 @@ export function buildPhysicalFlow(
   diskdbInstances: { instance_id: string; owned_dg_ids: number[] }[] = [],
   diskdbInstanceIdByNodeId: Map<number, string> = new Map(),
   nodeDiskGroups: Record<number, NodeDiskGroups> = {},
+  stores: EnrichedStoreView[] = [],
 ): { nodes: Node[]; edges: Edge[] } {
   const flowNodes: Node[] = [];
   const flowEdges: Edge[] = [];
@@ -122,6 +125,59 @@ export function buildPhysicalFlow(
         }),
       );
       flowEdges.push({ id: `e-N-${node.id}-KV`, source: `N-${node.id}`, target: serverNodeId, type: 'smoothstep' });
+
+      // Store > Group > Replica for replicas hosted on this node.
+      for (const store of stores) {
+        const sid = String(store.store_id);
+        const storeNodeId = `S-${node.id}-${sid}`;
+        let storeHasReplica = false;
+        for (const group of store.groups || []) {
+          const gid = String(group.group_id);
+          const replicasOnNode = (group.replicas || []).filter((r) => String(r.node_id) === String(node.id));
+          if (replicasOnNode.length === 0) continue;
+          if (!storeHasReplica) {
+            storeHasReplica = true;
+            flowNodes.push(mkNode(storeNodeId, {
+              kind: 'Store',
+              label: store.name ? `${storeLabel(sid)} (${store.name})` : storeLabel(sid),
+              sublabel: `${store.groups?.length ?? 0} group(s)`,
+              layer: 4,
+              entity: { type: 'Store', id: sid, name: store.name, parentIds: { node_id: node.id } },
+            }));
+            flowEdges.push({ id: `e-${serverNodeId}-${storeNodeId}`, source: serverNodeId, target: storeNodeId, type: 'smoothstep' });
+          }
+          const groupNodeId = `G-${node.id}-${sid}-${gid}`;
+          flowNodes.push(mkNode(groupNodeId, {
+            kind: 'Group',
+            label: groupLabel(gid),
+            sublabel: group.leader ? `leader ${group.leader}` : `${replicasOnNode.length} replica(s)`,
+            health: group.state,
+            layer: 5,
+            entity: { type: 'Group', id: gid, parentIds: { node_id: node.id, store_id: sid } },
+          }));
+          flowEdges.push({ id: `e-${storeNodeId}-${groupNodeId}`, source: storeNodeId, target: groupNodeId, type: 'smoothstep' });
+
+          const leaderNodeId = group.leader != null ? `LR-${node.id}-${sid}-${gid}-${group.leader}` : null;
+          for (const r of replicasOnNode) {
+            const rid = String(r.replica_id);
+            const replicaNodeId = `LR-${node.id}-${sid}-${gid}-${rid}`;
+            flowNodes.push(mkNode(replicaNodeId, {
+              kind: 'Replica',
+              label: localReplicaLabel(rid),
+              sublabel: nodeLabel(String(r.node_id)),
+              health: r.state,
+              role: toUiReplicaRole(String(r.role), String(r.state)),
+              leader: group.leader === r.replica_id,
+              layer: 6,
+              entity: { type: 'Replica', id: rid, parentIds: { node_id: node.id, store_id: sid, group_id: gid } },
+            }));
+            flowEdges.push({ id: `e-${groupNodeId}-${replicaNodeId}`, source: groupNodeId, target: replicaNodeId, type: 'smoothstep' });
+            if (leaderNodeId && leaderNodeId !== replicaNodeId) {
+              flowEdges.push({ id: `e-leader-${node.id}-${gid}-${rid}`, source: leaderNodeId, target: replicaNodeId, ...LEADER_EDGE });
+            }
+          }
+        }
+      }
     }
 
     // DiskDB server node owns its assigned disk-group projection.
@@ -322,22 +378,6 @@ export function buildCapacityFlow(
         flowEdges.push({ id: `e-${dgNodeId}-${diskNodeId}`, source: dgNodeId, target: diskNodeId, type: 'smoothstep' });
       }
     }
-
-    // DiskDB is a service sibling of the physical disk hierarchy. Its owned
-    // disk-groups are intentionally not rendered beneath it.
-    if (hasDiskdb) {
-      const ddbNodeId = `DDB-${node.id}`;
-      flowNodes.push(
-        mkNode(ddbNodeId, {
-          kind: 'Server',
-          label: `DDB-${node.id}`,
-          sublabel: 'DiskDB',
-          layer: 3,
-          entity: { type: 'Server', id: ddbNodeId, parentIds: { rack_id: node.rack_id, node_id: node.id }, serviceType: 'diskdb' },
-        }),
-      );
-      flowEdges.push({ id: `e-N-${node.id}-DDB`, source: `N-${node.id}`, target: ddbNodeId, type: 'smoothstep' });
-    }
   }
 
   return { nodes: flowNodes, edges: flowEdges };
@@ -358,7 +398,7 @@ export function buildFlowForDomain(
 ): { nodes: Node[]; edges: Edge[] } {
   switch (domain) {
     case Domain.Cluster:
-      return buildPhysicalFlow(racks, nodes, servers, _nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances, diskdbInstanceIdByNodeId, nodeDiskGroups);
+      return buildPhysicalFlow(racks, nodes, servers, _nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances, diskdbInstanceIdByNodeId, nodeDiskGroups, stores);
     case Domain.Chunk:
       return buildCapacityFlow(racks, nodes, diskdbNodeIds, nodeHealthById, nodeDiskGroups);
     default:

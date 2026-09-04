@@ -24,7 +24,7 @@ use crowdb_diskdb::service::DiskdbRpcService;
 use crowdb_kv_client::{
     ClientConfig, CrowdbKvClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// CROWDB diskdb server CLI.
 #[derive(Parser, Debug)]
@@ -164,14 +164,10 @@ async fn main() {
         }
     };
 
-    // Generate instance ID if not set.
-    let instance_id = config
-        .load()
-        .server
-        .instance_id
-        .as_ref()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(crowdb_kv_client::new_client_id);
+    // Resolve instance ID: config > persisted state file > generate new.
+    // The state file ensures the same instance_id survives restart so
+    // group-0 ownership-map entries (keyed by instance_id) remain valid.
+    let instance_id = resolve_instance_id(&config);
 
     // Build the in-memory disk-group container. Phase = Init.
     let container = Arc::new(DdbDiskGroupContainer::new(instance_id));
@@ -490,4 +486,52 @@ fn replace_port(addr: &str, port: u16) -> String {
     } else {
         format!("0.0.0.0:{port}")
     }
+}
+
+/// Resolve the diskdb instance ID.
+///
+/// Precedence: config `server.instance_id` > persisted state file
+/// (`state/instance_id` relative to CWD) > newly generated.
+///
+/// When generating a new ID, it is persisted to `state/instance_id` so
+/// subsequent restarts reuse it. This is critical because group-0
+/// ownership-map entries (`/hw/dg_owner/...`) are keyed by
+/// `instance_id` — a new ID on every restart would cause the diskdb
+/// to lose ownership of all its disk-groups after restart.
+fn resolve_instance_id(config: &arc_swap::ArcSwap<DdbConfig>) -> u64 {
+    // 1. Config takes precedence (operator-set, never overwritten).
+    if let Some(id) = config
+        .load()
+        .server
+        .instance_id
+        .as_ref()
+        .and_then(|s| s.parse().ok())
+    {
+        info!(instance_id = id, source = "config", "instance ID resolved");
+        return id;
+    }
+
+    // 2. Try the persisted state file.
+    let state_dir = std::path::Path::new("state");
+    let state_file = state_dir.join("instance_id");
+    if let Ok(content) = std::fs::read_to_string(&state_file) {
+        if let Ok(id) = content.trim().parse::<u64>() {
+            info!(instance_id = id, source = "state file", "instance ID resolved");
+            return id;
+        }
+    }
+
+    // 3. Generate new and persist.
+    let id = crowdb_kv_client::new_client_id();
+    if let Err(e) = std::fs::create_dir_all(state_dir) {
+        warn!(error = %e, "failed to create state dir; instance_id will not persist across restarts");
+    } else if let Err(e) = std::fs::write(&state_file, id.to_string()) {
+        warn!(error = %e, "failed to write state/instance_id; instance_id will not persist across restarts");
+    }
+    info!(
+        instance_id = id,
+        source = "generated",
+        "instance ID resolved and persisted"
+    );
+    id
 }
