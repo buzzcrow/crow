@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::Parser;
-use crowdb_common::metrics::MetricsRegistry;
+use crowdb_common::metrics::{MetricsRegistry, MetricsRunner};
 use crowdb_diskdb::bg_task::{BgCtx, BgRunner};
 use crowdb_diskdb::ddb_config::{validate, CompactionConfig, DdbConfig, KeepAliveConfig};
 use crowdb_diskdb::ddb_kv_client::DdbKvClient;
@@ -78,6 +78,10 @@ struct Cli {
     /// Number of rotated log files to keep. Default: 5.
     #[arg(long, default_value_t = crowdb_common::logging::DEFAULT_LOG_MAX_FILES)]
     log_max_files: usize,
+
+    /// Metrics flush interval in seconds. Zero disables metrics logging.
+    #[arg(long, default_value_t = 5)]
+    metrics_interval: u64,
 
     /// Also print logs to console (in addition to file logging).
     #[arg(short = 'l', long)]
@@ -197,8 +201,16 @@ async fn main() {
     // `disk.bad.impacted_blocks`). The CAS retry counter is attached
     // to each `Zone` during disk-add init so the allocate path can
     // increment it on each failed `cas_bit`.
-    let mut metrics_registry = MetricsRegistry::new();
-    let metrics = DiskdbMetrics::register(&mut metrics_registry);
+    let (metrics, mut metrics_runner) = create_metrics(
+        args.metrics_interval,
+        &log_dir,
+        args.log_max_file_mb,
+        args.log_max_files,
+    );
+    if let Some(runner) = &mut metrics_runner {
+        runner.start();
+        info!(interval_secs = args.metrics_interval, "metrics runner started");
+    }
 
     // Phase = Syncing. Run initial keep-alive tick (blocking) to
     // populate the in-memory disk-group/disk/zone state.
@@ -386,7 +398,7 @@ async fn main() {
 
     // Wait for shutdown signal.
     let rpc_server_stop = Arc::clone(&rpc_server);
-    let _ = tokio::signal::ctrl_c().await;
+    shutdown_signal().await;
     info!("received shutdown signal");
     rpc_server_stop.stop();
     stop.notify_waiters();
@@ -399,7 +411,45 @@ async fn main() {
     if let Some(h) = notify_handle {
         let _ = h.await;
     }
+    if let Some(runner) = &mut metrics_runner {
+        runner.stop().await;
+        info!("metrics runner stopped");
+    }
     info!("crowdb-diskdb stopped");
+}
+
+async fn shutdown_signal() {
+    let mut term_stream = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            let _ = result;
+        }
+        _ = term_stream.recv() => {}
+    }
+}
+
+fn create_metrics(
+    interval_secs: u64,
+    log_dir: &str,
+    max_file_mb: usize,
+    max_files: usize,
+) -> (DiskdbMetrics, Option<MetricsRunner>) {
+    if interval_secs == 0 {
+        let mut registry = MetricsRegistry::new();
+        return (DiskdbMetrics::register(&mut registry), None);
+    }
+    let file = crowdb_common::logging::open_metrics_log(log_dir, "crowdb-diskdb", max_file_mb, max_files)
+        .expect("failed to open metrics log file");
+    let runner = MetricsRunner::new(file, interval_secs);
+    let metrics = {
+        let mut registry = runner
+            .registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        DiskdbMetrics::register(&mut registry)
+    };
+    (metrics, Some(runner))
 }
 
 /// Run R73 zone loading for all owned disk-groups, then set phase to

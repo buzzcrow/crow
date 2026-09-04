@@ -79,6 +79,24 @@ pub enum ClusterVerb {
         /// [kv] Enable `--no-fsync` on the spawned server.
         #[arg(long, default_value_t = false)]
         no_fsync: bool,
+        /// [diskdb] Disk-groups provisioned per node.
+        #[arg(long, default_value_t = 1)]
+        disk_groups_per_node: usize,
+        /// [diskdb] Disks provisioned per disk-group.
+        #[arg(long, default_value_t = 4)]
+        disks_per_group: usize,
+        /// [diskdb] Logical capacity of each disk.
+        #[arg(long, default_value_t = 1_099_511_627_776_u64)]
+        disk_capacity_bytes: u64,
+        /// [diskdb] Logical zone size of each disk.
+        #[arg(long, default_value_t = 274_877_906_944_u64)]
+        disk_zone_size_bytes: u64,
+        /// [diskdb] Allocation unit size.
+        #[arg(long, default_value_t = 1_048_576_u32)]
+        disk_unit_size_bytes: u32,
+        /// [diskdb] Existing store-0 KV groups used for allocation records.
+        #[arg(long, value_delimiter = ',', default_value = "1")]
+        data_groups: Vec<u64>,
     },
     /// Tear down the entire cluster (all groups, stores, servers, sysdata).
     Destroy,
@@ -180,6 +198,12 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
             kv_backend,
             wal_backend,
             no_fsync,
+            disk_groups_per_node,
+            disks_per_group,
+            disk_capacity_bytes,
+            disk_zone_size_bytes,
+            disk_unit_size_bytes,
+            data_groups,
         } => match service_type.as_str() {
             "kv" => {
                 let ctx = match op_context(cli) {
@@ -281,8 +305,50 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                     }
                 }
             }
+            "diskdb" => {
+                let ctx = match op_context(cli) {
+                    Ok(c) => c,
+                    Err(c) => return c,
+                };
+                let workspace =
+                    deploy_workspace(cli).unwrap_or_else(|| std::path::PathBuf::from("cli-deploy"));
+                let config = crowdb_console_shared::ops::cluster::LocalDiskdbDeployConfig {
+                    disk_groups_per_node,
+                    disks_per_group,
+                    capacity_bytes: disk_capacity_bytes,
+                    zone_size_bytes: disk_zone_size_bytes,
+                    unit_size_bytes: disk_unit_size_bytes,
+                    data_groups,
+                };
+                match crowdb_console_shared::ops::cluster::local_deploy_diskdb(&ctx, &workspace, &config)
+                    .await
+                {
+                    Ok(summary) => {
+                        if let Err(code) = commit_config(cli, &ctx) {
+                            return code;
+                        }
+                        if cli.json {
+                            return print_json(cli, &summary);
+                        }
+                        println!(
+                            "local-deploy diskdb: {} instances, {} disk-groups, {} disks, data-groups {:?}",
+                            summary.instance_count,
+                            summary.disk_group_count,
+                            summary.disk_count,
+                            summary.data_groups
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("error: local-deploy diskdb: {error}");
+                        ExitCode::from(2)
+                    }
+                }
+            }
             other => {
-                eprintln!("error: local-deploy: unsupported service type `{other}` (expected kv or rpc)");
+                eprintln!(
+                    "error: local-deploy: unsupported service type `{other}` (expected kv, diskdb, or rpc)"
+                );
                 ExitCode::from(1)
             }
         },

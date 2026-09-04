@@ -519,7 +519,9 @@ fn stage_server_binary(binary: &std::path::Path, workspace_dir: &std::path::Path
         field: "binary".into(),
         message: format!("could not resolve server binary path: {}", binary.display()),
     })?;
-    let staged = workspace_dir.join("bin").join(
+    let bin_dir = workspace_dir.join("bin");
+    std::fs::create_dir_all(&bin_dir).map_err(Error::Io)?;
+    let staged = bin_dir.join(
         source
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("crowdb-kv-server")),
@@ -623,6 +625,10 @@ fn is_executable(path: &std::path::Path) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct DiskdbDeployRequest {
     pub server_id: String,
+    /// Stable instance ID used for group-0 ownership assignment.
+    pub instance_id: Option<u64>,
+    /// Metrics flush interval override in seconds.
+    pub metrics_interval: Option<u64>,
     /// Main listener port (diskdb `listen_addr`).
     pub listen_port: u16,
     /// HTTP management port (diskdb `http_listen_addr`).
@@ -712,6 +718,7 @@ fn resolve_diskdb_config_path(
     listen_port: u16,
     http_port: u16,
     rpc_port: u16,
+    instance_id: Option<u64>,
     kv_server_mgmt_seeds: &[String],
 ) -> Result<PathBuf> {
     let conf = workspace_dir.join("conf");
@@ -732,11 +739,13 @@ fn resolve_diskdb_config_path(
     // Minimal valid config — only [server] is required; all other
     // sections default via `#[serde(default)]` on `DdbConfig` fields
     // (values match `DdbConfig::default()`).
+    let instance_id = instance_id.map_or_else(String::new, |id| format!("instance_id = \"{id}\"\n"));
     let config = format!(
         "[server]\n\
          listen_addr = \"0.0.0.0:{listen_port}\"\n\
          http_listen_addr = \"0.0.0.0:{http_port}\"\n\
          rpc_listen_addr = \"0.0.0.0:{rpc_port}\"\n\
+         {instance_id}\
          kv_server_mgmt_seeds = [{seeds}]\n",
     );
     std::fs::write(&path, config).map_err(Error::Io)?;
@@ -870,6 +879,7 @@ pub async fn deploy_diskdb_local(
         req.listen_port,
         req.http_port,
         req.rpc_port,
+        req.instance_id,
         &req.kv_server_mgmt_seeds,
     )?;
     // The public endpoint is the crowdb-rpc listener. The main listener is
@@ -888,6 +898,10 @@ pub async fn deploy_diskdb_local(
 
     let mut cmd = Command::new(&launch_binary);
     cmd.arg("--config").arg(&config_path);
+    cmd.arg("--log-dir").arg(workspace_dir.join("log"));
+    if let Some(interval) = req.metrics_interval {
+        cmd.arg("--metrics-interval").arg(interval.to_string());
+    }
     cmd.arg("--listen-addr")
         .arg(format!("{}:{}", node.host, req.listen_port));
     cmd.arg("--http-addr")

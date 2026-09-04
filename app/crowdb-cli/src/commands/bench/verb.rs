@@ -54,6 +54,9 @@ pub struct DiskdbArgs {
     /// Deterministic workload seed.
     #[arg(long, default_value_t = 1)]
     pub seed: u64,
+    /// Metrics flush interval in seconds. 0 disables the metrics log.
+    #[arg(long, default_value_t = 1)]
+    pub metrics_interval: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

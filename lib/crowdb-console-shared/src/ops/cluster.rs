@@ -19,7 +19,8 @@ use crowdb_protocol::ServicePort;
 use crate::clients::http::ServerClient;
 use crate::config::{NodeEntry, RackEntry, ReplicaEntry, ServerEntry, ServiceType};
 use crate::error::{Error, Result};
-use crate::lifecycle::{self, crowdb_kv_server_bin, DeployRequest};
+use crate::lifecycle::{self, crowdb_kv_server_bin, DeployRequest, DiskdbDeployRequest};
+use crate::ops::hardware::{self, AddDiskInput};
 use crate::ops::OpContext;
 
 /// Summary of a completed cluster init.
@@ -479,7 +480,12 @@ pub struct CleanResult {
 /// Returns an error if no servers are configured.
 pub async fn clean(ctx: &OpContext, store_id: u64, group_id: u64) -> Result<CleanResult> {
     let cfg = ctx.config().clone();
-    let mut mgmt_urls: Vec<String> = cfg.servers.iter().map(|s| s.url.clone()).collect();
+    let mut mgmt_urls: Vec<String> = cfg
+        .servers
+        .iter()
+        .filter(|server| server.service_type == ServiceType::Kv)
+        .map(|server| server.url.clone())
+        .collect();
     mgmt_urls.sort();
     mgmt_urls.dedup();
     if mgmt_urls.is_empty() {
@@ -566,6 +572,257 @@ pub struct LocalDeploySummary {
     pub rack_id: u64,
     pub node_ids: Vec<u64>,
     pub init_summary: InitSummary,
+}
+
+/// `DiskDB` topology attached to an existing local KV deployment.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalDiskdbDeploySummary {
+    pub instance_count: usize,
+    pub disk_group_count: usize,
+    pub disk_count: usize,
+    pub data_groups: Vec<u64>,
+}
+
+/// Inputs for [`local_deploy_diskdb`].
+#[derive(Debug, Clone)]
+pub struct LocalDiskdbDeployConfig {
+    pub disk_groups_per_node: usize,
+    pub disks_per_group: usize,
+    pub capacity_bytes: u64,
+    pub zone_size_bytes: u64,
+    pub unit_size_bytes: u32,
+    pub data_groups: Vec<u64>,
+}
+
+/// Attach one `DiskDB` instance per configured KV node and provision its disks.
+///
+/// # Errors
+///
+/// Returns an error when the requested topology is invalid, its KV data groups
+/// do not exist, metadata provisioning fails, ports cannot be allocated, or a
+/// local `DiskDB` process cannot be deployed.
+pub async fn local_deploy_diskdb(
+    ctx: &OpContext,
+    workspace: &std::path::Path,
+    cfg: &LocalDiskdbDeployConfig,
+) -> Result<LocalDiskdbDeploySummary> {
+    let nodes = validate_diskdb_deploy(ctx, cfg)?;
+    ensure_diskdb_hardware(ctx, &nodes).await?;
+    let (disk_group_count, disk_count) = provision_diskdb_topology(ctx, &nodes, cfg).await?;
+    let ports = alloc_diskdb_ports(workspace, nodes.len())?;
+    deploy_diskdb_instances(ctx, workspace, &nodes, &ports).await?;
+
+    Ok(LocalDiskdbDeploySummary {
+        instance_count: nodes.len(),
+        disk_group_count,
+        disk_count,
+        data_groups: cfg.data_groups.clone(),
+    })
+}
+
+async fn ensure_diskdb_hardware(ctx: &OpContext, nodes: &[NodeEntry]) -> Result<()> {
+    for node in nodes {
+        if ctx.sysmd().get_rack(node.rack_id).await?.is_none() {
+            ctx.sysmd()
+                .add_rack(
+                    node.rack_id,
+                    &RackValue {
+                        status: HwStatus::Up as i32,
+                        node_ids: Vec::new(),
+                    },
+                )
+                .await?;
+        }
+        if ctx.sysmd().get_node(node.rack_id, node.id).await?.is_none() {
+            ctx.sysmd()
+                .add_node(
+                    node.rack_id,
+                    node.id,
+                    &NodeValue {
+                        status: HwStatus::Up as i32,
+                        last_used_dg_id: 0,
+                        disk_group_ids: Vec::new(),
+                        status_changed_at_ms: 0,
+                        temp_failure_since_ms: None,
+                    },
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_diskdb_deploy(ctx: &OpContext, cfg: &LocalDiskdbDeployConfig) -> Result<Vec<NodeEntry>> {
+    if cfg.disk_groups_per_node == 0 || cfg.disks_per_group == 0 || cfg.data_groups.is_empty() {
+        return Err(Error::Validation {
+            field: "diskdb_topology".into(),
+            message: "disk groups, disks, and data groups must be non-empty".into(),
+        });
+    }
+    let mut nodes = ctx.config().nodes.clone();
+    nodes.sort_by_key(|node| node.id);
+    if nodes.is_empty() {
+        return Err(Error::Validation {
+            field: "nodes".into(),
+            message: "deploy the KV cluster before DiskDB".into(),
+        });
+    }
+    let configured_groups = ctx.config().groups.clone();
+    for group_id in &cfg.data_groups {
+        if !configured_groups
+            .iter()
+            .any(|group| group.store_id == 0 && group.group_id == *group_id)
+        {
+            return Err(Error::NotFound {
+                kind: "kv_group".into(),
+                id: format!("0:{group_id}"),
+            });
+        }
+    }
+    Ok(nodes)
+}
+
+async fn provision_diskdb_topology(
+    ctx: &OpContext,
+    nodes: &[NodeEntry],
+    cfg: &LocalDiskdbDeployConfig,
+) -> Result<(usize, usize)> {
+    let lease_expiry_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+        .saturating_add(3_600_000);
+    let mut disk_group_count = 0usize;
+    let mut disk_count = 0usize;
+    for node in nodes {
+        for local_group in 0..cfg.disk_groups_per_node {
+            let disk_group_id = node.id * 100 + u64::try_from(local_group).unwrap_or(u64::MAX) + 1;
+            hardware::add_disk_group(ctx, node.id, disk_group_id, &format!("bench-dg-{disk_group_id}"))
+                .await?;
+            let disks = (0..cfg.disks_per_group)
+                .map(|disk| AddDiskInput {
+                    disk_id: format!("{:016x}{:016x}", disk_group_id, disk + 1),
+                    disk_type: "BLOCK_SSD".into(),
+                    capacity_bytes: cfg.capacity_bytes,
+                    zone_size_bytes: cfg.zone_size_bytes,
+                    unit_size_bytes: cfg.unit_size_bytes,
+                    device_path: String::new(),
+                })
+                .collect::<Vec<_>>();
+            hardware::add_disks_batch(ctx, node.id, disk_group_id, &disks).await?;
+            let instance_id = 10_000 + node.id;
+            ctx.sysmd()
+                .set_owner(node.rack_id, node.id, disk_group_id, instance_id, lease_expiry_ms)
+                .await?;
+            let data_group = cfg.data_groups[disk_group_count % cfg.data_groups.len()];
+            ctx.sysmd()
+                .set_bind(node.rack_id, node.id, disk_group_id, 0, data_group)
+                .await?;
+            disk_group_count += 1;
+            disk_count += disks.len();
+        }
+    }
+
+    Ok((disk_group_count, disk_count))
+}
+
+struct DiskdbPorts {
+    listen: Vec<u16>,
+    http: Vec<u16>,
+    rpc: Vec<u16>,
+}
+
+fn alloc_diskdb_ports(workspace: &std::path::Path, node_count: usize) -> Result<DiskdbPorts> {
+    std::fs::create_dir_all(workspace)?;
+    let port_cfg = PortAllocConfig::new(workspace);
+    let count = u16::try_from(node_count).unwrap_or(u16::MAX);
+    let alloc = |service| {
+        port_alloc::alloc_port_range(service, 0, count, &port_cfg).map_err(|error| Error::Validation {
+            field: "port_alloc".into(),
+            message: error.to_string(),
+        })
+    };
+    Ok(DiskdbPorts {
+        listen: alloc(ServicePort::DiskdbListen)?,
+        http: alloc(ServicePort::DiskdbHttp)?,
+        rpc: alloc(ServicePort::DiskdbRpc)?,
+    })
+}
+
+async fn deploy_diskdb_instances(
+    ctx: &OpContext,
+    workspace: &std::path::Path,
+    nodes: &[NodeEntry],
+    ports: &DiskdbPorts,
+) -> Result<()> {
+    let seeds = ctx
+        .config()
+        .servers
+        .iter()
+        .filter(|server| server.service_type == ServiceType::Kv)
+        .map(|server| server.url.clone())
+        .collect::<Vec<_>>();
+    for (index, node) in nodes.iter().enumerate() {
+        let node_dir = workspace
+            .join(format!("rack{}", node.rack_id))
+            .join(format!("node{}", node.id));
+        std::fs::create_dir_all(node_dir.join("log"))?;
+        let server_id = format!("diskdb-{}", node.id);
+        let deployed = lifecycle::deploy_diskdb_local(
+            &DiskdbDeployRequest {
+                server_id: server_id.clone(),
+                instance_id: Some(10_000 + node.id),
+                metrics_interval: Some(1),
+                listen_port: ports.listen[index],
+                http_port: ports.http[index],
+                rpc_port: ports.rpc[index],
+                kv_server_mgmt_seeds: seeds.clone(),
+            },
+            node,
+            &node_dir,
+        )
+        .await?;
+        ctx.config_mut().add_server(ServerEntry {
+            id: server_id,
+            url: deployed.mgmt_url,
+            node_id: Some(node.id),
+            rpc_url: Some(deployed.rpc_url),
+            rest_port: Some(ports.http[index]),
+            rpc_port: Some(ports.rpc[index]),
+            auto_start: true,
+            binary: None,
+            election_profile: None,
+            pid: Some(deployed.pid),
+            service_type: ServiceType::Diskdb,
+            rpc_workers: None,
+            no_fsync: false,
+        })?;
+    }
+    wait_for_diskdb_registration(ctx, nodes.len()).await?;
+    Ok(())
+}
+
+async fn wait_for_diskdb_registration(ctx: &OpContext, expected: usize) -> Result<()> {
+    let discovery = ctx.discovery_or_error()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        discovery.invalidate(Some("diskdb"));
+        if discovery
+            .discover_all("diskdb")
+            .await
+            .is_ok_and(|instances| instances.len() >= expected)
+        {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::UpstreamRpc {
+                node_id: "group0-service-registry".into(),
+                status: format!("expected {expected} living diskdb instances before timeout"),
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 /// Deploy a local N-node KV cluster on `127.0.0.1`: creates rack 1,

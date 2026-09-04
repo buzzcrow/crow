@@ -5,8 +5,9 @@
 
 ## Problem
 
-The DiskDB allocation benchmark currently reaches about 110K one-unit
-allocations/s at 64 workers on the Linux reference host. The allocator's
+The production-path DiskDB allocation benchmark currently reaches about 61K
+one-unit allocations/s at 64 workers on the Linux reference host. A
+four-block request reaches about 136K allocated units/s at 16 workers. The allocator's
 bitmap claim is lock-free, but a successful client request also crosses
 RPC dispatch, async scheduling, record construction, KV batch persistence,
 Paxos, WAL, storage apply, and response scheduling. We have not isolated
@@ -40,6 +41,9 @@ Use scenarios:
 - A change improves an isolated layer but reduces full-path throughput or
   worsens p99 latency. The regression history preserves both measurements
   and rejects the change as a full-path improvement.
+- An engineer opens one timestamped regression root after a run and compares
+  CLI, DiskDB, KV, RPC, WAL, storage, CPU, memory, and network counters for
+  the same workload window.
 
 ## Solution
 
@@ -86,6 +90,20 @@ bottlenecks, and retain the results in a permanent allocation-flow analysis.
    p50/p99 latency, errors, stop reason, allocated units, and exact busy-space
    delta in the regression script history.
 
+7. **Production lifecycle and retained metrics** — keep
+   `tools/bench-diskdb-regression.sh` on the `crowdb-cli cluster local-deploy`
+   path. Each case creates three memory-backed KV nodes, group 0 plus one or
+   more data groups, three DiskDB instances, and twelve 1-TiB logical disks.
+   All commands share one run root while each deploy, group operation,
+   benchmark, and destroy invocation gets its own command-and-datetime
+   folder. Retain KV-server, DiskDB-server, RPC, and CLI metrics logs.
+
+8. **Compaction correctness prerequisite** — fix the snapshot/watermark race
+   exposed by high-concurrency mix runs before accepting throughput changes.
+   A compaction scan must not advance its watermark past durable free records
+   omitted by that scan; later compaction must reclaim them rather than mark
+   them stale.
+
 ```text
 crowdb-cli workers
         |
@@ -120,6 +138,30 @@ Edge cases at a glance:
   an isolation result.
 - CAS retries or queues saturate → report the saturation counter with the
   corresponding stage latency.
+- A compaction scan omits a concurrent durable free → a later scan reclaims
+  it; the prior watermark cannot turn an unprocessed free into a stale one.
+
+Current production-path baseline on the AMD Ryzen 9 5950X, 2026-09-04:
+
+- One-block allocate: 2,579 ops/s at 1 worker, 10,932 at 4, 38,962 at
+  16, and 60,642 at 64. All four cases ran for 20 seconds with zero errors
+  and exact space accounting.
+- At one worker, DiskDB metrics attribute about 297 us to KV persistence,
+  299 us to the complete server RPC handler, and 1 us to bitmap scanning.
+  The first optimization pass therefore belongs in persistence, batching,
+  and KV proposal flow rather than the lock-free bitmap claim.
+- Four-block allocate at 16 workers: 135,511 allocated units/s, p50 453 us,
+  p99 801 us, zero errors, exact 2,842,324,631,552-byte busy delta.
+- One-block mix: 2,593 ops/s at 1 worker, 11,386 at 4, and 37,572 at 16,
+  with zero errors and exact accounting.
+- The 64-worker one-block mix and 16-worker four-block mix are invalid
+  throughput baselines. They reproduced leaked busy bits after acknowledged
+  frees: 2,189 and 304 units respectively. Their logs show compaction scans
+  later treating missed free records as stale.
+- Verified run roots:
+  `bench-log/diskdb-regression-20260904-135217` and
+  `bench-log/diskdb-regression-20260904-140333`. Generated logs and TSV files
+  stay untracked; the script comment is the retained history.
 
 ## Dependencies
 
@@ -149,6 +191,10 @@ Edge cases at a glance:
 - Return fewer segments than requested from a diagnostic fixture → verify the
   benchmark exits non-zero instead of including a partial allocation in TPS.
   Integration test.
+- Persist frees concurrently with a compaction scan, including records that
+  fall behind the scan watermark → compact again and verify every
+  acknowledged free clears its bitmap range and exact busy-space accounting
+  holds. Integration test.
 
 **Flow attribution**:
 
@@ -178,6 +224,13 @@ Edge cases at a glance:
 - Run the single-worker case before and after each accepted optimization → p99
   does not regress by more than 10% unless the flow analysis records and
   justifies the trade-off. E2E test.
+- Run one complete regression case → verify its shared timestamped root has
+  separate timestamped KV deploy, group-create, DiskDB deploy, benchmark, and
+  destroy folders; verify three KV metrics logs, three DiskDB metrics logs,
+  and one CLI metrics log contain samples for the workload. E2E test.
+- Run all cases when one mix case fails accounting → verify later cases still
+  execute, results are retained, and the script exits non-zero after the
+  complete matrix. E2E test.
 
 Run `pixi run -- cargo test -p crowdb-diskdb-client --tests`, the added
 DiskDB layer-isolation test targets, and

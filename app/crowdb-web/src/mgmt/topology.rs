@@ -308,6 +308,8 @@ async fn ensure_diskdb_running(
     let http_port = rpc_port.saturating_add(1);
     let rpc_listen_port = rpc_port.saturating_add(2);
     let req = DiskdbDeployRequest {
+        instance_id: None,
+        metrics_interval: None,
         server_id: server.id.clone(),
         listen_port,
         http_port,

@@ -17,6 +17,8 @@ use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
 use super::kv_client::{build_kv_client, KvClientTunables};
+use super::loader::BenchRecorder;
+use super::metrics::BenchMetrics;
 use super::verb::{DiskdbArgs, DiskdbBenchVerb};
 use crate::Cli;
 
@@ -40,6 +42,7 @@ struct TaskContext {
     compacting: Arc<AtomicBool>,
     in_flight: Arc<AtomicU64>,
     sequence: Arc<AtomicU64>,
+    recorder: Arc<BenchRecorder>,
     deadline: Instant,
 }
 
@@ -88,6 +91,8 @@ pub async fn run(cli: &Cli, verb: DiskdbBenchVerb) -> ExitCode {
         }
     };
     let mixed = matches!(verb, DiskdbBenchVerb::Mix(_));
+    let mut metrics = BenchMetrics::new(&cli.log_dir, args.metrics_interval);
+    metrics.start();
     let (sender, receiver) = crossbeam_channel::unbounded::<Segment>();
     let stop = Arc::new(AtomicBool::new(false));
     let compacting = Arc::new(AtomicBool::new(false));
@@ -106,6 +111,7 @@ pub async fn run(cli: &Cli, verb: DiskdbBenchVerb) -> ExitCode {
         let sequence = Arc::clone(&sequence);
         let compacting = Arc::clone(&compacting);
         let in_flight = Arc::clone(&in_flight);
+        let recorder = Arc::clone(&metrics.recorder);
         handles.push(tokio::spawn(run_task(
             task_id,
             TaskContext {
@@ -119,22 +125,15 @@ pub async fn run(cli: &Cli, verb: DiskdbBenchVerb) -> ExitCode {
                 compacting,
                 in_flight,
                 sequence,
+                recorder,
                 deadline,
             },
         )));
     }
     drop(sender);
-    let mut total = TaskResult::default();
-    for handle in handles {
-        match handle.await {
-            Ok(result) => merge_result(&mut total, result),
-            Err(error) => {
-                eprintln!("benchmark task failed: {error}");
-                total.errors += 1;
-            }
-        }
-    }
+    let mut total = collect_results(handles).await;
     let elapsed = started.elapsed();
+    metrics.stop().await;
     let live: Vec<_> = receiver.try_iter().collect();
     if mixed && !compact_for_verification(&client, &groups).await {
         total.errors += 1;
@@ -151,6 +150,20 @@ pub async fn run(cli: &Cli, verb: DiskdbBenchVerb) -> ExitCode {
             live: &live,
         },
     )
+}
+
+async fn collect_results(handles: Vec<tokio::task::JoinHandle<TaskResult>>) -> TaskResult {
+    let mut total = TaskResult::default();
+    for handle in handles {
+        match handle.await {
+            Ok(result) => merge_result(&mut total, result),
+            Err(error) => {
+                eprintln!("benchmark task failed: {error}");
+                total.errors += 1;
+            }
+        }
+    }
+    total
 }
 
 fn valid_args(args: &DiskdbArgs) -> bool {
@@ -247,10 +260,16 @@ async fn run_task(task_id: usize, context: TaskContext) -> TaskResult {
                     })
                     .await
                 {
-                    Ok(response) if response.freed_count == 1 => result.freed += 1,
+                    Ok(response) if response.freed_count == 1 => {
+                        result.freed += 1;
+                        context
+                            .recorder
+                            .record_ok(started.elapsed().as_micros().try_into().unwrap_or(u64::MAX), 0);
+                    }
                     _ => {
                         let _ = context.sender.send(segment);
                         result.errors += 1;
+                        context.recorder.record_err();
                     }
                 }
             }
@@ -259,6 +278,11 @@ async fn run_task(task_id: usize, context: TaskContext) -> TaskResult {
             match allocate_any_group(&context, task_id, seq).await {
                 Ok(Some(response)) => {
                     result.allocated += response.segments.len() as u64;
+                    for _ in &response.segments {
+                        context
+                            .recorder
+                            .record_ok(started.elapsed().as_micros().try_into().unwrap_or(u64::MAX), 0);
+                    }
                     for segment in response.segments {
                         let _ = context.sender.send(segment);
                     }
@@ -280,13 +304,17 @@ async fn run_task(task_id: usize, context: TaskContext) -> TaskResult {
                         }
                         if compact_all(&context.client, &context.groups).await.is_err() {
                             result.errors += 1;
+                            context.recorder.record_err();
                         }
                         context.compacting.store(false, Ordering::Release);
                     } else {
                         tokio::task::yield_now().await;
                     }
                 }
-                Err(_) => result.errors += 1,
+                Err(_) => {
+                    result.errors += 1;
+                    context.recorder.record_err();
+                }
             }
         }
         result
