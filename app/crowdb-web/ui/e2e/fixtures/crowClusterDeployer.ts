@@ -62,6 +62,37 @@ function logPhaseTime(phase: string, startMs: number): number {
 
 // ── Types ────────────────────────────────────────────────────────────
 
+// Retry a POST that writes to group-0 sysdata (createStore, addGroup,
+// addReplica). Under heavy CI load the group-0 leader's RPC endpoint
+// can be temporarily unresponsive, causing a transient "retries
+// exhausted" 500. The server-side retry_sysmd + KV client already
+// retry internally, but the total window can be insufficient on a
+// loaded CI machine. This gives up to 3 attempts with 1s backoff.
+async function postWithSysdataRetry(
+  baseURL: string,
+  path: string,
+  data: Record<string, unknown>,
+  label: string,
+): Promise<void> {
+  const maxAttempts = 3;
+  for (let attempt = 1; ; attempt++) {
+    const api = await apiContext(baseURL);
+    try {
+      const response = await api.post(path, { data });
+      if (response.status() === 201) return;
+      if (response.status() === 500 && attempt < maxAttempts) {
+        const text = await response.text();
+        console.log(`${label} attempt ${attempt} got 500: ${text}, retrying...`);
+        await new Promise((res) => setTimeout(res, 1000));
+        continue;
+      }
+      expect(response.status(), await response.text()).toBe(201);
+    } finally {
+      await api.dispose();
+    }
+  }
+}
+
 export interface TestRack {
   id: number;
   name?: string;
@@ -242,27 +273,23 @@ export async function stopNodeServer(baseURL: string, nodeId: number) {
 }
 
 export async function addGroup(baseURL: string, storeId: number, groupId: number, replicaId: number, nodeIds: number[]) {
-  const api = await apiContext(baseURL);
-  try {
-    const response = await api.post(`/api/stores/${storeId}/groups`, {
-      data: { group_id: groupId, replica_id: replicaId, nodes: nodeIds },
-    });
-    expect(response.status(), await response.text()).toBe(201);
-  } finally {
-    await api.dispose();
-  }
+  await postWithSysdataRetry(
+    baseURL,
+    `/api/stores/${storeId}/groups`,
+    { group_id: groupId, replica_id: replicaId, nodes: nodeIds },
+    `addGroup(s${storeId}/g${groupId})`,
+  );
 }
 
 export async function addReplica(baseURL: string, storeId: number, groupId: number, nodeId: number, replicaId?: number) {
-  const api = await apiContext(baseURL);
-  try {
-    const body: Record<string, unknown> = { node_id: nodeId };
-    if (replicaId !== undefined) body.replica_id = replicaId;
-    const response = await api.post(`/api/stores/${storeId}/groups/${groupId}/replicas`, { data: body });
-    expect(response.status(), await response.text()).toBe(201);
-  } finally {
-    await api.dispose();
-  }
+  const body: Record<string, unknown> = { node_id: nodeId };
+  if (replicaId !== undefined) body.replica_id = replicaId;
+  await postWithSysdataRetry(
+    baseURL,
+    `/api/stores/${storeId}/groups/${groupId}/replicas`,
+    body,
+    `addReplica(s${storeId}/g${groupId}/n${nodeId})`,
+  );
 }
 
 export async function waitForLeader(baseURL: string, storeId: number, groupId: number, timeoutMs = 3_000) {
@@ -323,15 +350,12 @@ export async function createStore(baseURL: string, storeId: number, nodeIds: num
 // bootstrapped once via clusterInit. add_store works on any deployed
 // node; it does not require the node to be in group-0's membership.
 export async function createStoreNoInit(baseURL: string, storeId: number, nodeIds: number[]) {
-  const api = await apiContext(baseURL);
-  try {
-    const response = await api.post('/api/stores', {
-      data: { store_id: storeId, nodes: nodeIds },
-    });
-    expect(response.status(), await response.text()).toBe(201);
-  } finally {
-    await api.dispose();
-  }
+  await postWithSysdataRetry(
+    baseURL,
+    '/api/stores',
+    { store_id: storeId, nodes: nodeIds },
+    `createStoreNoInit(s${storeId})`,
+  );
 }
 
 export async function resetAll(baseURL: string) {

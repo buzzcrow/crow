@@ -89,10 +89,11 @@ test.describe('inspector · activity log', () => {
 
     // --- async op feedback: ping / restart / stop toasts + activity entries ---
     await step('inspector: resetAll', () => resetAll(baseURL!));
-    await step('inspector: create rack/node', () => Promise.all([
-      createRack(baseURL!, { id: 47, name: 'r47' }),
-      createNode(baseURL!, { id: 47, rack_id: 47 }),
-    ]));
+    // Sequential: createNode depends on createRack being committed first.
+    await step('inspector: create rack/node', async () => {
+      await createRack(baseURL!, { id: 47, name: 'r47' });
+      await createNode(baseURL!, { id: 47, rack_id: 47 });
+    });
     await step('inspector: deploy server 47', () => deployNodeServer(baseURL!, 47, freePort(), freePort()));
 
     try {
