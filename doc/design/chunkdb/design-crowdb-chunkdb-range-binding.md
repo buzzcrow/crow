@@ -173,7 +173,7 @@ single sysdata API surface, group0 §2.1).
 ```rust
 pub struct RangeBindingClient {
     kv: Arc<CrowdbClient>,
-    bindings: Arc<RwLock<Vec<ChunkdbRangeBinding>>>,
+    bindings: Arc<ArcSwap<Vec<ChunkdbRangeBinding>>>,
 }
 
 pub struct ChunkdbRangeBinding {
@@ -207,7 +207,10 @@ pub struct ChunkdbRangeBinding {
   `status = IN_TRANSITION` (see §2.2).
 - `is_empty() -> bool`, `snapshot() -> Vec<ChunkdbRangeBinding>`,
   `replace(bindings)` — for watch/notify updates + test injection.
-  `replace` sorts by `sub_range_index`.
+  `replace` sorts by `sub_range_index` and atomically publishes the complete
+  vector. Routing holds one immutable `Arc` snapshot and takes no lock, so a
+  concurrent refresh yields either the old or new binding set, never a partial
+  update.
 - `spawn_notifier() -> Result<JoinHandle<()>>` — subscribe to
   `/chunkdb/range_bind/` prefix via `WatchNotifyClient`; on notify,
   call `refresh()`.

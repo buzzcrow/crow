@@ -374,6 +374,14 @@ old ones via the epoch manager.
 | Point/range readers (N) | Epoch enter/exit; L0 overlay + lock-free atomic loads of immutable pages |
 | Long readers / export | Pin a `RootVersion` (refcount) + L0 snapshot for a stable MVCC view |
 
+Demand-load serialization is intentionally confined to the cold
+`Crowdbtree::resident` path. The first lookup is lock-free; only an unloaded
+mapping takes `load_mutex_`, rechecks, reads, and installs. Per-page in-flight
+state would improve simultaneous cold misses but adds another lifetime state
+machine, so it is deferred until cold-load contention is measured. The applied
+slot gap set likewise retains its short mutex: slots are normally contiguous
+and the set stays small.
+
 Invariants:
 
 - **I1** A page is freed only after no reader epoch can reference it.

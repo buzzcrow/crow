@@ -43,7 +43,7 @@ Implements [the lock design](design-lock-review.md) for
 
 ## Deferred Locks
 
-- [ ] **Record retained-lock rationale**: fold the keep/defer decisions into
+- [x] **Record retained-lock rationale**: fold the keep/defer decisions into
   the tree, RPC, KV, and client formal design sections after implementation.
 
 ## Files
@@ -54,8 +54,8 @@ Implements [the lock design](design-lock-review.md) for
 
 ## Tests
 
-- [ ] C++ concurrency and regression tests pass with `pixi run test-tree-ct`.
-- [ ] RPC tests pass with `pixi run test-rpc-ct`.
+- [x] C++ concurrency and regression tests pass with `pixi run test-tree-ct`.
+- [x] RPC tests pass with `pixi run test-rpc-ct`.
 - [ ] KV tests pass with `pixi run test-kv-core`.
-- [ ] Client tests pass with `pixi run test-kv-client`.
+- [x] Client tests pass with `pixi run test-kv-client`.
 - [ ] Rust/C++ formatting, Clippy, and tree-lint gates pass.

@@ -174,6 +174,11 @@ Every heartbeat carries:
 
 Followers respond with their own `term`, `success` (false if the follower's term is higher), `contiguous_chosen`, `last_chosen_term`, `contiguous_applied`, `highest_seen_slot`, and `durable_snapshot_slot`. The leader uses these to:
 
+Election term, vote, and lockout deadline remain one mutex-protected state
+because transitions must publish them consistently. Observation-only paths use
+the atomic current-term snapshot when staleness is safe; election decisions
+take the full state lock.
+
 - Detect a stale leader's continued existence (if any response carries a higher term, the leader steps down (§8)).
 - Maintain peer state (used by replicator and gap detection).
 - Refresh the safe-slot computation.

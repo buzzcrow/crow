@@ -127,7 +127,14 @@ With multiple disks, global slot order and physical record order intentionally d
 - Each sealed segment records `(min_slot, max_slot, record_count)` as scan metadata; `min_slot..max_slot` may contain holes because slot ownership is distributed across disks and because non-slot records exist.
 - Replay correctness comes from sorting / indexing records by `(group_id, slot, ballot, record_type)` after reading them, not from physical segment order.
 
-**Slot-to-segment mapping** is recorded in an in-memory **segment index** that points each slot to one or more `(disk, segment_id, file_offset)` records. A persisted index may be used as a startup accelerator, but it is only a cache: replay must be able to rebuild the authoritative index by scanning segment records.
+**Slot-to-segment mapping** is recorded in an in-memory **segment index** that
+points each slot to its latest `(disk, segment_id, file_offset)` record. The
+live index has one mutex-protected shard per disk pipeline. Each writer mutates
+only its own shard, and slot lookup uses the same deterministic affinity as the
+write path. Replay and GC snapshot shards one at a time; file scanning and
+unlink I/O never run while an index shard is locked. A persisted index may be
+used as a startup accelerator, but it is only a cache: replay must be able to
+rebuild the authoritative index by scanning segment records.
 
 ### 3.3 Slot-to-disk assignment
 

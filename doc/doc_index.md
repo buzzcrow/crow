@@ -61,14 +61,14 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/kv/design-crowdb-kv-reconfiguration.md` | Member add/remove, leader transfer, `membership_epoch` fence. |
 | `doc/design/kv/design-crowdb-kv-group0.md` | Group-0 sysdata schema, service registry, cluster topology records, cascading cleanup. |
 | `doc/design/kv/design-crowdb-kv-state-machine.md` | Per-key slot tracking, apply semantics, snapshot, compaction. |
-| `doc/design/kv/design-crowdb-kv-wal.md` | WAL segments, durable flush, replay/restore/recovery, GC. |
+| `doc/design/kv/design-crowdb-kv-wal.md` | WAL segments, pipeline-sharded live index, durable flush, replay/restore/recovery, GC. |
 | `doc/design/kv/design-crowdb-kv-watch-notify.md` | Watch/Notify bidi stream, per-group `WatchRegistry`, apply-path trigger, `WatchNotifyClient`, diskdb notify handler, polling safety net. |
 | `doc/design/kv/design-crowdb-kv-server.md` | `crowdb-kv-server` binary: startup, concurrency, HTTP management API, group lifecycle, group/store cleanup, wipe-user-data. |
 | `doc/design/kv/design-crowdb-kv-test.md` | Test strategy, layer-by-layer test guide, coverage rules. |
-| `doc/design/kv/design-crowdb-kv-observability.md` | Metrics module: five metric types, registry, instrumentation points, log format. |
+| `doc/design/kv/design-crowdb-kv-observability.md` | Metrics module: five metric types, registry and collector concurrency, instrumentation points, log format. |
 | `doc/design/tree/design-crowdb-tree.md` | crowdb-tree overview, `KVEngine`/`EngineView`, out-of-order apply + two-GC model, FFI boundary. |
 | `doc/design/tree/design-crowdb-tree-engine.md` | In-memory engine: slot cell, pages/delta, write path, versioned root, lock-free epoch reclamation, io_uring FFI, metrics. |
-| `doc/design/tree/design-crowdb-tree-storage.md` | Durable storage: `PageStore` backends, slotted frame format, buffer pool, snapshot/recovery, mapping table, GC. |
+| `doc/design/tree/design-crowdb-tree-storage.md` | Durable storage: `PageStore` backends, slotted frame format, buffer-pool I/O reservations, snapshot/recovery, mapping table, GC. |
 | `doc/design/tree/design-crowdb-tree-engine-flush-flow.md` | Flush flow analysis: L0→L1 drain path, code positions, bottleneck breakdown, levers. |
 | `doc/design/tree/design-crowdb-tree-engine-snapshot-flow.md` | Snapshot flow analysis: durable persist path, code positions, sub-phase metrics, bottleneck breakdown, levers. |
 | `doc/design/console/design-crowdb-console.md` | Console core crate, web + CLI frontends, two-hierarchy API, monitor task, SSH lifecycle, bootstrap, sysdata sync, cluster destroy. |

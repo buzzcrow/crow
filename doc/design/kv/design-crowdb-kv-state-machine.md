@@ -210,8 +210,11 @@ advance and dedup record run **synchronously** (cheap atomics, before
 advance are `tokio::spawn`'d. This keeps `contiguous_chosen` current: a
 subsequent read's `read_slot = contiguous_chosen` reflects the
 just-chosen slot, while `contiguous_applied` lags by the spawned apply.
-Spawned applies can complete out of order, so the applied frontier has its
-own out-of-order drain (a `BTreeSet`), mirroring the chosen frontier's.
+Spawned applies can complete out of order, so each frontier stores gaps in a
+sharded concurrent map. A compare-exchange drain owner advances the contiguous
+cursor and removes consecutive gaps; producers that lose ownership only insert
+their slot. The highest-chosen `(slot, term)` pair uses an atomic sequence guard
+so election readers cannot observe a slot paired with another update's term.
 
 **Apply fence (Linearizable read-your-writes).** With `async_engine_apply` on, a
 linearizable read that lands between "chosen" and "applied" would miss a

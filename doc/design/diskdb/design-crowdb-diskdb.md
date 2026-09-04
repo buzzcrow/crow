@@ -745,6 +745,9 @@ All public and inter-module APIs are `async`. Runtime is `tokio`
   [`design-crowdb-diskdb-zone-management.md`](design-crowdb-diskdb-zone-management.md) §8.
 - Disk-level active zone set uses RCU publish (`Arc` swap) for
   lock-free reads; rotation takes a brief write lock.
+- Disk-group allocation context retains its read lock. Allocation and usage
+  clone one `Arc` while holding it, and configuration replacement is rare;
+  `ArcSwap` publication is reserved for evidence of contention here.
 - **Free-side lookup structures** — disk-id → disk hash map and
   zone-index → zone vec for O(1) lookups on the free path. Details in
   [`design-crowdb-diskdb-zone-management.md`](design-crowdb-diskdb-zone-management.md) §8.

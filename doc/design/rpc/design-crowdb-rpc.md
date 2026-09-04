@@ -150,6 +150,11 @@ reconnect task is scheduled on the worker timer with
 (default 0 = infinite), the endpoint is marked unhealthy. The reconnect
 task runs on the C++ worker thread, not on a tokio thread.
 
+The pool mutex is retained. `get` and `get_for` hold it only long enough to
+select and copy a connection handle; reconnect and network I/O happen after
+release. Replica sets are small, so immutable snapshot publication would add
+control-plane complexity without a measured dispatch-path benefit.
+
 ### 4.2 Request/Response Correlation
 
 `RpcClient` tracks pending requests in a per-connection
@@ -220,6 +225,12 @@ response is submitted asynchronously when the I/O completes. Unknown
 `msg_type` → `UnknownMessage` with `ret_code = HaveNotSupport`; handler
 throw → error response with `ret_code = Error`; both keep the connection
 open.
+
+The handler registry publishes an immutable `msg_type` table through atomic
+shared ownership. Registration and clear clone the current table and publish a
+replacement; dispatch performs one atomic snapshot load and no mutex
+acquisition. Late registration is visible to subsequent dispatches without
+invalidating a table already held by a worker.
 
 ### 4.5 Backpressure
 

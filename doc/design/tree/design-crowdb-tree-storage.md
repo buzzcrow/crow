@@ -429,7 +429,8 @@ alike. This is the "4 GiB / 8 GiB btree cache" knob (`capacity_bytes` default
 `min(8 GiB, 25% RAM)`).
 
 - **No per-page heap objects.** Frames live in one contiguous arena
-  (`capacity_bytes / page_bytes` frames); pin/unpin are atomic counter ops.
+  (`capacity_bytes / page_bytes` frames); pin/unpin update compact frame
+  metadata under the pool mutex.
   The page table (`pid -> frame index`) is an open-addressing array, not
   `std::unordered_map`, to keep the hot path branch-light and cache-friendly.
 - **Pinning and eviction.** A reader pins the leaf/inner frames along its
@@ -451,6 +452,15 @@ alike. This is the "4 GiB / 8 GiB btree cache" knob (`capacity_bytes` default
   snapshots, memory is bounded by *(working set since last snapshot) +
   (resident clean cache)*; a write storm that outruns snapshot triggers an
   eager snapshot (back-pressure, §6).
+
+The pool mutex protects the page table, CLOCK hand, and frame metadata, but is
+never held across `PageStore` I/O. A miss reserves its victim as `Loading`; a
+dirty eviction first reserves it as `Writeback`. The mapping stays visible
+during either operation, so another pin for that page waits on the frame state
+while hits on unrelated ready frames continue. Read failure removes the loading
+mapping and returns the frame to the free set. Writeback failure restores the
+old frame to `Ready` without eviction. `flush_dirty` uses the same reservation
+protocol one frame at a time.
 
 ### 4.1 Why epoch reclamation, not pin counts, governs eviction safety
 

@@ -579,6 +579,15 @@ Per-group state on `PxGroup`:
   timestamp (updated on every enqueue and drain). Used by the
   activity-based watchdog.
 
+The coalescer mutex is retained because it protects one small batch mutation
+and is released before slot proposal, RPC, or engine work. An MPSC owner task
+would remove producer contention but add scheduling and queue latency to every
+write; profiling must show this critical section is material before making that
+trade. Peer applied/durable maps and follower gap tracking also retain their
+short locks: replica sets are normally 3–7 members and gaps are exceptional,
+so their bounded critical sections do not justify per-peer atomics or another
+concurrent map.
+
 `PendingBatch` holds:
 - `op_bodies: Vec<u8>` — concatenated op bodies (each single-op
   payload's leading count bytes dropped; op bodies are self-delimited).
