@@ -377,11 +377,7 @@ impl BinaryKey for FreeBlockKey {
         let (disk_id, o) = decode_disk_id(fields, 0)?;
         let (zone_index, o) = decode_u32(fields, o)?;
         let (unit_offset, o) = decode_u64(fields, o)?;
-        let (allocation_ts, o) = if o == fields.len() {
-            (0, o)
-        } else {
-            decode_u64(fields, o)?
-        };
+        let (allocation_ts, o) = decode_u64(fields, o)?;
         check_exact(fields, o)?;
         Ok(Self {
             disk_id,

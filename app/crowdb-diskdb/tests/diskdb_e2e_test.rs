@@ -257,7 +257,7 @@ async fn diskdb_e2e_allocate_free() {
 
     // 9. Free the block.
     let free_kv = cluster.make_ddb_kv_client();
-    alloc::free_block(&dg, &segment, &free_kv, false)
+    alloc::free_block(&dg, &segment, &free_kv)
         .await
         .expect("free should succeed");
     eprintln!("freed segment");
@@ -304,7 +304,7 @@ async fn diskdb_e2e_allocate_free() {
 
     // 12. Free all 3 in one batch.
     let free_kv2 = cluster.make_ddb_kv_client();
-    alloc::free_blocks(&dg, &segments, &free_kv2, false)
+    alloc::free_blocks(&dg, &segments, &free_kv2)
         .await
         .expect("free 3 blocks should succeed");
     eprintln!("freed 3 blocks in batch");
@@ -346,7 +346,7 @@ async fn diskdb_e2e_allocate_free() {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn diskdb_e2e_validate_owner_on_free() {
+async fn diskdb_e2e_blind_free_validation_at_compaction() {
     if std::env::var("CROWDB_KV_SERVER_BIN").is_err() && crowdb_kv_server_bin().is_none() {
         eprintln!("skipping: CROWDB_KV_SERVER_BIN not set and binary not found");
         return;
@@ -388,9 +388,9 @@ async fn diskdb_e2e_validate_owner_on_free() {
         .await
         .expect("allocate should succeed");
 
-    // 1. Free with validate_owner_on_free=true and matching owner → success.
+    // 1. A matching-owner blind free succeeds.
     let free_kv = cluster.make_ddb_kv_client();
-    alloc::free_block(&dg, &segment, &free_kv, true)
+    alloc::free_block(&dg, &segment, &free_kv)
         .await
         .expect("free with matching owner should succeed");
 
@@ -428,7 +428,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
     wrong_segment.owner_chunk = Some(wrong_owner);
 
     let free_kv2 = cluster.make_ddb_kv_client();
-    let result = alloc::free_block(&dg, &wrong_segment, &free_kv2, true).await;
+    let result = alloc::free_block(&dg, &wrong_segment, &free_kv2).await;
     assert!(result.is_ok(), "blind free should persist: {result:?}");
 
     // The BusyBlockKey remains for compaction-time validation.
@@ -444,7 +444,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
 
     // 3. Free the block with the correct owner (cleanup).
     let free_kv3 = cluster.make_ddb_kv_client();
-    alloc::free_block(&dg, &segment2, &free_kv3, true)
+    alloc::free_block(&dg, &segment2, &free_kv3)
         .await
         .expect("free with matching owner should succeed");
 
@@ -458,10 +458,10 @@ async fn diskdb_e2e_validate_owner_on_free() {
         allocation_ts: 0,
     };
     let free_kv4 = cluster.make_ddb_kv_client();
-    let result = alloc::free_block(&dg, &fake_segment, &free_kv4, true).await;
+    let result = alloc::free_block(&dg, &fake_segment, &free_kv4).await;
     assert!(result.is_ok(), "blind non-busy free should persist: {result:?}");
 
-    eprintln!("diskdb_e2e_validate_owner_on_free: ALL CHECKS PASSED");
+    eprintln!("diskdb_e2e_blind_free_validation_at_compaction: ALL CHECKS PASSED");
 }
 
 /// E2E: allocate ALL space across 3 disks × 4 zones × 128 units = 1536
@@ -626,7 +626,7 @@ async fn diskdb_e2e_allocate_all_free_all() {
     let free_kv = cluster.make_ddb_kv_client();
     let mut freed_count = 0usize;
     for chunk in all_segments.chunks(100) {
-        alloc::free_blocks(&dg, chunk, &free_kv, false)
+        alloc::free_blocks(&dg, chunk, &free_kv)
             .await
             .expect("free batch should succeed");
         freed_count += chunk.len();
@@ -767,7 +767,7 @@ async fn diskdb_e2e_compact_zone_rpc() {
 
     // 3. Free 2 blocks — persist-only: bitmap stays set.
     let free_kv = cluster.make_ddb_kv_client();
-    alloc::free_blocks(&dg, &segments[0..2], &free_kv, false)
+    alloc::free_blocks(&dg, &segments[0..2], &free_kv)
         .await
         .expect("free 2");
 

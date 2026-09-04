@@ -107,6 +107,7 @@ fn kv_scan_response_round_trip() {
         &FBKvScanItemArgs {
             key: Some(key1),
             value: Some(val1),
+            commit_slot: 41,
         },
     );
     let key2 = fbb.create_vector(b"k2");
@@ -116,6 +117,7 @@ fn kv_scan_response_round_trip() {
         &FBKvScanItemArgs {
             key: Some(key2),
             value: Some(val2),
+            commit_slot: 42,
         },
     );
     let items = fbb.create_vector(&[item1, item2]);
@@ -136,6 +138,7 @@ fn kv_scan_response_round_trip() {
             not_leader_hint: None,
             count: 0,
             timed_out: false,
+            scan_cutoff: 42,
         },
     );
     fbb.finish(resp, None);
@@ -301,6 +304,7 @@ fn snapshot_scan_response_round_trip() {
         &FBKvScanItemArgs {
             key: Some(key),
             value: Some(val),
+            commit_slot: 0,
         },
     );
     let items = fbb.create_vector(&[item]);

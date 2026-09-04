@@ -15,7 +15,6 @@ block_size_bytes = 1048576
 allocate_granularity = 1048576
 zone_rotate_count = 4
 cas_retry_limit = 100
-validate_owner_on_free = false
 
 [heartbeat]
 interval_secs = 10

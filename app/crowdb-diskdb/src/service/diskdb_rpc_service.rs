@@ -391,14 +391,13 @@ impl DiskdbRpcService {
 
         let kv = Arc::clone(&self.kv);
         let metrics = Arc::clone(&self.metrics);
-        let validate_owner = self.storage.validate_owner_on_free;
         let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         #[allow(clippy::cast_possible_truncation)]
         let freed_count = segments.len() as u32;
         self.rt.spawn(async move {
             let rpc_start = std::time::Instant::now();
-            let result = alloc::free_blocks(&dg, &segments, &kv, validate_owner).await;
+            let result = alloc::free_blocks(&dg, &segments, &kv).await;
             let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
             match result {
                 Ok(()) => {
@@ -1274,7 +1273,6 @@ fn parse_segments<'a, V: IntoIterator<Item = &'a FBSegment> + Clone>(
 fn map_free_error(e: &FreeError) -> (FBDiskdbRetCode, String) {
     match e {
         FreeError::NotBusy { .. } => (FBDiskdbRetCode::NotFound, format!("free failed: {e}")),
-        FreeError::OwnerMismatch { .. } => (FBDiskdbRetCode::NotOwner, format!("free failed: {e}")),
         FreeError::Kv(_) => (FBDiskdbRetCode::Internal, format!("free persist failed: {e}")),
     }
 }

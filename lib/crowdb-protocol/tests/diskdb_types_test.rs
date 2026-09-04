@@ -81,6 +81,7 @@ fn sample_zone_value() -> ZoneValue {
         snapshot_slot: 42,
         crc32: 0,
         compact_ts: 100,
+        compact_slot: 42,
     }
 }
 
@@ -94,25 +95,26 @@ fn zone_value_crc_tamper_detected() {
 }
 
 #[test]
-fn zone_value_crc_covers_compact_ts() {
+fn zone_value_crc_covers_compact_slot() {
     let mut val = sample_zone_value();
     val.compute_checksum();
     assert!(val.verify_checksum());
-    // Tamper compact_ts alone — CRC must catch it.
-    val.compact_ts = 999;
+    // Tamper compact_slot alone — CRC must catch it.
+    val.compact_slot = 999;
     assert!(!val.verify_checksum());
 }
 
 #[test]
 fn zone_value_empty_bitmap_baseline_is_valid() {
     // Baseline ZoneValue written during disk-add init: empty bitmap,
-    // snapshot_slot = 0, compact_ts = 0. CRC covers usage_bitmap +
-    // compact_ts; both empty/zero.
+    // snapshot_slot = 0, compact_slot = 0. CRC covers usage_bitmap +
+    // compact_slot; both empty/zero.
     let mut val = ZoneValue {
         usage_bitmap: vec![],
         snapshot_slot: 0,
         crc32: 0,
         compact_ts: 0,
+        compact_slot: 0,
     };
     val.compute_checksum();
     assert!(val.verify_checksum());

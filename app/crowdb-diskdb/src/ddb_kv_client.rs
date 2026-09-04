@@ -17,9 +17,7 @@ use crowdb_kv_client::{BatchOp, CrowdbKvClient, GetOutcome, JournalOp, ReadMode,
 use crowdb_protocol::common::DiskId;
 use crowdb_protocol::diskdb::rpc::{BusyBlockValue, FreeBlockValue, RecoveryScanProgressValue, ZoneValue};
 use crowdb_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey, RecoveryScanProgressKey, ZoneKey};
-use crowdb_protocol::{
-    decode_busy_block_value, decode_free_block_value, RecoveryScanProgressValueExt, ZoneValueExt,
-};
+use crowdb_protocol::{RecoveryScanProgressValueExt, ZoneValueExt};
 
 use crate::model::records::{BusyRecord, FreeRecord, ZoneRecords};
 
@@ -57,7 +55,7 @@ impl DdbKvClient {
 
     /// Point-lookup a `BusyBlockValue` at `BusyBlockKey`. Returns
     /// `Ok(None)` if the key does not exist (block is not busy).
-    /// Used by diagnostics and compatibility tooling.
+    /// Used by the commit-blocks transition.
     pub async fn get_busy(
         &self,
         bind: Bind,
@@ -78,9 +76,9 @@ impl DdbKvClient {
         match outcome {
             GetOutcome::Found { value, .. } => {
                 let bv =
-                    decode_busy_block_value(&value).map_err(|e| crowdb_kv_client::Error::SysdataDecode {
+                    bincode::deserialize(&value).map_err(|e| crowdb_kv_client::Error::SysdataDecode {
                         key: format!("{:02x?}", key.to_bytes()),
-                        reason: e,
+                        reason: e.to_string(),
                     })?;
                 Ok(Some(bv))
             }
@@ -261,7 +259,7 @@ impl DdbKvClient {
             .await?;
         for (key, value) in &busy_scan.items {
             if let Ok(bk) = BusyBlockKey::from_bytes(key) {
-                if let Ok(bv) = decode_busy_block_value(value) {
+                if let Ok(bv) = bincode::deserialize::<BusyBlockValue>(value) {
                     records.busy.push(BusyRecord {
                         key: bk,
                         value: bv,
@@ -290,7 +288,7 @@ impl DdbKvClient {
             .await?;
         for (key, value) in &free_scan.items {
             if let Ok(fk) = FreeBlockKey::from_bytes(key) {
-                if let Ok(fv) = decode_free_block_value(value) {
+                if let Ok(fv) = bincode::deserialize::<FreeBlockValue>(value) {
                     records.free.push(FreeRecord {
                         key: fk,
                         value: fv,
@@ -318,14 +316,29 @@ impl DdbKvClient {
             .scan_bounded(store_id, group_id, &free_prefix, &[], &[], 0, false, None)
             .await?;
         let cutoff = free_scan.scan_cutoff;
+        if free_scan.items.len() != free_scan.commit_slots.len() {
+            return Err(crowdb_kv_client::Error::SysdataDecode {
+                key: format!("{free_prefix:02x?}"),
+                reason: "bounded free scan item/commit-slot count mismatch".to_string(),
+            });
+        }
         for ((key, value), commit_slot) in free_scan.items.iter().zip(&free_scan.commit_slots) {
-            if let (Ok(key), Ok(value)) = (FreeBlockKey::from_bytes(key), decode_free_block_value(value)) {
-                records.free.push(FreeRecord {
-                    key,
-                    value,
-                    commit_slot: *commit_slot,
-                });
-            }
+            let decoded_key =
+                FreeBlockKey::from_bytes(key).map_err(|error| crowdb_kv_client::Error::SysdataDecode {
+                    key: format!("{key:02x?}"),
+                    reason: error.to_string(),
+                })?;
+            let decoded_value = bincode::deserialize::<FreeBlockValue>(value).map_err(|error| {
+                crowdb_kv_client::Error::SysdataDecode {
+                    key: format!("{key:02x?}"),
+                    reason: error.to_string(),
+                }
+            })?;
+            records.free.push(FreeRecord {
+                key: decoded_key,
+                value: decoded_value,
+                commit_slot: *commit_slot,
+            });
         }
 
         let busy_prefix = BusyBlockKey::prefix_for_zone(disk_id, zone_index);
@@ -333,14 +346,29 @@ impl DdbKvClient {
             .kv
             .scan_bounded_at(store_id, group_id, &busy_prefix, &[], &[], 0, false, None, cutoff)
             .await?;
+        if busy_scan.items.len() != busy_scan.commit_slots.len() {
+            return Err(crowdb_kv_client::Error::SysdataDecode {
+                key: format!("{busy_prefix:02x?}"),
+                reason: "bounded busy scan item/commit-slot count mismatch".to_string(),
+            });
+        }
         for ((key, value), commit_slot) in busy_scan.items.iter().zip(&busy_scan.commit_slots) {
-            if let (Ok(key), Ok(value)) = (BusyBlockKey::from_bytes(key), decode_busy_block_value(value)) {
-                records.busy.push(BusyRecord {
-                    key,
-                    value,
-                    commit_slot: *commit_slot,
-                });
-            }
+            let decoded_key =
+                BusyBlockKey::from_bytes(key).map_err(|error| crowdb_kv_client::Error::SysdataDecode {
+                    key: format!("{key:02x?}"),
+                    reason: error.to_string(),
+                })?;
+            let decoded_value = bincode::deserialize::<BusyBlockValue>(value).map_err(|error| {
+                crowdb_kv_client::Error::SysdataDecode {
+                    key: format!("{key:02x?}"),
+                    reason: error.to_string(),
+                }
+            })?;
+            records.busy.push(BusyRecord {
+                key: decoded_key,
+                value: decoded_value,
+                commit_slot: *commit_slot,
+            });
         }
         Ok((records, cutoff))
     }

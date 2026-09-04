@@ -27,7 +27,7 @@ fn elapsed_ns(start: std::time::Instant) -> u64 {
 /// Errors from the free path.
 #[derive(Debug)]
 pub enum FreeError {
-    /// KV client error during validation or persist.
+    /// KV client error during lookup or persist.
     Kv(crowdb_kv_client::Error),
     /// Block is not busy (no `BusyBlockKey` exists) — double-free or
     /// never allocated.
@@ -35,15 +35,6 @@ pub enum FreeError {
         disk_id: DiskId,
         zone_index: u32,
         unit_offset: u64,
-    },
-    /// `owner_chunk` in the `BusyBlockValue` does not match the
-    /// `Segment`'s `owner_chunk` — ownership mismatch.
-    OwnerMismatch {
-        disk_id: DiskId,
-        zone_index: u32,
-        unit_offset: u64,
-        expected: ChunkId,
-        actual: ChunkId,
     },
 }
 
@@ -58,16 +49,6 @@ impl std::fmt::Display for FreeError {
             } => write!(
                 f,
                 "block not busy: disk {disk_id:?} zone {zone_index} offset {unit_offset}"
-            ),
-            Self::OwnerMismatch {
-                disk_id,
-                zone_index,
-                unit_offset,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "owner mismatch: disk {disk_id:?} zone {zone_index} offset {unit_offset}, expected {expected:?} actual {actual:?}"
             ),
         }
     }
@@ -340,7 +321,6 @@ pub async fn free_block(
     dg: &Arc<DdbDiskGroup>,
     segment: &Segment,
     kv: &DdbKvClient,
-    _validate_owner_on_free: bool,
 ) -> std::result::Result<(), FreeError> {
     let disk_id = segment.disk_id.ok_or_else(|| {
         FreeError::Kv(crowdb_kv_client::Error::SysdataDecode {
@@ -407,7 +387,6 @@ pub async fn free_blocks(
     dg: &Arc<DdbDiskGroup>,
     segments: &[Segment],
     kv: &DdbKvClient,
-    _validate_owner_on_free: bool,
 ) -> std::result::Result<(), FreeError> {
     let bind: Bind = dg.bind();
 

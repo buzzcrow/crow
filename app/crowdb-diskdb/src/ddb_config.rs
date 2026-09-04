@@ -87,11 +87,6 @@ pub struct StorageDefaults {
     /// (default: 100). On exhaustion, the allocator falls through to
     /// the next bit / word / zone.
     pub cas_retry_limit: u32,
-    /// dynamic: strict ownership validation before free (default:
-    /// false). When true, the free path reads the `BusyBlockValue`
-    /// from the data group first and validates `owner_chunk` (one
-    /// extra paxos round-trip, doubles free latency).
-    pub validate_owner_on_free: bool,
 }
 
 impl Default for StorageDefaults {
@@ -102,7 +97,6 @@ impl Default for StorageDefaults {
             allocate_granularity: 1024 * 1024,
             zone_rotate_count: 4,
             cas_retry_limit: 100,
-            validate_owner_on_free: false,
         }
     }
 }

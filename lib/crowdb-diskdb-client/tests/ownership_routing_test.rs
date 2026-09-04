@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! E2E validate-owner test: starts diskdb with
-//! `validate_owner_on_free = true`, allocates a block, then verifies
+//! allocation ownership routing, allocates a block, then verifies
 //! that freeing with a wrong `owner_chunk` is rejected
 //! (`PermissionDenied`) and freeing with the correct owner succeeds.
 //! Also verifies that freeing a non-busy block returns `NotFound`.
@@ -27,7 +27,7 @@ async fn owner_validation_rejects_wrong_disk_group() {
     let hw = cluster.make_hardware_client();
     seed_hardware(&hw, &standard_disk_ids_3()).await;
 
-    // 2. Start diskdb with validate_owner_on_free = true.
+    // 2. Start diskdb.
     eprintln!("=== validate-owner: starting crowdb-diskdb (validate_owner=true) ===");
     let diskdb = DiskdbProcess::start(&cluster.mgmt_endpoints, true);
     diskdb.wait_for_ready().await;

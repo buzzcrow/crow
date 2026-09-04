@@ -96,9 +96,8 @@ impl DiskdbProcess {
     }
 
     /// Start crowdb-diskdb with a generated config pointing at the
-    /// kv-server management seeds. When `validate_owner` is true, the
-    /// `[storage]` section sets `validate_owner_on_free = true`.
-    pub fn start(kv_seeds: &[String], validate_owner: bool) -> Self {
+    /// kv-server management seeds. `small_storage` enables compact test zones.
+    pub fn start(kv_seeds: &[String], small_storage: bool) -> Self {
         let bin = crowdb_diskdb_bin().unwrap_or_else(|| {
             panic!("crowdb-diskdb binary not found; set CROWDB_DISKDB_BIN or build app/crowdb-diskdb")
         });
@@ -112,9 +111,9 @@ impl DiskdbProcess {
         let http_port = find_free_port();
 
         let zone_size_bytes = ZONE_SIZE_UNITS * u64::from(UNIT_SIZE_BYTES);
-        let storage_section = if validate_owner {
+        let storage_section = if small_storage {
             format!(
-                "\n[storage]\nzone_size_bytes = {zone_size_bytes}\nblock_size_bytes = {UNIT_SIZE_BYTES}\nallocate_granularity = {UNIT_SIZE_BYTES}\nzone_rotate_count = 4\ncas_retry_limit = 100\nvalidate_owner_on_free = true\n"
+                "\n[storage]\nzone_size_bytes = {zone_size_bytes}\nblock_size_bytes = {UNIT_SIZE_BYTES}\nallocate_granularity = {UNIT_SIZE_BYTES}\nzone_rotate_count = 4\ncas_retry_limit = 100\n"
             )
         } else {
             String::new()

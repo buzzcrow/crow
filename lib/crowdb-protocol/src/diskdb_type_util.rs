@@ -9,61 +9,7 @@
 //! not wire format.
 
 use crate::common::{DiskId, HwStatus};
-use serde::Deserialize;
-
-use crate::diskdb::rpc::{
-    BusyBlockValue, FreeBlockValue, RecoveryScanProgressValue, ZoneAllocationState, ZoneValue,
-};
-
-/// Decode a busy value, mapping the legacy untagged format to incarnation zero.
-///
-/// # Errors
-/// Returns an error when neither the current nor legacy format decodes.
-pub fn decode_busy_block_value(bytes: &[u8]) -> Result<BusyBlockValue, String> {
-    #[derive(Deserialize)]
-    struct Legacy {
-        unit_count: u32,
-        owner_chunk: Option<crate::common::ChunkId>,
-        unit_size: u32,
-        state: i32,
-        commit_state: i32,
-    }
-    bincode::deserialize(bytes)
-        .or_else(|_| {
-            bincode::deserialize::<Legacy>(bytes).map(|value| BusyBlockValue {
-                unit_count: value.unit_count,
-                owner_chunk: value.owner_chunk,
-                unit_size: value.unit_size,
-                state: value.state,
-                commit_state: value.commit_state,
-                allocation_ts: 0,
-            })
-        })
-        .map_err(|error| error.to_string())
-}
-
-/// Decode a free value, mapping the legacy timestamp to diagnostic `free_ts`.
-///
-/// # Errors
-/// Returns an error when neither the current nor legacy format decodes.
-pub fn decode_free_block_value(bytes: &[u8]) -> Result<FreeBlockValue, String> {
-    #[derive(Deserialize)]
-    struct Legacy {
-        unit_count: u32,
-        previous_owner: Option<crate::common::ChunkId>,
-        freed_ts: u64,
-    }
-    bincode::deserialize(bytes)
-        .or_else(|_| {
-            bincode::deserialize::<Legacy>(bytes).map(|value| FreeBlockValue {
-                unit_count: value.unit_count,
-                previous_owner: value.previous_owner,
-                pre_allocation_ts: 0,
-                free_ts: value.freed_ts,
-            })
-        })
-        .map_err(|error| error.to_string())
-}
+use crate::diskdb::rpc::{RecoveryScanProgressValue, ZoneAllocationState, ZoneValue};
 
 // ── DiskId helpers ──────────────────────────────────────────────
 
@@ -204,16 +150,7 @@ impl ZoneValueExt for ZoneValue {
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&self.usage_bitmap);
         hasher.update(&self.compact_slot.to_le_bytes());
-        if self.crc32 == hasher.finalize() {
-            return true;
-        }
-        if self.compact_slot != 0 {
-            return false;
-        }
-        let mut legacy = crc32fast::Hasher::new();
-        legacy.update(&self.usage_bitmap);
-        legacy.update(&self.compact_ts.to_le_bytes());
-        self.crc32 == legacy.finalize()
+        self.crc32 == hasher.finalize()
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -221,25 +158,7 @@ impl ZoneValueExt for ZoneValue {
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<ZoneValue, String> {
-        #[derive(Deserialize)]
-        struct LegacyZoneValue {
-            usage_bitmap: Vec<u8>,
-            snapshot_slot: u64,
-            crc32: u32,
-            compact_ts: u64,
-        }
-
-        bincode::deserialize(bytes)
-            .or_else(|_| {
-                bincode::deserialize::<LegacyZoneValue>(bytes).map(|value| ZoneValue {
-                    usage_bitmap: value.usage_bitmap,
-                    snapshot_slot: value.snapshot_slot,
-                    crc32: value.crc32,
-                    compact_ts: value.compact_ts,
-                    compact_slot: 0,
-                })
-            })
-            .map_err(|e| e.to_string())
+        bincode::deserialize(bytes).map_err(|e| e.to_string())
     }
 }
 

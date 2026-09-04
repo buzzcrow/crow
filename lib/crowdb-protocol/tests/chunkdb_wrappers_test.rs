@@ -27,7 +27,7 @@ macro_rules! build_mirror_chunk {
     ($fbb:expr, $chunk_id:expr, $state:expr, $ctype:expr) => {{
         let disk_id = make_chunk_id(0, 100);
         let owner_chunk = make_chunk_id(0, 200);
-        let seg = FBSegment::new(&disk_id, &owner_chunk, 0, 0, 8);
+        let seg = FBSegment::new(&disk_id, &owner_chunk, 0, 0, 0, 8);
         let segs = $fbb.create_vector(&[seg]);
         let mirror = FBMirrorStrip::create($fbb, &FBMirrorStripArgs { segments: Some(segs) });
         let strip = FBChunkStrip::create(
@@ -181,7 +181,7 @@ fn ec_strip_union_variant() {
     let mut fbb = FlatBufferBuilder::new();
     let disk_id = make_chunk_id(0, 10);
     let owner_chunk = make_chunk_id(0, 20);
-    let seg = FBSegment::new(&disk_id, &owner_chunk, 0, 0, 4);
+    let seg = FBSegment::new(&disk_id, &owner_chunk, 0, 0, 0, 4);
     let segs = fbb.create_vector(&[seg, seg]);
     let ec = FBEcStrip::create(
         &mut fbb,

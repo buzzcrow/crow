@@ -27,21 +27,21 @@ fencing, R132 slot-ordered compaction, then R130 verification and cleanup.
 
 ## Phase 1: Fence DiskDB Allocation Incarnations
 
-- [ ] Add `allocation_ts` to `BusyBlockValue` and `Segment`, and
-  `pre_allocation_ts` plus diagnostic `free_ts` to `FreeBlockValue`, with
-  backward-compatible decode defaults.
-- [ ] Generate `allocation_ts` monotonically across restart and immutable-owner
+- [x] Add `allocation_ts` to `BusyBlockValue` and `Segment`, and
+  `pre_allocation_ts` plus diagnostic `free_ts` to `FreeBlockValue`.
+- [x] Generate `allocation_ts` monotonically across restart and immutable-owner
   operation. Define the R102 owner-handoff requirement to reconstruct or carry
   the high-water mark.
-- [ ] Preserve `allocation_ts` through allocate, commit, ChunkDB metadata,
+- [x] Preserve `allocation_ts` through allocate, commit, ChunkDB metadata,
   DiskDB client transport, and free requests.
-- [ ] Make `FreeBlockKey` incarnation-specific by appending `allocation_ts`.
+- [x] Make `FreeBlockKey` incarnation-specific by appending `allocation_ts`.
   Free performs one blind immutable put and never deletes `BusyBlockKey` or
   clears the bitmap.
-- [ ] Remove the read-before-free validation path. Compaction authoritatively
-  matches `pre_allocation_ts`, unit count, and owner against the current busy
-  value before clearing the bitmap and deleting the matching records.
-- [ ] Make repeated free naturally idempotent by rewriting the same immutable
+- [x] Remove the read-before-free validation path and its configuration.
+  Compaction authoritatively matches `pre_allocation_ts`, unit count, and owner
+  against the current busy value before clearing the bitmap and deleting the
+  matching records.
+- [x] Make repeated free naturally idempotent by rewriting the same immutable
   incarnation key. A delayed retry can create only its old incarnation event
   and can never affect a newer busy incarnation.
 - [ ] Cover response-loss retry, retry before compaction, retry after reuse,
@@ -49,19 +49,18 @@ fencing, R132 slot-ordered compaction, then R130 verification and cleanup.
 
 ## Phase 2: Implement R132 Slot-Ordered Compaction
 
-- [ ] Expose each scan item's `commit_slot` without copying its value.
-- [ ] Add a fixed-cutoff bounded current-version scan using the leader's
+- [x] Expose each scan item's `commit_slot` without copying its value.
+- [x] Add a fixed-cutoff bounded current-version scan using the leader's
   contiguous-applied frontier, with one cutoff retained across pagination.
-- [ ] Reject incomplete scans, changed cutoffs, timeouts, decode failures, and
+- [x] Reject incomplete scans, changed cutoffs, timeouts, decode failures, and
   leader changes before a caller can publish a watermark.
-- [ ] Add `compact_slot` to `ZoneValue` and its checksum. Legacy values start
-  conservatively at slot zero and are rebuilt or fully replayed.
-- [ ] Compact only free records in `(compact_slot, scan_cutoff]`, atomically
+- [x] Add `compact_slot` to `ZoneValue` and its checksum.
+- [x] Compact only free records in `(compact_slot, scan_cutoff]`, atomically
   persisting the new snapshot and deleting the exact scanned keys.
-- [ ] Retain `free_ts` for diagnostics only; remove `free_ts` from all
+- [x] Retain `free_ts` for diagnostics only; remove `free_ts` from all
   correctness decisions.
 - [ ] Verify owner fencing, delayed lower-slot apply, concurrent free,
-  pagination, batch failure, restart, and legacy recovery.
+  pagination, batch failure, and restart.
 
 ## Phase 3: Close R130
 
@@ -86,16 +85,14 @@ fencing, R132 slot-ordered compaction, then R130 verification and cleanup.
   this safe by compacting only non-active zones, where Busy keys cannot be
   overwritten by allocation, while Free keys are incarnation-qualified and
   immutable. Keep this restriction explicit if the API gains other callers.
-- `validate_owner_on_free` remains in configuration and RPC plumbing for wire
-  compatibility but no longer causes a read-before-free check. Decide whether
-  to deprecate it for one release or remove it in the next protocol break.
-- Legacy Busy and Free values decode as allocation incarnation zero. Recovery
-  can reconcile a legacy zero/zero pair, but rollout should still require a
-  full recovery scan before a legacy zone becomes allocatable.
 - The repository-wide `tree-lint` gate currently fails before analyzing these
   Rust-only changes because the pixi clang-tidy environment cannot find
   `stddef.h`, `spdlog`, `isa-l`, and `liburing` headers. No C++ files changed;
   repair the lint environment separately before using this gate for release.
+- After the rebase, workspace Clippy also fails in
+  `crowdb-console-shared/src/ops/cluster.rs`: it reads removed `mgmt_url` and
+  `rpc_url` fields from `DeployedDiskdb`. This is outside the DiskDB free and
+  compaction changes; targeted checks for the changed crates remain required.
 - [ ] Trace R130 public behavior to client E2E coverage and either add missing
   public-path cases or explicitly narrow acceptance where a behavior is
   intentionally server-internal.

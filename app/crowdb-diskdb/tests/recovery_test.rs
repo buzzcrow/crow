@@ -202,7 +202,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
 
     // Free the first 1.
     let free_kv = cluster.make_ddb_kv_client();
-    alloc::free_blocks(&dg, &segments[0..1], &free_kv, false)
+    alloc::free_blocks(&dg, &segments[0..1], &free_kv)
         .await
         .expect("free 1");
 
@@ -440,7 +440,7 @@ async fn recovery_strategy2_journal_replay() {
     .await
     .expect("allocate 3");
     let free_kv = cluster.make_ddb_kv_client();
-    alloc::free_blocks(&dg, &segments[0..1], &free_kv, false)
+    alloc::free_blocks(&dg, &segments[0..1], &free_kv)
         .await
         .expect("free 1");
     let remaining_segments: Vec<_> = segments[1..].to_vec();
@@ -654,9 +654,7 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
         .await
         .expect("allocate");
     let free_kv = cluster.make_ddb_kv_client();
-    alloc::free_block(&dg, &segment, &free_kv, false)
-        .await
-        .expect("free");
+    alloc::free_block(&dg, &segment, &free_kv).await.expect("free");
 
     // 3. Get the zone that has the free record.
     let disk_id = segment.disk_id.unwrap();
@@ -802,9 +800,7 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
     let disk_id = seg_a.disk_id.unwrap();
     let zone_idx = seg_a.zone_index;
     let free_kv = cluster.make_ddb_kv_client();
-    alloc::free_block(&dg, &seg_a, &free_kv, false)
-        .await
-        .expect("free A");
+    alloc::free_block(&dg, &seg_a, &free_kv).await.expect("free A");
 
     // 3. Simulate a legacy crashed compaction: manually write a
     // ZoneValue with compact_ts = T1 (advanced past the free record)
@@ -1012,7 +1008,7 @@ async fn recovery_persist_only_is_idempotent() {
         segments.push(seg);
     }
     let free_kv = cluster.make_ddb_kv_client();
-    alloc::free_block(&dg, &segments[0], &free_kv, false)
+    alloc::free_block(&dg, &segments[0], &free_kv)
         .await
         .expect("free");
 
@@ -1162,7 +1158,7 @@ async fn preparatory_thread_produces_ready_zones() {
         let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
             .await
             .expect("allocate");
-        alloc::free_block(&dg, &seg, &free_kv, false).await.expect("free");
+        alloc::free_block(&dg, &seg, &free_kv).await.expect("free");
         freed_segments.push(seg);
     }
 

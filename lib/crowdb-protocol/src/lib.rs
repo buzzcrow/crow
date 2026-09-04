@@ -238,8 +238,8 @@ pub mod fb_wrappers;
 
 pub mod diskdb_type_util;
 pub use diskdb_type_util::{
-    decode_busy_block_value, decode_free_block_value, disk_id, effective_status, DiskIdExt, HwStatusExt,
-    RecoveryScanProgressValueExt, ZoneAllocationStateExt, ZoneValueExt,
+    disk_id, effective_status, DiskIdExt, HwStatusExt, RecoveryScanProgressValueExt, ZoneAllocationStateExt,
+    ZoneValueExt,
 };
 
 pub mod common_type;

@@ -90,9 +90,10 @@ fn roundtrip_free_block_key() {
         disk_id: disk_id(1, 2),
         zone_index: 3,
         unit_offset: 999,
+        allocation_ts: 123,
     };
     let bytes = k.to_bytes();
-    assert_eq!(bytes.len(), 31);
+    assert_eq!(bytes.len(), 39);
     assert_eq!(FreeBlockKey::from_bytes(&bytes), Ok(k));
 }
 

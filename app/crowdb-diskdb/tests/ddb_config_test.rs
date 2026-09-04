@@ -77,7 +77,6 @@ fn config_validate_rejects_zero_cas_retry_limit() {
 fn config_defaults_match_design() {
     let config = DdbConfig::default();
     assert_eq!(config.storage.cas_retry_limit, 100);
-    assert!(!config.storage.validate_owner_on_free);
     assert!(!config.persistence.free_batch_enabled);
     assert_eq!(config.persistence.free_flush_max_batch, 256);
 }

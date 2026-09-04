@@ -14,8 +14,9 @@
 //! cleared bits for frees while the free records still exist on disk.
 
 use crowdb_protocol::common::DiskId;
+use crowdb_protocol::diskdb::rpc::{BusyBlockValue, FreeBlockValue};
 use crowdb_protocol::key::{BinaryKey, BusyBlockKey};
-use crowdb_protocol::{decode_busy_block_value, decode_free_block_value, DiskGroupId, ZoneValueExt};
+use crowdb_protocol::{DiskGroupId, ZoneValueExt};
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::zone::{DdbZone, DdbZoneHealth};
@@ -85,7 +86,7 @@ pub async fn load_zone_inner(
         }
         // Put BusyBlockKey → range_set (allocate).
         if let Ok(bk) = BusyBlockKey::from_bytes(&op.key) {
-            if let Ok(bv) = decode_busy_block_value(&op.value) {
+            if let Ok(bv) = bincode::deserialize::<BusyBlockValue>(&op.value) {
                 max_allocation_ts = max_allocation_ts.max(bv.allocation_ts);
                 #[allow(clippy::cast_possible_truncation)]
                 let offset = bk.unit_offset as u32;
@@ -116,7 +117,7 @@ pub async fn load_zone_inner(
     let max_free_allocation_ts = free_ops
         .iter()
         .filter(|op| !op.is_delete)
-        .filter_map(|op| decode_free_block_value(&op.value).ok())
+        .filter_map(|op| bincode::deserialize::<FreeBlockValue>(&op.value).ok())
         .map(|fv| fv.pre_allocation_ts)
         .max()
         .unwrap_or(0);
