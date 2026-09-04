@@ -228,6 +228,18 @@ fn dg_allocate_blocks_no_space_when_count_exceeds_disks() {
 }
 
 #[test]
+fn dg_allocate_blocks_no_space_rolls_back_partial_claims() {
+    let dg = make_dg_with_disks(&[(1, 1, 128), (2, 1, 128)]);
+    let usage_before = dg.aggregate_usage();
+
+    let result = dg.allocate_blocks(1, 3, &[], CAS_RETRY, ZONE_ROTATE);
+
+    assert!(matches!(result, Err(AllocError::NoSpace)));
+    assert_eq!(dg.aggregate_usage().busy_bytes, usage_before.busy_bytes);
+    assert!(dg.allocate_blocks(1, 2, &[], CAS_RETRY, ZONE_ROTATE).is_ok());
+}
+
+#[test]
 fn dg_allocate_blocks_succeeds_when_count_equals_disks() {
     let dg = make_dg_with_disks(&[(1, 1, 128), (2, 1, 128)]);
     let results = dg

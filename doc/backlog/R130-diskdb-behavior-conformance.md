@@ -30,6 +30,17 @@ The highest-risk gaps are in control-plane changes:
   and exposes a public endpoint that can overwrite an existing owner.
   Concurrent creates can also choose from the same owner snapshot and
   produce avoidable imbalance.
+- Startup and allocation contain uncovered correctness failures. An
+  owned group without a bind defaults to `(0, 0)`, startup launches both
+  per-disk and whole-group zone loaders, failed recovery substitutes
+  empty zones and promotes them to `Up`, and an incomplete multi-block
+  allocation loses access to its bitmap claims instead of rolling them
+  back.
+- Client routing and service-state reporting can remain stale. Endpoint
+  refresh only inserts cache entries, `NotOwner` is not retryable,
+  `commit_blocks` has no public client wrapper, commit omits the degraded
+  check used by allocate/free, and `/ready` reports `ready: true` while
+  degraded.
 - Ownership is immutable after creation in this requirement. There is
   no owner handoff, owner rebalance, KV-group rebinding, or record
   migration. R102 remains the only requirement for KV-group binding
@@ -126,9 +137,11 @@ contract.
    `lib/crowdb-kv-client/src/hardware.rs`: make owner selection and
    owner-record creation part of the disk-group creation result. Select
    the eligible live diskdb instance with the fewest owned disk-groups,
-   break ties by stable instance ID, and coordinate concurrent creates
-   so they observe committed assignments. Thirteen creations across
-   three eligible owners must converge to 5/4/4.
+   break ties by stable instance ID, and make owner persistence mandatory
+   before acknowledging creation. Thirteen sequential creations across
+   three eligible owners must converge to 5/4/4. Concurrent management
+   requests are outside the exact-balance guarantee until group 0 gains
+   conditional writes.
 4. **Immutable owner enforcement** —
    `lib/crowdb-kv-client/src/hardware.rs`,
    `app/crowdb-web/src/diskdb.rs`, and console clients: separate
@@ -200,8 +213,6 @@ disk-group create + live diskdb registry + current owner map
   to the same state and reconciliation stays idempotent.
 - No live eligible diskdb instance exists → creation fails without an
   acknowledged ownerless disk-group.
-- Two disk-groups are created concurrently → assignment coordination
-  accounts for both writes and keeps owner counts within one.
 - Existing owner is replaced with a different instance ID → reject the
   write and retain the original value.
 - Existing owner renews its lease → accept only the expiry update; the
@@ -227,8 +238,8 @@ disk-group create + live diskdb registry + current owner map
   disk-group owners after creation.
 - Uses the existing group-0 `HardwareClient`,
   `ServiceRegistryClient`, watch/notify path, diskdb RPC transport, and
-  test harness. Owner creation needs create-if-absent or equivalent
-  group-0 coordination so concurrent creators cannot overwrite an owner.
+  test harness. Creation uses the existing group-0 batch surface; exact
+  balance is required for the serialized management workflow.
 - R79 free batching and R80 rebalance are separate performance and
   placement requirements. Their eventual behavior should follow the
   feature test layout established here but is not required to complete
@@ -265,10 +276,6 @@ disk-group create + live diskdb registry + current owner map
   sequentially through the management API, then list owner records →
   assert every disk-group has exactly one owner and counts sorted by
   instance are 4, 4, and 5. E2E test.
-- Register three eligible diskdb instances and create disk-groups
-  concurrently → wait for all successful responses and list owners →
-  assert successful creates have one owner each and maximum count minus
-  minimum count is at most one. E2E test.
 - Create a disk-group when no diskdb instance is eligible → assert the
   operation fails, no owner record exists, and no usable disk-group is
   reported as successfully created. E2E test.
@@ -386,12 +393,3 @@ disk-group create + live diskdb registry + current owner map
   work item 8.
 - `pixi run cargo fmt --all -- --check`
 - `pixi run cargo clippy --all-targets -- -D warnings`
-
-## Open Questions
-
-- **Atomic create and owner assignment** — group-0 currently stores the
-  disk-group and owner under separate keys. Prefer a group-0 atomic
-  batch or create-if-absent primitive that covers both records and
-  serializes concurrent least-loaded selection. If that primitive is
-  unavailable, the design must define compensation and reservation
-  records without adding a blocking process-local lock.

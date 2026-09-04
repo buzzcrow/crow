@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use crowdb_diskdb_client::{DiskdbClient, DiskdbRpcTransport, RetryConfig};
-use crowdb_protocol::diskdb::rpc::{AllocateBlocksRequest, CompactZoneRequest, FreeBlocksRequest};
+use crowdb_protocol::diskdb::rpc::{
+    AllocateBlocksRequest, CommitBlocksRequest, CompactZoneRequest, FreeBlocksRequest,
+};
 use crowdb_test_harness::cluster::KvCluster;
 use crowdb_test_harness::diskdb::*;
 use crowdb_test_harness::hardware::{
@@ -80,6 +82,14 @@ async fn diskdb_client_e2e_full_flow() {
         assert_eq!(seg.unit_count, 1, "segment {i} should have unit_count=1");
     }
 
+    let commit_resp = client
+        .commit_blocks(CommitBlocksRequest {
+            segments: alloc_resp.segments.clone(),
+        })
+        .await
+        .expect("commit 3 blocks");
+    assert_eq!(commit_resp.committed_count, 3, "expected 3 committed");
+
     // Query disk-group info.
     let dg_info = client
         .get_disk_group_info(DG_ID)
@@ -106,7 +116,7 @@ async fn diskdb_client_e2e_full_flow() {
         "capacity should be non-zero after sync"
     );
 
-    // Free the 3 blocks.
+    // Free the 3 committed blocks.
     let free_req = FreeBlocksRequest {
         segments: alloc_resp.segments.clone(),
     };

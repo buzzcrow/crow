@@ -221,6 +221,17 @@ impl DdbDiskGroup {
         if results.len() == count as usize {
             Ok(results)
         } else {
+            for (_, zone, range) in &results {
+                if !zone.rollback_allocate(range.unit_offset, range.unit_count) {
+                    tracing::error!(
+                        disk_group_id = self.disk_group_id,
+                        zone_index = zone.zone_index,
+                        unit_offset = range.unit_offset,
+                        unit_count = range.unit_count,
+                        "partial allocation rollback failed; range remains conservatively busy"
+                    );
+                }
+            }
             Err(AllocError::NoSpace)
         }
     }

@@ -47,13 +47,12 @@ pub fn router(container: Arc<DdbDiskGroupContainer>) -> Router {
 
 /// `GET /ready` (also aliased as `/health`).
 ///
-/// Returns `200` when `phase == "up"` (regardless of degraded — the
-/// instance is alive and serving), `503` while still recovering so
-/// load-balancer probes back off until loading completes.
+/// Returns `200` when the instance is up and not degraded, otherwise
+/// `503` so load-balancer probes keep mutations away from it.
 async fn ready(State(state): State<HealthState>) -> (StatusCode, Json<ReadyResponse>) {
     let phase = state.container.lifecycle_phase();
     let degraded = state.container.is_degraded();
-    let ready = phase == StartupPhase::Up;
+    let ready = phase == StartupPhase::Up && !degraded;
     let code = if ready {
         StatusCode::OK
     } else {

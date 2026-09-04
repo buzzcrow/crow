@@ -97,7 +97,7 @@ async fn health_alias_returns_same_as_ready() {
 }
 
 #[tokio::test]
-async fn ready_reports_degraded_flag() {
+async fn ready_returns_503_when_degraded() {
     let container = Arc::new(DdbDiskGroupContainer::new(1));
     container.set_lifecycle_phase(StartupPhase::Up);
     container.enter_degraded_mode();
@@ -111,9 +111,8 @@ async fn ready_reports_degraded_flag() {
         )
         .await
         .unwrap();
-    // Still 200 (phase is Up — instance is alive), but degraded=true.
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = body_string(resp).await;
     assert!(body.contains("\"degraded\":true"), "body: {body}");
-    assert!(body.contains("\"ready\":true"), "body: {body}");
+    assert!(body.contains("\"ready\":false"), "body: {body}");
 }

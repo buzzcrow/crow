@@ -5,140 +5,173 @@
 
 This plan implements
 [`design-diskdb-behavior-conformance.md`](design-diskdb-behavior-conformance.md)
-and [R130](../backlog/R130-diskdb-behavior-conformance.md): make diskdb
-behavior feature-verifiable, assign immutable owners correctly, and add
-the console CLI benchmark.
+and [R130](../backlog/R130-diskdb-behavior-conformance.md). It is ordered
+by data-safety risk: prevent corruption and false writability first, then
+repair control-plane behavior, ownership, test structure, and benchmarks.
+Data migration and owner handoff remain in R102.
 
-## Owner Creation
+## Phase 1: Data-Safety Regression Tests
 
-- [~] **Choose the group-0 linearization primitive**: decide conditional
-  write dependency, dedicated group-0 operation, or distributed
-  single-writer coordinator. Files:
-  `doc/working/design-diskdb-behavior-conformance.md`.
-- [ ] **Add atomic owner creation**: commit a disk-group with one
-  least-loaded immutable owner and expose conflict/failure semantics.
-  Files: `lib/crowdb-kv-client/src/hardware.rs`, selected KV protocol and
-  server files.
-- [ ] **Make creation mandatory**: return management failure when no owner
-  is eligible or assignment fails; commit local configuration consistently.
-  Files: `app/crowdb-web/src/lifecycle.rs`,
-  `lib/crowdb-console-shared/src/ops/hardware.rs`.
-- [ ] **Reject owner replacement**: replace unconditional owner mutation
-  with create and same-owner renewal surfaces. Files:
-  `app/crowdb-web/src/diskdb.rs`, `lib/crowdb-kv-client/src/hardware.rs`,
-  `lib/crowdb-console-shared/src/clients/console.rs`.
+- [x] **Cover partial allocation rollback**: force a multi-block request
+  to claim some ranges and then exhaust capacity; prove all claims are
+  returned and free-space accounting is unchanged. Files:
+  `app/crowdb-diskdb/tests/disk_alloc.rs`.
+- [ ] **Cover missing bind isolation**: publish an owner without a bind
+  and prove diskdb neither creates a writable group nor reads/writes
+  zone records through `(0, 0)`. Files:
+  `app/crowdb-diskdb/tests/keepalive_sync.rs`.
+- [ ] **Cover single startup ownership**: instrument loading and prove
+  each startup disk is loaded exactly once and into the group retained
+  by the container. Files:
+  `app/crowdb-diskdb/tests/startup_sync.rs`.
+- [ ] **Cover failed recovery quarantine**: fail journal replay and full
+  scan; prove the disk and process do not become writable and group 0
+  does not retain `Up`. Files:
+  `app/crowdb-diskdb/tests/recovery.rs`.
 
-## Group-0 Reconciliation
+## Phase 2: Allocation and Startup Safety
 
-- [ ] **Build complete observed views**: apply no owner/bind/hardware delta
-  after a partial read. Files:
-  `app/crowdb-diskdb/src/liveness/keepalive.rs`.
-- [ ] **Fence stale zone loads by generation**: publish loaded state only
-  when owner and bind still match the observed generation. Files:
+- [~] **Return or roll back every allocation claim**: preserve partial
+  claims through the model/orchestration boundary and release incomplete
+  results before returning failure. Preserve KV persistence errors rather
+  than translating them to `NoSpace`. Files:
+  `app/crowdb-diskdb/src/model/disk_group.rs`,
+  `app/crowdb-diskdb/src/orchestration/alloc.rs`.
+- [ ] **Reject incomplete ownership views**: build owner, bind, group,
+  node, and disk state before publishing any delta. Missing binds and
+  failed reads retain the last-known-good state and set degraded mode.
+  Files: `app/crowdb-diskdb/src/liveness/keepalive.rs`.
+- [ ] **Unify startup loading**: use one whole-group startup loader;
+  reserve per-disk loading for disks discovered after startup. Fence
+  completion by current owner/bind generation. Files:
   `app/crowdb-diskdb/src/main.rs`,
   `app/crowdb-diskdb/src/liveness/keepalive.rs`.
+- [ ] **Keep failed recovery non-writable**: do not substitute empty
+  zones after failed recovery. Persist failure/offline status before a
+  later reconciliation can enable the disk. Files:
+  `app/crowdb-diskdb/src/recovery/zone_loader.rs`,
+  `app/crowdb-diskdb/src/liveness/keepalive.rs`.
 
-## Feature Tests
+## Phase 3: Client Routing and Service State
 
-- [ ] **Reorganize server integration tests**: group internal coverage by
-  the documented feature vocabulary. Files: `app/crowdb-diskdb/tests/`,
-  `app/crowdb-diskdb/Cargo.toml`.
-- [ ] **Build client component E2E tests**: cover startup/sync, ownership,
-  allocation lifecycle, recovery/compaction, hardware lifecycle,
-  query/metrics, scanner/admin, and endpoint retry. Files:
-  `lib/crowdb-diskdb-client/tests/`,
+- [ ] **Replace routing snapshots**: remove stale endpoint and
+  disk-to-group entries on refresh. Treat `NotOwner` as a topology
+  invalidation and bounded retry signal. Files:
+  `lib/crowdb-diskdb-client/src/client.rs`.
+- [x] **Complete the client mutation surface**: expose
+  `commit_blocks` through `DiskdbClient` and add component E2E coverage.
+  Files: `lib/crowdb-diskdb-client/src/client.rs`,
+  `lib/crowdb-diskdb-client/tests/diskdb_full_flow_test.rs` (move to
+  `allocation_lifecycle_test.rs` in Phase 6).
+- [ ] **Use one mutation gate**: allocate, commit, and free must apply
+  the same lifecycle, degraded, ownership, and bind checks. Files:
+  `app/crowdb-diskdb/src/service/diskdb_rpc_service.rs`.
+- [x] **Make readiness truthful**: return ready only for `Up` and
+  non-degraded state, with HTTP 503 otherwise. Files:
+  `app/crowdb-diskdb/src/health.rs`.
+
+## Phase 4: Owner Creation
+
+- [ ] **Commit group and owner together**: for serialized management
+  creates, select the least-loaded live diskdb instance, break ties by
+  stable instance ID, and batch the disk-group and owner records. Files:
+  `lib/crowdb-kv-client/src/hardware.rs`,
+  `app/crowdb-web/src/lifecycle.rs`.
+- [ ] **Fail closed on assignment**: reject creation when no live owner
+  exists or group-0 persistence fails; keep local configuration and
+  group-0 state consistent through compensation. Files:
+  `app/crowdb-web/src/lifecycle.rs`,
+  `lib/crowdb-console-shared/src/ops/hardware.rs`.
+- [ ] **Enforce immutable ownership**: reject a different owner and
+  permit only same-instance lease renewal. Do not add owner handoff or
+  data migration. Files: `lib/crowdb-kv-client/src/hardware.rs`,
+  `app/crowdb-web/src/diskdb.rs`,
+  `lib/crowdb-console-shared/src/clients/console.rs`.
+- [ ] **Verify serial balancing**: create 13 disk-groups through the
+  management API with three live groups and assert one owner per group
+  with counts `[4, 4, 5]`. Files:
+  `lib/crowdb-diskdb-client/tests/owner_creation.rs`,
   `lib/crowdb-test-harness/src/diskdb.rs`.
 
-## Console CLI Benchmark
+## Phase 5: Lock-Free Publication and Module Boundaries
+
+- [ ] **Remove hot-path blocking locks**: use a lock-free group map,
+  atomic status/bind fields, immutable `ArcSwap` disk and active-zone
+  snapshots, and atomic zone health. Review recovery-only locks
+  separately before retaining any. Files:
+  `app/crowdb-diskdb/src/model/`,
+  `app/crowdb-diskdb/src/state/`.
+- [ ] **Split oversized modules**: separate observation, reconciliation,
+  heartbeat, loading, RPC validation, and RPC mutations so feature tests
+  target stable boundaries. Files:
+  `app/crowdb-diskdb/src/liveness/`,
+  `app/crowdb-diskdb/src/service/`.
+
+## Phase 6: Feature-Grouped Tests
+
+- [ ] **Move inline tests to integration targets**: group server tests by
+  startup/sync, ownership, allocation lifecycle, recovery/compaction,
+  hardware lifecycle, query/metrics, and scanner/admin. Files:
+  `app/crowdb-diskdb/tests/`.
+- [ ] **Make client tests the component E2E boundary**: remove duplicate
+  full-flow scenarios and add feature-named client files for every public
+  behavior, including stale routing and owner retry. Files:
+  `lib/crowdb-diskdb-client/tests/`.
+- [ ] **Never silently skip E2E**: missing required binaries must fail
+  with an actionable message or be built by the test command. Files:
+  `lib/crowdb-diskdb-client/tests/common/`, pixi task definitions.
+
+## Phase 7: Console CLI Benchmark
 
 - [ ] **Add diskdb benchmark verbs**: define allocate and mix commands,
-  memory/block modes, and common workload arguments. Files:
-  `app/crowdb-cli/src/commands/bench/verb.rs`,
-  `app/crowdb-cli/src/commands/bench.rs`.
-- [ ] **Add benchmark topology lifecycle**: provision and tear down three
-  nodes, three disk-groups, and 12 disks. Files:
-  `app/crowdb-cli/src/commands/bench/diskdb.rs`,
-  `lib/crowdb-test-harness/src/diskdb.rs`.
-- [ ] **Implement allocate workload**: stop on cluster-wide exhaustion or
-  deadline and drain in-flight requests. Files:
-  `app/crowdb-cli/src/commands/bench/diskdb_allocate.rs`.
-- [ ] **Implement mixed workload**: issue deterministic 70/30 allocate/free
-  operations against a non-duplicated live set. Files:
-  `app/crowdb-cli/src/commands/bench/diskdb_mix.rs`.
-- [ ] **Implement verification and reporting**: compare live segments,
-  durable records, and compacted/recalculated capacity statistics. Files:
-  `app/crowdb-cli/src/commands/bench/diskdb_verify.rs`,
-  `app/crowdb-cli/src/commands/bench/result.rs`.
-
-## File List
-
-- `lib/crowdb-kv-client/src/hardware.rs` — owner creation and renewal.
-- Selected KV protocol/server files — chosen linearization primitive.
-- `app/crowdb-web/src/lifecycle.rs` — mandatory balanced assignment.
-- `app/crowdb-web/src/diskdb.rs` — immutable owner handler.
-- `lib/crowdb-console-shared/src/ops/hardware.rs` — creation outcome.
-- `lib/crowdb-console-shared/src/clients/console.rs` — owner API surface.
-- `app/crowdb-diskdb/src/liveness/keepalive.rs` — complete-view sync.
-- `app/crowdb-diskdb/src/main.rs` — load generation.
-- `app/crowdb-diskdb/tests/` — feature integration tests.
-- `lib/crowdb-diskdb-client/tests/` — component E2E tests.
-- `app/crowdb-cli/src/commands/bench/` — benchmark.
-- `lib/crowdb-test-harness/src/diskdb.rs` — topology fixture.
-- `doc/design/diskdb/design-crowdb-diskdb.md` — final folded design.
+  `mem|block` modes, duration, concurrency, allocation size, and seed.
+  Files: `app/crowdb-cli/src/commands/bench/`.
+- [ ] **Provision the benchmark topology**: start three nodes, one
+  disk-group per node, and four disks per group; reuse memory block mode
+  where selected. Files: `lib/crowdb-test-harness/src/diskdb.rs`.
+- [ ] **Implement allocate mode**: stop only at cluster-wide exhaustion
+  or the time limit and drain in-flight operations. Record the stop
+  reason. Files: `app/crowdb-cli/src/commands/bench/`.
+- [ ] **Implement 70/30 mix mode**: choose allocate/free deterministically,
+  free only members of a non-duplicated live set, and restore failed
+  frees. There is no free-only benchmark. Files:
+  `app/crowdb-cli/src/commands/bench/`.
+- [ ] **Verify and report**: compare the live set, durable records, and
+  recalculated space totals; report throughput, latency, operation counts,
+  RPC failures, correctness failures, and final capacity. Files:
+  `app/crowdb-cli/src/commands/bench/`.
 
 ## Test Checklist
 
 ### Unit and integration
 
-- [ ] Least-loaded selection produces 5/4/4 for 13 sequential creates.
-- [ ] Concurrent create coordination keeps owner spread at most one.
+- [ ] Partial multi-block failure releases all bitmap claims.
+- [ ] Persistence failure remains distinguishable from exhaustion.
+- [ ] Missing or partial group-0 views do not publish writable state.
+- [ ] Startup loads each retained disk exactly once.
+- [ ] Failed recovery remains quarantined across reconciliation.
+- [ ] Route refresh removes stale entries and retries `NotOwner`.
+- [ ] All mutations reject degraded state.
+- [ ] Degraded readiness returns false and HTTP 503.
 - [ ] Owner replacement conflicts; same-owner renewal changes expiry only.
-- [ ] Partial group-0 views do not alter last-known-good runtime state.
-- [ ] Stale zone-load generation cannot publish.
-- [ ] Mixed selector maintains live-set and accounting invariants.
+- [ ] Mixed selection maintains live-set and accounting invariants.
 
-### End to end
+### Component end to end
 
-- [ ] Three owners and 13 management creates persist one owner each at
-  5/4/4.
+- [ ] Thirteen serialized creates across three owners produce `[4, 4, 5]`.
 - [ ] Missing owner and owner-write failure reject disk-group creation.
-- [ ] Complete startup becomes writable only after zone load.
+- [ ] Startup becomes writable only after successful zone load.
+- [ ] Allocate, commit, and free work through `DiskdbClient`.
+- [ ] Endpoint removal and `NotOwner` refresh route to the current owner.
 - [ ] Allocate benchmark covers 12 disks and verifies exhaustion/deadline.
-- [ ] Mixed benchmark verifies 70/30 operation selection, durable live set,
-  and capacity totals.
+- [ ] Mix benchmark verifies 70/30 selection, durable live set, and space.
 
 ### Commands
 
-- [ ] `pixi run cargo fmt --all -- --check`
-- [ ] `pixi run cargo clippy --all-targets -- -D warnings`
-- [ ] `pixi run test-protocol`
+- [ ] `pixi run -- cargo fmt --all -- --check`
+- [ ] `pixi run -- cargo clippy --all-targets -- -D warnings`
 - [ ] `pixi run test-kv-client`
 - [ ] `pixi run clean-env && pixi run test-console-server`
 - [ ] `pixi run clean-env && pixi run test-diskdb`
 - [ ] `pixi run clean-env && pixi run test-diskdb-client`
 - [ ] `pixi run clean-env && pixi run test-console-cli`
-
-## Blocked
-
-Concurrent least-loaded owner assignment needs a distributed
-linearization point. The existing group-0 client provides blind
-put/delete and atomic batches, but no conditional create or revision
-guard. Atomic batching prevents a partial disk-group/owner pair but does
-not prevent concurrent creators from selecting the same least-loaded
-instance from identical snapshots.
-
-The choices are:
-
-- Depend on R101 conditional writes and use a guarded assignment counter
-  or reservation. This is general and lock-free, but expands the critical
-  path to an unfinished requirement.
-- Add a dedicated group-0 `CreateDiskGroupWithOwner` operation. This is
-  the narrowest correct behavior and gives a single linearization point,
-  but adds protocol, server, and client code for one sysdata workflow.
-- Require a distributed single-writer console coordinator. This avoids a
-  KV primitive but adds leadership/failover machinery; a process-local
-  mutex is both prohibited and insufficient.
-
-The accepted concurrent balance and immutable-owner requirements cannot
-be implemented correctly with the current blind-put surface. A user
-decision is required before production code changes begin.

@@ -19,10 +19,10 @@ use tracing::warn;
 use crowdb_kv_client::ServiceRegistryClient;
 use crowdb_protocol::common::DiskId;
 use crowdb_protocol::diskdb::rpc::{
-    AllocateBlocksRequest, AllocateResponse, CompactZoneRequest, CompactZoneResponse, FreeBlocksRequest,
-    FreeResponse, GetDiskGroupInfoResponse, GetDiskInfoResponse, GetScanStatusResponse,
-    QueryCapacityStatsRequest, QueryCapacityStatsResponse, RebuildZoneBitmapResponse, RecalcDiskUsageRequest,
-    RecalcDiskUsageResponse, TriggerScanResponse,
+    AllocateBlocksRequest, AllocateResponse, CommitBlocksRequest, CommitBlocksResponse, CompactZoneRequest,
+    CompactZoneResponse, FreeBlocksRequest, FreeResponse, GetDiskGroupInfoResponse, GetDiskInfoResponse,
+    GetScanStatusResponse, QueryCapacityStatsRequest, QueryCapacityStatsResponse, RebuildZoneBitmapResponse,
+    RecalcDiskUsageRequest, RecalcDiskUsageResponse, TriggerScanResponse,
 };
 use crowdb_protocol::DiskGroupId;
 
@@ -169,6 +169,42 @@ impl DiskdbClient {
         Ok(FreeResponse {
             freed_count: total_freed,
         })
+    }
+
+    /// Commit tentative blocks. Requests spanning disk-groups are split
+    /// and routed to each current owner.
+    ///
+    /// # Errors
+    /// Returns `DiskdbClientError::Rpc` for RPC failures and
+    /// `Unreachable` for routing or connection errors.
+    pub async fn commit_blocks(&self, req: CommitBlocksRequest) -> Result<CommitBlocksResponse> {
+        if req.segments.is_empty() {
+            return Ok(CommitBlocksResponse { committed_count: 0 });
+        }
+        let mut groups: Vec<(DiskGroupId, Vec<_>)> = Vec::new();
+        for seg in &req.segments {
+            let disk_id = seg
+                .disk_id
+                .ok_or_else(|| DiskdbClientError::Rpc("segment.disk_id required".into()))?;
+            let dg_id = self.dg_for_disk(disk_id).await?;
+            if let Some((_, segs)) = groups.iter_mut().find(|(group_id, _)| *group_id == dg_id) {
+                segs.push(*seg);
+            } else {
+                groups.push((dg_id, vec![*seg]));
+            }
+        }
+        let mut committed_count = 0u32;
+        for (dg_id, segments) in groups {
+            let sub_req = CommitBlocksRequest { segments };
+            let response = self
+                .with_rpc_retry(dg_id, |endpoint, rpc| {
+                    let request = sub_req.clone();
+                    async move { rpc.commit_blocks(&endpoint, &request).await }
+                })
+                .await?;
+            committed_count += response.committed_count;
+        }
+        Ok(CommitBlocksResponse { committed_count })
     }
 
     /// Query capacity stats at the disk-group level (all owned groups
@@ -451,16 +487,4 @@ pub fn normalize_endpoint(endpoint: &str) -> String {
         format!("http://{endpoint}")
     };
     with_scheme.replacen("://0.0.0.0:", "://127.0.0.1:", 1)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retry_config_default() {
-        let r = RetryConfig::default();
-        assert_eq!(r.max_retries, 3);
-        assert_eq!(r.initial_backoff, Duration::from_millis(50));
-    }
 }

@@ -10,9 +10,58 @@ initial least-loaded owner picker are already landed. Architecture
 decisions and rationale are in the root design; this doc does not repeat
 them.
 
-## 1. Disk-Group Creation and Ownership
+## 1. Review Findings
 
-### 1.1 Why
+### 1.1 Correctness blockers
+
+- `DdbDiskGroup::new` defaults its bind to `(0, 0)`, and
+  `KeepAlive::observe_ownership` publishes an owned group even when its
+  bind entry is absent. `disk_add_init` can therefore read and write zone
+  records in the system group.
+- The initial keepalive tick spawns per-disk zone loads. `main` then
+  starts `run_zone_load` for the same groups and replaces their container
+  entries, leaving the first tasks to mutate detached groups.
+- `ZoneLoader::load_disk_group` substitutes empty zones when journal
+  replay and full scan both fail, then promotes the disk and process to
+  `Up`.
+- `DdbDiskGroup::allocate_blocks` can claim some bitmap ranges and then
+  return `NoSpace` without returning or rolling back those claims. The
+  orchestration layer's partial-success branch is unreachable.
+
+### 1.2 Control-plane and client gaps
+
+- Heartbeat runs before ownership reconciliation and advertises the
+  previous tick's groups and usage. Disk-list read failures can still
+  finish as a successful sync and clear degraded mode; missing or failed
+  node/group reads are treated as `Up`.
+- Offline status write-back is best-effort. If it fails, a following sync
+  sees group-0 `Up` and can recover a disk whose zone load failed.
+- `DiskdbClient::refresh_endpoints` only inserts routes, leaving removed
+  group and disk mappings cached. `NotOwner` is not retryable.
+- The transport and server support commit, but `DiskdbClient` has no
+  `commit_blocks` method. Commit also omits the degraded gate used by
+  allocate and free.
+- `/ready` says readiness requires `Up` and non-degraded, but returns
+  HTTP 200 with `ready: true` for degraded instances.
+
+### 1.3 Structure, concurrency, and tests
+
+- Allocation reads `RwLock`-protected status, bind, disk, active-zone,
+  and zone-health state. This conflicts with the lock-free hot-path rule.
+- `keepalive.rs` and `diskdb_rpc_service.rs` exceed 1,000 lines, while
+  touched modules still contain inline unit tests.
+- Client E2E tests duplicate the same full RPC flow and silently return
+  success when required binaries are missing.
+- The current benchmark is a fixed allocate/free loop inside a client
+  correctness test. It has no topology lifecycle, storage mode, stop
+  reason, latency distribution, or durable accounting.
+
+Both current relevant suites pass: `pixi run test-diskdb` and
+`pixi run test-diskdb-client`. They do not cover these failures.
+
+## 2. Disk-Group Creation and Ownership
+
+### 2.1 Why
 
 `http_add_node_disk_group` currently persists the disk-group before it
 calls `auto_assign_owner`. Failure to discover an instance or write the
@@ -22,7 +71,7 @@ endpoint can replace an existing owner. The pure least-loaded picker is
 correct for a single caller but concurrent callers can read the same
 counts and select the same instance.
 
-### 1.2 Owner creation contract
+### 2.2 Owner creation contract
 
 The creation operation has one externally visible outcome: a disk-group
 and its immutable owner both exist, or creation fails and neither is
@@ -53,8 +102,9 @@ pub async fn renew_owner(
 
 a. Creation rejects an empty eligible set.
 
-b. Selection and owner creation are serialized by group-0 state, not a
-process-local lock.
+b. Exact least-loaded balance is guaranteed for serialized management
+create requests. Concurrent exact balance is deferred until group 0 has
+conditional writes.
 
 c. A duplicate disk-group or owner key returns conflict without
 overwriting either value.
@@ -65,44 +115,38 @@ the same successful outcome, or compensated on a later failure.
 
 Edge cases:
 
-- Concurrent creates retry a group-0 conflict with a fresh owner count.
-- A crashed caller leaves either a complete committed pair or a durable
-  reservation that another caller can finish or remove.
+- A failed group-0 batch leaves neither record. A failed local config
+  commit compensates the group-0 pair before returning failure.
 - An expired owner remains the owner; expiry affects availability, not
   assignment.
 - Owner replacement remains unsupported.
 
-### 1.3 Unresolved concurrency primitive
+## 3. Allocation and Recovery Safety
 
-The current KV API supports blind put/delete and atomic `batch_write`, but
-not conditional create or compare-and-set. `batch_write` can commit a
-disk-group and chosen owner together, yet cannot prove that the owner
-counts used for selection are still current. Exact balance under
-concurrent creation therefore needs one of:
+### 3.1 Partial claims
 
-- R101 conditional writes, using a revision-guarded assignment counter or
-  reservation key. This reuses a general primitive but makes R130 depend
-  on an unfinished requirement.
-- A group-0-specific `CreateDiskGroupWithOwner` state-machine operation.
-  This gives one linearization point and a narrow surface, but adds a new
-  KV RPC and server behavior solely for sysdata assignment.
-- Sequential management semantics. The console rejects or queues
-  concurrent creates. This is simplest but requires distributed console
-  leader ownership or a lock; a process-local blocking lock is forbidden
-  and would not protect multiple console instances.
+The model returns all multi-block claims with a completion result. The
+orchestrator rolls back every incomplete attempt before compaction or
+failure. Persistence failures remain distinguishable from capacity
+exhaustion.
 
-No implementation proceeds until this choice is made.
+### 3.2 Loader ownership and failure
 
-## 2. Group-0 Reconciliation
+Startup has one whole-group loader. Later disk discovery uses the
+per-disk loader. Neither path substitutes an empty `Up` zone. Failed
+loads remain non-writable, and failure status must reach group 0 before a
+later sync can treat the disk as recovered.
 
-### 2.1 Why
+## 4. Group-0 Reconciliation
+
+### 4.1 Why
 
 `KeepAlive::observe_ownership` reads owner and bind maps separately and
 publishes a new `DdbDiskGroup` before zones are loaded. The review must
 preserve last-known-good state on partial reads and keep an owner record
 without a bind non-writable.
 
-### 2.2 Reconciliation generation
+### 4.2 Reconciliation generation
 
 Build a complete observed view before mutating the container. Each new
 group carries a load generation. Zone-load completion publishes only if
@@ -116,30 +160,46 @@ Edge cases:
 - Duplicate notifications are harmless.
 - Lease renewal for the same owner does not restart zone loading.
 
-## 3. Feature Test Organization
+## 5. Client Routing and Service State
 
-### 3.1 Why
+Endpoint refresh replaces both routing maps. `NotOwner`, unavailable,
+and transport failures evict and refresh the affected route before a
+bounded retry. The client exposes commit, all mutations share one
+lifecycle/degraded gate, and degraded readiness returns false with HTTP
+503.
+
+## 6. Lock-Free Publication
+
+Group status and bind become atomic values. Disk, active-zone, and
+allocatable-disk collections publish immutable `ArcSwap` snapshots;
+container membership uses a lock-free map. Zone health becomes atomic.
+Recovery-only bookkeeping may retain a short lock only after explicit
+review because it is outside allocation and RPC hot paths.
+
+## 7. Feature Test Organization
+
+### 7.1 Why
 
 The public-path behavior is concentrated in one full-flow test, while
 server tests are named by implementation module. Feature-named client
 E2E files make the design contract reviewable and independently runnable.
 
-### 3.2 Layout
+### 7.2 Layout
 
 Move public behavior to client E2E files for startup/sync, owner creation,
 allocation lifecycle, recovery/compaction, hardware lifecycle,
 query/metrics, scanner/admin, and endpoint retry. Server tests retain
 internal failure injection and pure engine coverage under matching names.
 
-## 4. Console CLI Benchmark
+## 8. Console CLI Benchmark
 
-### 4.1 Why
+### 8.1 Why
 
 The existing concurrent diskdb workload is embedded in a correctness
 test. It cannot select the storage backend, control lifecycle, distinguish
 capacity exhaustion from deadline, or emit the common benchmark result.
 
-### 4.2 Command surface
+### 8.2 Command surface
 
 ```text
 crowdb-cli bench diskdb allocate --mode mem|block
@@ -158,7 +218,7 @@ segment from the run's live set before dispatch and restores it if the RPC
 fails, preventing duplicate concurrent frees. If the live set is empty, a
 selected free becomes an allocate. There is no free-only subcommand.
 
-### 4.3 Statistics and verification
+### 8.3 Statistics and verification
 
 The report contains effective arguments, stop reason, elapsed time,
 throughput and latency per operation, RPC errors, correctness errors,
@@ -192,10 +252,10 @@ Any mismatch makes the command fail independently of performance.
 
 ## Complexity
 
-High. Concurrent balanced owner creation needs a distributed
-linearization point that the current API lacks. Generation-safe sync and
-benchmark verification cross group-0, three data groups, diskdb processes,
-and the client while preserving the lock-free hot-path constraint.
+High. Recovery and publication changes must preserve object lifetime
+while group-0 sync, background tasks, and RPCs overlap. Benchmark
+verification crosses group 0, three data groups, diskdb processes, and
+the client.
 
 ## Test Design
 
@@ -215,10 +275,8 @@ and the client while preserving the lock-free hot-path constraint.
 
 ### End-to-end tests
 
-- Register three diskdb instances, create 13 disk-groups, and assert one
+- Register three diskdb instances, create 13 disk-groups serially, and assert one
   immutable owner per group with sorted counts `[4,4,5]`.
-- Create disk-groups concurrently and assert owner-count spread at most
-  one after every acknowledged create.
 - Fail owner creation and assert the management request fails without an
   acknowledged ownerless group.
 - Start diskdb from a complete owner/bind/hardware view and assert it
@@ -261,11 +319,3 @@ are CLI arguments with stable defaults.
 4. The RPC service becomes writable for the group only after that load
    publishes.
 5. Benchmark lifecycle uses the same management and client paths.
-
-## Open Questions
-
-- Which group-0 linearization primitive should R130 use for concurrent
-  least-loaded owner creation: depend on R101 conditional writes, add a
-  dedicated group-0 operation, or require a distributed single-writer
-  management coordinator? The existing blind-put API cannot meet the
-  accepted concurrent balance and immutability contract.

@@ -234,23 +234,7 @@ pub async fn allocate_blocks(
         zone_rotate_count,
     ) {
         Ok(claims) if claims.len() == count as usize => claims,
-        Ok(partial) => {
-            // Partial allocation — not enough space. Try compaction
-            // fallback to reclaim freed space, then retry.
-            tracing::info!(
-                requested = count,
-                placed = partial.len(),
-                "allocate_blocks partial — running synchronous compaction fallback"
-            );
-            compact_fallback(dg, kv, zone_rotate_count, metrics).await;
-            dg.allocate_blocks(
-                unit_count,
-                count,
-                exclude_disks,
-                cas_retry_limit,
-                zone_rotate_count,
-            )?
-        }
+        Ok(claims) => claims,
         Err(AllocError::NoSpace) => {
             // No space at all — try compaction fallback then retry.
             tracing::info!("allocate_blocks NoSpace — running synchronous compaction fallback");
