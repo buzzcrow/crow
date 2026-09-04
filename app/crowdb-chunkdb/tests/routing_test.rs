@@ -140,6 +140,12 @@ fn default_binding_table_covers_all_buckets() {
 }
 
 #[test]
+fn terminal_binding_includes_max_bucket() {
+    let table = BindingTable::new(vec![binding(32_768, u16::MAX, 0, 1)]);
+    assert!(table.route(u16::MAX).is_some());
+}
+
+#[test]
 fn binding_cache_route_bucket_directly() {
     let cache = BindingCache::new();
     cache.replace(BindingTable::new(vec![
@@ -153,5 +159,5 @@ fn binding_cache_route_bucket_directly() {
     let r2 = cache.route_bucket(200).unwrap();
     assert_eq!(r2.kv_group_id, 20);
 
-    assert!(cache.route_bucket(65535).is_none());
+    assert_eq!(cache.route_bucket(u16::MAX).unwrap().kv_group_id, 20);
 }

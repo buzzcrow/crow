@@ -916,8 +916,8 @@ All internal (no auth, same as `/ready` and `/health`).
   guard's local copy is still updated so the current operation sees
   the chunk.
 - `delete_chunk` keeps the Deleted-state chunk cached via `refresh` →
-  next `delete_chunk` retry gets a cache hit, returns `ChunkNotFound`
-  without a store round-trip.
+  next `delete_chunk` retry gets a cache hit and returns the same tombstone
+  successfully without a store round-trip.
 - `acquire` returns `ChunkNotFound` (store miss during acquire) → the
   chunk does not exist; `append`/`seal`/`delete` return
   `ChunkNotFound`.

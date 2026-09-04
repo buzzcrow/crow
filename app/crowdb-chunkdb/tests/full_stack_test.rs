@@ -86,13 +86,14 @@ async fn chunkdb_full_stack_allocate_seal_delete() {
     assert_eq!(deleted.state, ChunkState::Deleted as i32);
     eprintln!("chunk deleted");
 
-    // 9. Delete again → should return ChunkNotFound (GAP-9).
-    let result = harness.handler.delete_chunk(chunk_id).await;
-    assert!(
-        matches!(result, Err(LifecycleError::ChunkNotFound)),
-        "second delete should return ChunkNotFound, got {result:?}"
-    );
-    eprintln!("second delete returned ChunkNotFound (correct)");
+    // 9. Delete again → should return the same idempotent tombstone.
+    let deleted_again = harness
+        .handler
+        .delete_chunk(chunk_id)
+        .await
+        .expect("idempotent delete");
+    assert_eq!(deleted_again.state, ChunkState::Deleted as i32);
+    eprintln!("second delete returned Deleted (idempotent)");
 
     // 10. Query after delete → should return the deleted chunk (state=Deleted).
     let queried_after = harness
@@ -328,8 +329,7 @@ async fn chunkdb_lock_serializes_concurrent_delete() {
     let chunk_id = *chunk.id.as_ref().expect("chunk has id");
 
     // Two concurrent deletes on the same chunk — the lock serializes
-    // them: exactly one succeeds (Deleted), the other sees Deleted
-    // state and returns ChunkNotFound.
+    // them and both return the same idempotent Deleted result.
     let h1 = Arc::clone(&harness.handler);
     let h2 = Arc::clone(&harness.handler);
     let id1 = chunk_id;
@@ -342,11 +342,9 @@ async fn chunkdb_lock_serializes_concurrent_delete() {
     .await
     .expect("no deadlock — both deletes completed within 10s");
 
-    let ok_count = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
-    assert_eq!(ok_count, 1, "exactly one delete should succeed, got {ok_count}");
-    let deleted = if let Ok(c) = &r1 { c } else { r2.as_ref().unwrap() };
-    assert_eq!(deleted.state, ChunkState::Deleted as i32);
-    eprintln!("concurrent delete serialized: one Ok, one Err (ChunkNotFound)");
+    assert_eq!(r1.expect("first delete").state, ChunkState::Deleted as i32);
+    assert_eq!(r2.expect("second delete").state, ChunkState::Deleted as i32);
+    eprintln!("concurrent delete serialized: both return Deleted");
 }
 
 #[tokio::test]

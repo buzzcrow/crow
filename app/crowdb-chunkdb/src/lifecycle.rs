@@ -650,8 +650,7 @@ impl LifecycleHandler {
     }
 
     /// Delete a chunk — marks deleted and frees segments.
-    /// Returns `ChunkNotFound` if the chunk is already deleted (callers
-    /// that want idempotent delete treat `NOT_FOUND` as success).
+    /// Repeated deletion returns the existing tombstone so retries are idempotent.
     pub async fn delete_chunk(&self, chunk_id: &ChunkId) -> Result<Chunk, LifecycleError> {
         self.check_range(chunk_id)?;
 
@@ -677,7 +676,7 @@ impl LifecycleHandler {
         // A Deleted record that still owns strips is a durable cleanup intent.
         if current_state == ChunkState::Deleted {
             if chunk.strips.is_empty() {
-                return Err(LifecycleError::ChunkNotFound);
+                return Ok(chunk);
             }
             let segments: Vec<_> = chunk.strips.iter().flat_map(extract_segments).collect();
             self.allocator

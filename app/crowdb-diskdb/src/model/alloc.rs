@@ -472,9 +472,16 @@ pub async fn commit_blocks(
                 reason: "missing disk_id in Segment".to_string(),
             })
         })?;
-        let busy = kv
-            .get_busy(bind, &disk_id, seg.zone_index, seg.unit_offset)
-            .await?;
+        let mut busy = None;
+        for attempt in 0..=9_u32 {
+            busy = kv
+                .get_busy(bind, &disk_id, seg.zone_index, seg.unit_offset)
+                .await?;
+            if busy.is_some() || attempt == 9 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1_u64 << attempt)).await;
+        }
         match busy {
             None => {
                 return Err(FreeError::NotBusy {

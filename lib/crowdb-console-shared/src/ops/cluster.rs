@@ -10,7 +10,9 @@
 //! servers.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
+use crowdb_kv_client::RangeBindingClient;
 use crowdb_protocol::common::{HwStatus, NodeValue, RackValue, ReplicaValue};
 use crowdb_protocol::mgmt::{RemoteReplicaInfo, SystemInitRequest};
 use crowdb_protocol::port_alloc::{self, PortAllocConfig};
@@ -767,8 +769,39 @@ pub async fn local_deploy_chunkdb(
         })?;
     }
     wait_for_chunkdb_registration(ctx, instance_count).await?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    wait_for_chunkdb_bindings(ctx, instance_count).await?;
     Ok(LocalChunkdbDeploySummary { instance_count })
+}
+
+async fn wait_for_chunkdb_bindings(ctx: &OpContext, expected_instances: usize) -> Result<()> {
+    let bindings = RangeBindingClient::from_shared(Arc::clone(ctx.kv_arc()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(35);
+    loop {
+        if bindings.refresh().await.is_ok() {
+            let snapshot = bindings.snapshot();
+            let instance_ids = snapshot
+                .iter()
+                .map(|binding| binding.instance_id)
+                .collect::<HashSet<_>>();
+            let mut next_bucket = 0_u32;
+            for binding in &snapshot {
+                if u32::from(binding.range_start) != next_bucket {
+                    break;
+                }
+                next_bucket = u32::from(binding.range_end) + 1;
+            }
+            if next_bucket == u32::from(u16::MAX) + 1 && instance_ids.len() == expected_instances {
+                return Ok(());
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::UpstreamRpc {
+                node_id: "group0-chunkdb-bindings".into(),
+                status: "complete chunkdb bucket ownership was not published before timeout".into(),
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 async fn wait_for_chunkdb_registration(ctx: &OpContext, expected: usize) -> Result<()> {

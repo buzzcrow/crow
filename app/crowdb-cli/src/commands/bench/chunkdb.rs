@@ -69,12 +69,21 @@ pub async fn run(cli: &Cli, verb: ChunkdbBenchVerb) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let range_bindings = RangeBindingClient::from_shared(Arc::clone(&kv));
+    if let Err(error) = range_bindings.refresh().await {
+        eprintln!("chunkdb range discovery failed: {error}");
+        return ExitCode::FAILURE;
+    }
+    if range_bindings.snapshot().is_empty() {
+        eprintln!("chunkdb range discovery failed: binding table is empty");
+        return ExitCode::FAILURE;
+    }
     let client = Arc::new(
         ChunkdbClient::new(
-            ServiceRegistryClient::from_shared(Arc::clone(&kv)),
+            ServiceRegistryClient::from_shared(kv),
             Arc::new(ChunkdbRpcTransport::new()),
         )
-        .with_range_binding(RangeBindingClient::from_shared(kv)),
+        .with_range_binding(range_bindings),
     );
     if let Err(error) = client.refresh_endpoints().await {
         eprintln!("chunkdb discovery failed: {error}");
@@ -134,32 +143,41 @@ async fn run_task(
     while Instant::now() < deadline {
         let started = Instant::now();
         let action = if mixed { rng.gen_range(0..100) } else { 0 };
-        let outcome = if action < 50 || result.live.is_empty() {
-            allocate(&client, &args).await.map(|id| result.live.push(id))
+        let (action_name, outcome) = if action < 50 || result.live.is_empty() {
+            (
+                "allocate",
+                allocate(&client, &args).await.map(|id| result.live.push(id)),
+            )
         } else {
             let index = rng.gen_range(0..result.live.len());
             let id = result.live[index];
             if action < 70 {
-                query(&client, id).await.map(|_| ())
+                ("query", query(&client, id).await.map(|_| ()))
             } else if action < 80 {
                 if sealed.contains(&id) {
-                    query(&client, id).await.map(|_| ())
+                    ("query-sealed", query(&client, id).await.map(|_| ()))
                 } else {
-                    append(&client, id, &args).await
+                    ("append", append(&client, id, &args).await)
                 }
             } else if action < 90 {
                 if sealed.contains(&id) {
-                    query(&client, id).await.map(|_| ())
+                    ("query-sealed", query(&client, id).await.map(|_| ()))
                 } else {
-                    seal(&client, id).await.map(|()| {
-                        sealed.insert(id);
-                    })
+                    (
+                        "seal",
+                        seal(&client, id).await.map(|()| {
+                            sealed.insert(id);
+                        }),
+                    )
                 }
             } else {
-                delete(&client, id).await.map(|()| {
-                    result.live.swap_remove(index);
-                    sealed.remove(&id);
-                })
+                (
+                    "delete",
+                    delete(&client, id).await.map(|()| {
+                        result.live.swap_remove(index);
+                        sealed.remove(&id);
+                    }),
+                )
             }
         };
         match outcome {
@@ -174,7 +192,7 @@ async fn run_task(
                     result.exhausted = true;
                     break;
                 }
-                eprintln!("chunkdb benchmark operation failed: {error}");
+                eprintln!("chunkdb benchmark {action_name} failed: {error}");
                 result.errors += 1;
             }
         }

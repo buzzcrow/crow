@@ -53,7 +53,9 @@ impl BindingTable {
 
     /// Route a bucket to its binding.
     pub fn route(&self, bucket: u16) -> Option<&BucketBinding> {
-        self.bindings.iter().find(|b| bucket >= b.start && bucket < b.end)
+        self.bindings
+            .iter()
+            .find(|b| bucket >= b.start && (bucket < b.end || (b.end == u16::MAX && bucket == u16::MAX)))
     }
 
     /// Number of bindings.
