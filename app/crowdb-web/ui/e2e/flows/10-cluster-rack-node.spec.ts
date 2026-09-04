@@ -211,9 +211,11 @@ test.describe('cluster · rack + node CRUD', () => {
           await expect(ddbTypeDd).toHaveText('DiskDB', { timeout: 3_000 });
           await expect(inspector.getByText(/service_type/i)).toHaveCount(0);
 
-          // Selecting the KV item shows Type = "KV". KV-xxx tree items
-          // are in the KV domain, not the Cluster domain.
-          await page.getByTestId('domain-kv').click();
+          // Selecting the KV server shows Type = "KV". KV servers live
+          // beneath their physical node in the Cluster domain.
+          await page.getByTestId('domain-cluster').click();
+          const clusterNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` });
+          if (await clusterNode.getByRole('button', { name: 'Expand' }).count()) await clusterNode.getByRole('button', { name: 'Expand' }).first().click();
           await aside.getByText(`KV-${nodeId}`, { exact: true }).click();
           const kvTypeDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Type' }) }).locator('dd');
           await expect(kvTypeDd).toHaveText('KV', { timeout: 3_000 });

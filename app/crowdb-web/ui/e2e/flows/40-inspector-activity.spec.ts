@@ -20,7 +20,6 @@ import { step } from '../fixtures/stepTimer';
 async function openKvPanel(page: any, storeId: string, groupId: string) {
   await step('inspector: goto', () => page.goto('/'));
   await page.getByTestId('domain-kv').click();
-  await page.getByTestId('kv-tab-kv').click();
   await page.getByTestId('kv-store-select').selectOption(storeId);
   await page.getByTestId('kv-group-select').selectOption(groupId);
 }
@@ -111,9 +110,9 @@ test.describe('inspector · activity log', () => {
       const pingToast = page.getByRole('alert').filter({ hasText: /ping/i });
       await expect(pingToast).toBeVisible({ timeout: 10_000 });
 
-      // Restart and Stop are on the server (KV) context menu. KV-xxx
-      // tree items are in the KV domain, not the Cluster domain.
-      await page.getByTestId('domain-kv').click();
+      // Restart and Stop are on the KV server context menu. KV-xxx
+      // tree items are in the Cluster domain under their physical node.
+      await page.getByTestId('domain-cluster').click();
       const serverItem = page.getByRole('treeitem').filter({ hasText: 'KV-47' });
       await expect(serverItem).toBeVisible({ timeout: 5_000 });
 

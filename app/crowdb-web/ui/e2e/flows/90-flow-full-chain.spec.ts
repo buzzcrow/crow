@@ -131,7 +131,13 @@ test.describe('flow · full chain', () => {
     // --- KV via KV Operator panel ---
     await step('full-chain: KV put UI', async () => {
       await page.getByTestId('domain-kv').click();
-  await page.getByTestId('kv-tab-kv').click();
+
+      // Wait for the KV operator panel to load stores, then select the
+      // test store and group so the Put inputs are rendered.
+      await expect(page.getByTestId('kv-store-select')).toBeVisible({ timeout: 5_000 });
+      await page.getByTestId('kv-store-select').selectOption('7');
+      await expect(page.getByTestId('kv-group-select')).toBeVisible({ timeout: 5_000 });
+      await page.getByTestId('kv-group-select').selectOption('70');
 
       // Put
       await page.getByLabel('Put key').fill('smoke-key');

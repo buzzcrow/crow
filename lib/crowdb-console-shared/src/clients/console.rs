@@ -209,7 +209,12 @@ pub struct KvScanResponse {
 pub struct ServerSummary {
     #[serde(default)]
     pub node_id: Option<NodeId>,
-    pub mgmt_url: String,
+    /// KV management URL; absent for `DiskDB`.
+    #[serde(default)]
+    pub mgmt_url: Option<String>,
+    /// Public service endpoint; used by `DiskDB`.
+    #[serde(default)]
+    pub endpoint: Option<String>,
     #[serde(default)]
     pub rpc_url: Option<String>,
     #[serde(default)]

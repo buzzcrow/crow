@@ -279,7 +279,8 @@ pub enum ServiceType {
 pub struct ServerEntry {
     /// Console-side identifier; must be unique within the file.
     pub id: String,
-    /// `crowdb-kv-server` management base URL, e.g. `http://127.0.0.1:10000`.
+    /// Service URL. For KV this is the `crowdb-kv-server` management base
+    /// URL; for `DiskDB` this is its public crowdb-rpc endpoint.
     pub url: String,
     /// Owning node id; populated for console-deployed instances. `None`
     /// for plain "registered external server" entries from C2.

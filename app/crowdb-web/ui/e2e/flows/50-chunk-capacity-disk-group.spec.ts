@@ -720,7 +720,7 @@ test.describe('chunk · capacity · disk-group', () => {
       // unconditionally, and KV health is derived from the same shared
       // node record, so the KV badge flipped to Down even though the KV
       // process was still running.
-      await page.getByTestId('domain-kv').click();
+      await page.getByTestId('domain-cluster').click();
       await expect(aside.getByText(`KV-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       const kvItemAfterDdbStop = aside.getByRole('treeitem').filter({ hasText: `KV-${nodeId}` });
       await expect(kvItemAfterDdbStop.getByTitle('Healthy')).toBeVisible({ timeout: 10_000 });
@@ -757,7 +757,7 @@ test.describe('chunk · capacity · disk-group', () => {
       // Regression: http_stop_node_server dropped the shared monitor_cache
       // entry, making DDB health go Unknown. Also, server_for_node could
       // find DDB instead of KV.
-      await page.getByTestId('domain-kv').click();
+      await page.getByTestId('domain-cluster').click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNode.count() > 0) await expandNode.first().click();
@@ -809,8 +809,8 @@ test.describe('chunk · capacity · disk-group', () => {
       await expect(ddbItemAfterKvStop.getByTitle('Healthy')).toBeVisible({ timeout: 10_000 });
 
       // --- restart KV, verify DDB unaffected ---
-      // Switch to KV domain to restart KV.
-      await page.getByTestId('domain-kv').click();
+      // KV server lifecycle actions remain in the Cluster domain.
+      await page.getByTestId('domain-cluster').click();
       await expect(aside.getByText(`KV-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       const kvRestartResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/server/restart'));
       await clickMenuItem(page, aside.getByText(`KV-${nodeId}`, { exact: true }), /restart crowdb storage/i);
@@ -857,8 +857,8 @@ test.describe('chunk · capacity · disk-group', () => {
       // Regression: delete DDB appeared to delete both because the
       // restart bug had already removed the KV entry.
       await expect(aside.getByText(`DDB-${nodeId}`, { exact: true })).toHaveCount(0, { timeout: 10_000 });
-      // Switch to KV domain to verify KV still exists.
-      await page.getByTestId('domain-kv').click();
+      // Switch to Cluster domain to verify the KV server still exists.
+      await page.getByTestId('domain-cluster').click();
       await expect(aside.getByText(`KV-${nodeId}`, { exact: true })).toBeVisible();
 
       {

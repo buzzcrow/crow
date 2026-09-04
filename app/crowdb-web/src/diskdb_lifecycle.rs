@@ -3,7 +3,7 @@
 
 //! `DiskDB` instance deploy / restart / stop / delete handlers (R77).
 //! These manage the `crowdb-diskdb` process lifecycle via
-//! `crowdb_console_shared::lifecycle::deploy_diskdb_local` (local-fork
+//! `lifecycle::deploy_diskdb_local` (local-fork
 //! only; SSH is a C4 follow-up). The runtime REST proxy
 //! (`/api/diskdb/*`) lives in `crate::diskdb`.
 
@@ -14,18 +14,32 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{err_400, err_500, err_502, ErrorBody};
 use crate::state::AppState;
+use crowdb_console_shared::config::ServiceType;
+use crowdb_console_shared::lifecycle::{self, DiskdbDeployRequest};
 
 #[derive(Debug, Deserialize)]
 pub struct DeployDiskdbBody {
     pub rpc_port: u16,
-    /// Main listener port. When omitted, derived from `rpc_port` (old
-    /// paired-port behavior: listen = `rpc_port`).
+    /// Main listener port. When omitted, derived from `rpc_port`.
     #[serde(default)]
     pub listen_port: Option<u16>,
-    /// HTTP management port. When omitted, derived from `rpc_port`
-    /// (old paired-port behavior: http = `rpc_port` + 1).
+    /// Internal HTTP health port. When omitted, derived from `rpc_port`.
     #[serde(default)]
     pub http_port: Option<u16>,
+}
+
+fn validate_diskdb_ports(body: &DeployDiskdbBody) -> Result<(u16, u16, u16), (StatusCode, Json<ErrorBody>)> {
+    let listen_port = body.listen_port.unwrap_or(body.rpc_port);
+    let http_port = body.http_port.unwrap_or_else(|| body.rpc_port.saturating_add(1));
+    let rpc_listen_port = body.rpc_port.saturating_add(2);
+    let ports = [listen_port, http_port, rpc_listen_port];
+    if ports.contains(&0) || body.rpc_port > 65_533 {
+        return Err(err_400("DiskDB ports must be in the range 1..=65535"));
+    }
+    if ports[0] == ports[1] || ports[0] == ports[2] || ports[1] == ports[2] {
+        return Err(err_400("DiskDB listener ports must be distinct"));
+    }
+    Ok((listen_port, http_port, rpc_listen_port))
 }
 
 /// `POST /api/nodes/:id/diskdb/deploy` — spawn `crowdb-diskdb` on the
@@ -48,9 +62,7 @@ pub async fn http_deploy_diskdb(
     Path(node_id): Path<u64>,
     Json(body): Json<DeployDiskdbBody>,
 ) -> Result<(StatusCode, Json<DiskdbDeployResult>), (StatusCode, Json<ErrorBody>)> {
-    use crowdb_console_shared::config::ServiceType;
-    use crowdb_console_shared::lifecycle::{self, DiskdbDeployRequest};
-
+    let (listen_port, http_port, rpc_listen_port) = validate_diskdb_ports(&body)?;
     let node = {
         let cfg = state.config.read().unwrap();
         // Check for existing diskdb instance on this node.
@@ -88,12 +100,6 @@ pub async fn http_deploy_diskdb(
             .collect()
     };
 
-    // Backward-compat: when listen_port/http_port are not provided,
-    // derive from the old paired-port scheme (listen=rpc, http=rpc+1,
-    // crowdb-rpc=rpc+2).
-    let listen_port = body.listen_port.unwrap_or(body.rpc_port);
-    let http_port = body.http_port.unwrap_or(body.rpc_port.saturating_add(1));
-    let rpc_listen_port = body.rpc_port.saturating_add(2);
     let req = DiskdbDeployRequest {
         server_id: format!("diskdb-{node_id}"),
         listen_port,
@@ -111,9 +117,11 @@ pub async fn http_deploy_diskdb(
 
     let entry = crowdb_console_shared::config::ServerEntry {
         id: format!("diskdb-{node_id}"),
-        url: deployed.mgmt_url.clone(),
+        // DiskDB has no public HTTP management URL; retain its RPC endpoint
+        // as the service URL and endpoint for persisted topology metadata.
+        url: deployed.endpoint.clone(),
         node_id: Some(node_id),
-        rpc_url: Some(deployed.rpc_url.clone()),
+        rpc_url: Some(deployed.endpoint.clone()),
         rest_port: None,
         rpc_port: Some(body.rpc_port),
         auto_start: true,
@@ -152,8 +160,7 @@ pub async fn http_deploy_diskdb(
         StatusCode::CREATED,
         Json(DiskdbDeployResult {
             node_id,
-            mgmt_url: deployed.mgmt_url,
-            rpc_url: deployed.rpc_url,
+            endpoint: deployed.endpoint,
             pid: deployed.pid,
         }),
     ))
@@ -174,9 +181,6 @@ pub async fn http_restart_diskdb(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<Json<DiskdbDeployResult>, (StatusCode, Json<ErrorBody>)> {
-    use crowdb_console_shared::config::ServiceType;
-    use crowdb_console_shared::lifecycle::{self, DiskdbDeployRequest};
-
     let (entry, node) = {
         let cfg = state.config.read().unwrap();
         let entry = cfg
@@ -247,9 +251,11 @@ pub async fn http_restart_diskdb(
 
     let new_entry = crowdb_console_shared::config::ServerEntry {
         id: entry.id.clone(),
-        url: deployed.mgmt_url.clone(),
+        // DiskDB has no public HTTP management URL; retain its RPC endpoint
+        // as the service URL and endpoint for persisted topology metadata.
+        url: deployed.endpoint.clone(),
         node_id: Some(node_id),
-        rpc_url: Some(deployed.rpc_url.clone()),
+        rpc_url: Some(deployed.endpoint.clone()),
         rest_port: None,
         rpc_port: Some(rpc_port),
         auto_start: entry.auto_start,
@@ -295,8 +301,7 @@ pub async fn http_restart_diskdb(
 
     Ok(Json(DiskdbDeployResult {
         node_id,
-        mgmt_url: deployed.mgmt_url,
-        rpc_url: deployed.rpc_url,
+        endpoint: deployed.endpoint,
         pid: deployed.pid,
     }))
 }
@@ -316,9 +321,6 @@ pub async fn http_stop_diskdb(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<Json<crate::lifecycle::StopResult>, (StatusCode, Json<ErrorBody>)> {
-    use crowdb_console_shared::config::ServiceType;
-    use crowdb_console_shared::lifecycle;
-
     {
         let cfg = state.config.read().unwrap();
         let exists = cfg
@@ -368,9 +370,6 @@ pub async fn http_delete_diskdb(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    use crowdb_console_shared::config::ServiceType;
-    use crowdb_console_shared::lifecycle;
-
     let pid = {
         let cfg = state.config.read().unwrap();
         if !cfg
@@ -421,7 +420,7 @@ pub async fn http_delete_diskdb(
 #[derive(Debug, Serialize)]
 pub struct DiskdbDeployResult {
     pub node_id: u64,
-    pub mgmt_url: String,
-    pub rpc_url: String,
+    /// Public crowdb-rpc endpoint used by `DiskDB` clients.
+    pub endpoint: String,
     pub pid: u32,
 }

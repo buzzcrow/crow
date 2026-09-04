@@ -3,7 +3,7 @@
 // Baseline: 2s (2026-08-16)
 
 import { test, expect, consoleBaseURL } from '../fixtures/realBackend';
-import { createRack, createNode, deployNodeServer, stopNodeServer, freePort } from '../fixtures/consoleSetup';
+import { createRack, createNode, deployNodeServer, stopNodeServer, freePort, resetAll } from '../fixtures/consoleSetup';
 import { step } from '../fixtures/stepTimer';
 
 // One rack/node/server shared by every test in this file so the canvas
@@ -13,26 +13,12 @@ const apiBase = consoleBaseURL();
 
 test.describe('canvas · fit + pan', () => {
   test.beforeAll(async () => {
-    // Idempotent setup: tolerate "already exists" from a prior run
-    // that was interrupted before afterAll could clean up.
-    try {
-      await step('canvas: create rack', () => createRack(apiBase, { id: 480, name: 'Rack 480' }));
-    } catch (err) {
-      if (!String(err).includes('already exists')) throw err;
-    }
-    try {
-      await step('canvas: create node', () => createNode(apiBase, { id: 480, rack_id: 480 }));
-    } catch (err) {
-      if (!String(err).includes('already exists')) throw err;
-    }
-    // Stop any leftover server from a prior run, then deploy fresh.
-    await step('canvas: stop leftover server', () => stopNodeServer(apiBase, 480));
-    try {
-      await step('canvas: deploy server', () => deployNodeServer(apiBase, 480, freePort(), freePort()));
-    } catch (err) {
-      await stopNodeServer(apiBase, 480);
-      throw err;
-    }
+    // Reset to clear any leftover server entries from prior runs that
+    // may not have cleaned up (port collisions on re-deploy).
+    await step('canvas: resetAll', () => resetAll(apiBase));
+    await step('canvas: create rack', () => createRack(apiBase, { id: 480, name: 'Rack 480' }));
+    await step('canvas: create node', () => createNode(apiBase, { id: 480, rack_id: 480 }));
+    await step('canvas: deploy server', () => deployNodeServer(apiBase, 480, freePort(), freePort()));
   });
 
   test.afterAll(async () => {
@@ -52,9 +38,9 @@ test.describe('canvas · fit + pan', () => {
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
     await expect(fitBtn).toBeVisible();
 
-    // --- Fit All button visible in KV Cluster view (empty canvas) ---
+    // --- KV domain shows the operator panel (no canvas, no Fit All) ---
     await page.getByTestId('domain-kv').click();
-    await expect(page.getByTestId('fit-all-btn')).toBeVisible();
+    await expect(page.getByText(/No stores available|Store/i)).toBeVisible({ timeout: 5_000 });
 
     // --- Capacity view shows the CapacityPanel (no canvas) ---
     await page.getByTestId('domain-chunk').click();
@@ -144,10 +130,9 @@ test.describe('canvas · fit + pan', () => {
     const pannedTransform = await viewport.evaluate((el) => (el as HTMLElement).style.transform);
     expect(pannedTransform).not.toEqual(fittedTransform);
 
-    // Switch to KV Cluster view — canvas should fit to window (no nodes
-    // in KV Cluster since no stores, but the button must be visible).
+    // Switch to KV view — no canvas here, just the operator panel.
     await page.getByTestId('domain-kv').click();
-    await expect(page.getByTestId('fit-all-btn')).toBeVisible();
+    await expect(page.getByText(/No stores available|Store/i)).toBeVisible({ timeout: 5_000 });
 
     // Switch back to Cluster — should fit to window, NOT restore the
     // panned viewport. The transform should match the fitted state

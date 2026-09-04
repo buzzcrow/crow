@@ -321,8 +321,8 @@ async fn ensure_diskdb_running(
         .await
         .map_err(|e| e.to_string())?;
     state.set_diskdb_runtime_pid(node.id, deployed.pid);
-    // Update the persisted entry with the fresh mgmt_url/rpc_url in
-    // case the HTTP listen address changed (e.g. port rotation).
+    // Update the persisted entry with the fresh RPC endpoint. The HTTP
+    // readiness URL is intentionally lifecycle-local and is not persisted.
     {
         let mut cfg = state.config.write().unwrap();
         if let Some(entry) = cfg
@@ -330,8 +330,8 @@ async fn ensure_diskdb_running(
             .iter_mut()
             .find(|s| s.node_id == Some(node.id) && s.service_type == ServiceType::Diskdb)
         {
-            entry.url.clone_from(&deployed.mgmt_url);
-            entry.rpc_url = Some(deployed.rpc_url.clone());
+            entry.url.clone_from(&deployed.endpoint);
+            entry.rpc_url = Some(deployed.endpoint.clone());
         }
     }
     state.persist().map_err(|e| e.to_string())?;

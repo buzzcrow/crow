@@ -644,6 +644,25 @@ pub async fn wait_for_disks_ready(
     }
 }
 
+/// Wait until the topology cache contains the seeded healthy disk-groups.
+async fn wait_for_topology_ready(topology: &TopologyCache) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let snap = topology.snapshot();
+        if snap.healthy_disk_groups().len() >= seeded_dg_ids().len() {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "topology not ready after 10s: racks={}, disk_groups={}, healthy_disk_groups={}",
+            snap.rack_ids().len(),
+            snap.disk_group_count(),
+            snap.healthy_disk_groups().len()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 // ── chunkdb handler ─────────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -670,8 +689,7 @@ impl ChunkdbHarness {
             run_refresh_loop(refresh_cache, hw, Duration::from_secs(5), stop_rx).await;
         });
 
-        // Wait for topology to populate.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        wait_for_topology_ready(&topology).await;
 
         // Binding cache — all buckets to store 0, group 1.
         let bindings = BindingCache::new();

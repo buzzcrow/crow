@@ -16,7 +16,6 @@ import { Sidebar } from './shell/Sidebar';
 import { ToastContainer } from './components/ToastContainer';
 import { TreeNode } from './components/Tree';
 import { ContextMenu, useContextMenu, MenuItemOrSeparator } from './components/ContextMenu';
-import { cn } from './utils/cn';
 import type { MenuTarget } from './topology/TopologyCanvas';
 import {
   AddRackDialog,
@@ -63,13 +62,11 @@ import { deployPortDefaultsForNode, diskdbPortDefaultsForNode, nextIdFromSuffix,
 import { buildCrowdbKVServers, crowdbKvServerNodeIds } from './data/crowdbKvServers';
 import { isCrowdbKVServerAvailable } from './data/crowdbKvServers';
 import { toUiHealth, HW_STATUS_NAMES } from './utils/entityDisplay';
+import { ClusterView } from './views/ClusterView';
+import { KvView } from './views/KvView';
+import { ChunkView } from './views/ChunkView';
 
-const TopologyCanvas = lazy(() =>
-  import('./topology/TopologyCanvas').then((m) => ({ default: m.TopologyCanvas })),
-);
 const Inspector = lazy(() => import('./shell/Inspector').then((m) => ({ default: m.Inspector })));
-const KvOperatorPanel = lazy(() => import('./panels/KvOperatorPanel').then((m) => ({ default: m.KvOperatorPanel })));
-const CapacityPanel = lazy(() => import('./panels/CapacityPanel').then((m) => ({ default: m.CapacityPanel })));
 
 export interface CrowdbConsoleProps {
   /** API prefix for all backend calls (default "/api"). */
@@ -408,6 +405,20 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
               });
             }),
           });
+        } else if (t.type === 'DiskGroup') {
+          const dgId = Number(t.rawId);
+          const nodeId = Number(p.node_id);
+          const rackId = Number(p.rack_id);
+          items.push({ id: 'add-disk', label: 'Add Disk', icon: <HardDrive className="tw-h-4 tw-w-4" />, onSelect: () => setDialog((d) => ({ ...d, addDisk: { nodeId, dgId } })) });
+          items.push({ id: 'dg-status', label: 'Change Status', icon: <Activity className="tw-h-4 tw-w-4" />, submenu: buildStatusSubmenu((status) => runMutation(`Set DG ${status}`, t.label || t.id, () => setDiskGroupStatus(rackId, nodeId, dgId, status))) });
+          items.push({ id: 'assign-dg', label: 'Assign to DiskDB', icon: <Server className="tw-h-4 tw-w-4" />, onSelect: () => setDialog((d) => ({ ...d, assignDiskGroup: { rackId, nodeId, dgId, dgName: t.label } })) });
+          items.push({ id: 'del-dg', label: 'Delete Disk Group', icon: <Trash2 className="tw-h-4 tw-w-4" />, destructive: true, onSelect: () => requestDelete('Disk Group', dgId, async () => { await runMutation('Delete Disk Group', t.label || t.id, () => removeDiskGroup(nodeId, dgId)); }, 'All disks in this disk group will also be removed.') });
+        } else if (t.type === 'Disk') {
+          const diskId = String(p.disk_id || t.rawId || t.id);
+          const nodeId = Number(p.node_id);
+          const dgId = Number(p.disk_group_id);
+          items.push({ id: 'disk-status', label: 'Change Status', icon: <Activity className="tw-h-4 tw-w-4" />, submenu: buildStatusSubmenu((status) => runMutation(`Set Disk ${status}`, t.label || t.id, () => setDiskStatus(diskId, status))) });
+          items.push({ id: 'del-disk', label: 'Delete Disk', icon: <Trash2 className="tw-h-4 tw-w-4" />, destructive: true, onSelect: () => requestDelete('Disk', diskId, async () => { await runMutation('Delete Disk', diskId, () => removeDisk(nodeId, dgId, diskId)); }) });
         } else if (t.type === 'Server') {
           // Server context menu: dispatch on serviceType (KV vs DiskDB).
           const nodeId = Number(p.node_id);
@@ -949,90 +960,50 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
           marginRight: selectedEntity ? inspectorWidth : 0,
         }}
       >
-        {/* Per-domain center-panel tab bar / toggle */}
+        {domain === Domain.Cluster && (
+          <ClusterView
+            racks={racks}
+            nodes={nodes}
+            servers={servers}
+            stores={stores}
+            nodeStores={nodeStores}
+            nodeHealthById={nodeHealthById}
+            diskdbNodeIds={diskdbNodeIds}
+            diskdbInstances={diskdbInstances}
+            nodeDiskGroups={nodeDiskGroups}
+            refreshToken={lastRefreshTime.getTime()}
+            focusRequest={canvasFocusRequest}
+            onEntityContextMenu={onCanvasContextMenu}
+          />
+        )}
         {domain === Domain.KV && kvEnabled && (
-          <div className="tw-flex tw-items-center tw-gap-1 tw-px-4 tw-py-1.5 tw-border-b tw-border-border tw-bg-panel">
-            <button
-              data-testid="kv-tab-cluster"
-              onClick={() => setCenterPanel('topology')}
-              className={cn(
-                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
-                centerPanel === 'topology' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
-              )}
-              aria-pressed={centerPanel === 'topology'}
-            >
-              Cluster
-            </button>
-            <button
-              data-testid="kv-tab-kv"
-              onClick={() => setCenterPanel('kv')}
-              className={cn(
-                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
-                centerPanel === 'kv' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
-              )}
-              aria-pressed={centerPanel === 'kv'}
-            >
-              KV
-            </button>
-          </div>
+          <KvView stores={stores} selectedEntity={selectedEntity} readonly={readonly} backendError={!!dataError} loading={loading} />
         )}
         {domain === Domain.Chunk && (
-          <div className="tw-flex tw-items-center tw-gap-1 tw-px-4 tw-py-1.5 tw-border-b tw-border-border tw-bg-panel">
-            <button
-              data-testid="chunk-tab-capacity"
-              onClick={() => setCenterPanel('capacity')}
-              className={cn(
-                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
-                centerPanel === 'capacity' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
-              )}
-              aria-pressed={centerPanel === 'capacity'}
-            >
-              Capacity
-            </button>
-            <button
-              data-testid="chunk-tab-chunk"
-              onClick={() => setCenterPanel('chunk')}
-              className={cn(
-                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
-                centerPanel === 'chunk' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
-              )}
-              aria-pressed={centerPanel === 'chunk'}
-            >
-              Chunk
-            </button>
-          </div>
+          <ChunkView
+            centerPanel={centerPanel}
+            onCenterPanelChange={setCenterPanel}
+            instances={diskdbInstances}
+            usage={capacityUsage}
+            hardwareCapacity={hardwareCapacity}
+            scanStatus={capacityScanStatus}
+            loading={capLoading}
+            readonly={readonly}
+            onRefresh={refreshCapacity}
+            selectedEntity={selectedEntity}
+            racks={racks}
+            nodes={nodes}
+            servers={servers}
+            stores={stores}
+            nodeStores={nodeStores}
+            nodeHealthById={nodeHealthById}
+            diskdbNodeIds={diskdbNodeIds}
+            nodeDiskGroups={nodeDiskGroups}
+            refreshToken={lastRefreshTime.getTime()}
+            focusRequest={canvasFocusRequest}
+            onEntityContextMenu={onCanvasContextMenu}
+          />
         )}
-        <Suspense fallback={<BodyFallback />}>
-          {domain === Domain.Chunk && centerPanel === 'capacity' ? (
-            <CapacityPanel
-              instances={diskdbInstances}
-              usage={capacityUsage}
-              hardwareCapacity={hardwareCapacity}
-              scanStatus={capacityScanStatus}
-              loading={capLoading}
-              readonly={readonly}
-              onRefresh={refreshCapacity}
-              selectedEntity={selectedEntity}
-            />
-          ) : domain === Domain.KV && centerPanel === 'kv' && kvEnabled ? (
-            <KvOperatorPanel stores={stores} selectedEntity={selectedEntity} readonly={readonly} backendError={!!dataError} loading={loading} />
-          ) : (
-            <TopologyCanvas
-              racks={racks}
-              nodes={nodes}
-              servers={servers}
-              stores={stores}
-              nodeStores={nodeStores}
-              nodeHealthById={nodeHealthById}
-              diskdbNodeIds={diskdbNodeIds}
-              diskdbInstances={diskdbInstances}
-              nodeDiskGroups={nodeDiskGroups}
-              refreshToken={lastRefreshTime.getTime()}
-              focusRequest={canvasFocusRequest}
-              onEntityContextMenu={onCanvasContextMenu}
-            />
-          )}
-        </Suspense>
       </main>
 
       <Suspense fallback={null}>
@@ -1068,6 +1039,10 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
           defaultRpcPort={addNodeDeployDefaults.defaultRpcPort}
           defaultDiskdbRpcPort={addNodeDeployDefaults.defaultDiskdbRpcPort}
           onCreatedRackId={(rackId) => setLastUsedRackId(Number(rackId))}
+          onDiskdbPortReserved={(port) => setRememberedDeployPorts((prev) => ({
+            ...prev,
+            diskdbRpc: prev.diskdbRpc.includes(port) ? prev.diskdbRpc : [...prev.diskdbRpc, port],
+          }))}
           onSuccess={handleRefresh}
         />
       )}
@@ -1226,14 +1201,6 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
       )}
 
       <ToastContainer />
-    </div>
-  );
-}
-
-function BodyFallback() {
-  return (
-    <div className="tw-w-full tw-h-full tw-flex tw-items-center tw-justify-center tw-text-muted tw-text-sm">
-      Loading…
     </div>
   );
 }

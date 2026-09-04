@@ -8,50 +8,13 @@ use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use crowdb_console_shared::cluster::{DiskGroupId, NodeHealth, NodeId, ProcState, RackId, ServerProcess};
+use crowdb_console_shared::cluster::{DiskGroupId, NodeHealth, NodeId, RackId};
 use crowdb_console_shared::config::{
     DiskEntry, DiskGroupEntry, NodeEntry, RackEntry, ServerEntry, ServiceType,
 };
 use crowdb_console_shared::expand::RecursiveDepth;
-use crowdb_console_shared::monitor::NodeRecord;
 use crowdb_console_shared::ops;
 use serde::{Deserialize, Serialize};
-
-fn live_server_process(entry: &ServerEntry, rec: Option<&NodeRecord>) -> ServerProcess {
-    let health = rec.map_or(NodeHealth::Unknown, |node| node.health);
-    let state = match health {
-        NodeHealth::Up => ProcState::Running,
-        NodeHealth::Down => ProcState::Failed,
-        NodeHealth::Unknown => ProcState::Unknown,
-    };
-    ServerProcess {
-        mgmt_url: entry.url.clone(),
-        rpc_url: entry.rpc_url.clone().unwrap_or_default(),
-        pid: None,
-        state,
-        health,
-        last_seen_ms: rec.map_or(0, |node| node.last_seen_ms),
-    }
-}
-
-fn live_server_process_with_pid(
-    state: &AppState,
-    entry: &ServerEntry,
-    rec: Option<&NodeRecord>,
-) -> ServerProcess {
-    let mut proc = live_server_process(entry, rec);
-    if let Some(node_id) = entry.node_id {
-        proc.pid = state.runtime_pid(node_id.to_string());
-        // Override health to Down if no PID is tracked — the process
-        // was stopped or the console restarted. The monitor cache may
-        // be stale (no background polling to update it).
-        if proc.pid.is_none() {
-            proc.health = NodeHealth::Down;
-            proc.state = ProcState::Failed;
-        }
-    }
-    proc
-}
 
 // ── Physical tree: rack / node / server lifecycle (A3) ──────────────
 //
@@ -97,7 +60,8 @@ pub async fn http_list_racks(
     let snap = state.monitor_cache.snapshot().await;
     let cfg = state.config.read().unwrap();
     let pids = state.kv_pid_snapshot();
-    let mut builder = PhysicalBuilder::new(&cfg, &snap, &pids);
+    let diskdb_pids = state.diskdb_pid_snapshot();
+    let mut builder = PhysicalBuilder::new_with_diskdb_pids(&cfg, &snap, &pids, &diskdb_pids);
     let limit = depth.effective();
     let racks: Vec<_> = cfg.racks.iter().map(|r| builder.build_rack(r, limit)).collect();
     let trunc = builder.into_truncation();
@@ -382,7 +346,8 @@ pub async fn http_get_rack(
         })?
         .clone();
     let pids = state.kv_pid_snapshot();
-    let mut builder = PhysicalBuilder::new(&cfg, &snap, &pids);
+    let diskdb_pids = state.diskdb_pid_snapshot();
+    let mut builder = PhysicalBuilder::new_with_diskdb_pids(&cfg, &snap, &pids, &diskdb_pids);
     let view = builder.build_rack(&rack, depth.effective());
     let trunc = builder.into_truncation();
     let mut body = serde_json::to_value(&view).expect("serialize rack view");
@@ -442,7 +407,8 @@ pub async fn http_list_rack_nodes(
         .cloned()
         .collect();
     let pids = state.kv_pid_snapshot();
-    let mut builder = PhysicalBuilder::new(&cfg, &snap, &pids);
+    let diskdb_pids = state.diskdb_pid_snapshot();
+    let mut builder = PhysicalBuilder::new_with_diskdb_pids(&cfg, &snap, &pids, &diskdb_pids);
     let limit = depth.effective();
     let views: Vec<_> = nodes.iter().map(|n| builder.build_node(n, limit)).collect();
     let trunc = builder.into_truncation();
@@ -512,18 +478,11 @@ pub async fn http_get_node(
             }),
         )
     })?;
-    let server = cfg
-        .server_for_node(node_id_num)
-        .map(|entry| live_server_process_with_pid(&state, entry, snap.get(&node_id_num)));
-    Ok(Json(serde_json::json!({
-        "id": node.id,
-        "rack_id": node.rack_id,
-        "host": node.host,
-        "ssh_user": node.ssh_user,
-        "ssh_port": node.ssh_port,
-        "has_server": server.is_some(),
-        "server": server,
-    })))
+    let pids = state.kv_pid_snapshot();
+    let diskdb_pids = state.diskdb_pid_snapshot();
+    let mut builder = PhysicalBuilder::new_with_diskdb_pids(&cfg, &snap, &pids, &diskdb_pids);
+    let view = builder.build_node(node, 0);
+    Ok(Json(serde_json::to_value(view).expect("serialize node view")))
 }
 
 // ── Server lifecycle (node-addressed) ────────────────────────────────
@@ -535,7 +494,14 @@ pub struct ServerSummary {
     /// Owning node id (`None` for plain externally-registered servers).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<u64>,
-    pub mgmt_url: String,
+    /// KV management URL. Absent for `DiskDB`, which has no public
+    /// management URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mgmt_url: Option<String>,
+    /// Public service endpoint. Used by `DiskDB`; absent for KV when its
+    /// endpoint is represented by `rpc_url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rpc_url: Option<String>,
     /// Live pid if the console currently tracks the process.
@@ -586,7 +552,8 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
             };
             ServerSummary {
                 node_id: s.node_id,
-                mgmt_url: s.url.clone(),
+                mgmt_url: (s.service_type == ServiceType::Kv).then(|| s.url.clone()),
+                endpoint: (s.service_type == ServiceType::Diskdb).then(|| s.url.clone()),
                 rpc_url: s.rpc_url.clone(),
                 pid,
                 health,

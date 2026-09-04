@@ -14,7 +14,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
@@ -76,13 +76,25 @@ pub struct DeployRequest {
     pub rpc_workers: Option<u32>,
 }
 
-/// Result of a successful deploy. Persist these fields onto the
+/// Result of a successful KV-server deploy. Persist these fields onto the
 /// `ServerEntry` so `stop` can locate the process later.
 #[derive(Debug, Clone)]
 pub struct DeployedServer {
     pub server_id: String,
     pub mgmt_url: String,
     pub rpc_url: String,
+    pub pid: u32,
+}
+
+/// Internal result of a `DiskDB` deploy.
+///
+/// `DiskDB`'s HTTP listener is used only while managing the process lifecycle;
+/// callers receive the crowdb-rpc endpoint instead. The readiness URL remains
+/// a private local lifecycle detail and is not part of this result.
+#[derive(Debug, Clone)]
+pub struct DeployedDiskdb {
+    pub server_id: String,
+    pub endpoint: String,
     pub pid: u32,
 }
 
@@ -460,34 +472,6 @@ async fn wait_for_ready(mgmt_url: &str, timeout: Duration) -> Result<()> {
     })
 }
 
-/// Poll `GET /health` until it returns HTTP 200, without requiring
-/// the response body to match `HealthResponse`. Used for diskdb,
-/// whose `/health` endpoint returns a different JSON shape
-/// (`{"phase":"up","degraded":true,"ready":true}`).
-async fn wait_for_http_ok(url: &str, timeout: Duration) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .map_err(|e| Error::UpstreamRpc {
-            node_id: url.to_string(),
-            status: format!("client build failed: {e}"),
-        })?;
-    let health_url = format!("{url}/health");
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if let Ok(resp) = client.get(&health_url).send().await {
-            if resp.status().is_success() {
-                return Ok(());
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    Err(Error::UpstreamRpc {
-        node_id: url.to_string(),
-        status: "did not become healthy within timeout".into(),
-    })
-}
-
 /// Poll a server's `/topology` until `(store_id, group_id)` reports a
 /// non-zero `leader_id`, meaning the per-group Paxos election driver has
 /// elected a leader.
@@ -791,6 +775,62 @@ fn http_listen_addr_from_config(config_path: &std::path::Path) -> Option<String>
     parsed.server?.http_listen_addr
 }
 
+fn diskdb_log_tail(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Poll `DiskDB` health while retaining the child handle so an early exit is
+/// reported immediately. The child is not killed here; `kill_on_drop(false)`
+/// preserves the existing lifecycle ownership semantics.
+async fn wait_for_diskdb_ready(
+    child: &mut Child,
+    url: &str,
+    log_path: &Path,
+    pid: u32,
+    timeout: Duration,
+) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| Error::UpstreamRpc {
+            node_id: url.to_string(),
+            status: format!("client build failed: {e}"),
+        })?;
+    let health_url = format!("{url}/health");
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().map_err(Error::Io)? {
+            return Err(Error::UpstreamRpc {
+                node_id: url.to_string(),
+                status: format!(
+                    "DiskDB child exited before readiness (pid={pid}, status={status})\n--- log tail ---\n{}",
+                    diskdb_log_tail(log_path)
+                ),
+            });
+        }
+        if let Ok(resp) = client.get(&health_url).send().await {
+            if resp.status().is_success() {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Err(Error::UpstreamRpc {
+        node_id: url.to_string(),
+        status: format!(
+            "did not become healthy within {timeout:?} (pid={pid}, alive={})\n--- log tail ---\n{}",
+            process_is_alive(pid),
+            diskdb_log_tail(log_path)
+        ),
+    })
+}
+
 /// Spawn `crowdb-diskdb` locally. The binary and config file are
 /// pre-copied to the node workspace (`<workspace>/bin/crowdb-diskdb`
 /// and `<workspace>/conf/crowdb_diskdb_config.toml`). The deploy only
@@ -804,7 +844,7 @@ pub async fn deploy_diskdb_local(
     req: &DiskdbDeployRequest,
     node: &NodeEntry,
     workspace_dir: &std::path::Path,
-) -> Result<DeployedServer> {
+) -> Result<DeployedDiskdb> {
     if req.listen_port == 0 || req.http_port == 0 || req.rpc_port == 0 {
         return Err(Error::Validation {
             field: "port".into(),
@@ -832,9 +872,9 @@ pub async fn deploy_diskdb_local(
         req.rpc_port,
         &req.kv_server_mgmt_seeds,
     )?;
-    // rpc_url points to the main listener (listen_port), which is the
-    // endpoint clients connect to for disk-block allocation.
-    let rpc_url = format!("http://{}:{}", node.host, req.listen_port);
+    // The public endpoint is the crowdb-rpc listener. The main listener is
+    // an internal compatibility endpoint and is not exposed as DiskDB identity.
+    let endpoint = format!("http://{}:{}", node.host, req.rpc_port);
 
     // Read the HTTP listen address from the config file for readiness
     // checking. Replace 0.0.0.0 with the node host so the readiness
@@ -865,7 +905,7 @@ pub async fn deploy_diskdb_local(
     cmd.current_dir(workspace_dir);
     cmd.stdout(Stdio::from(out.try_clone().map_err(Error::Io)?));
     cmd.stderr(Stdio::from(out));
-    let child = cmd.spawn().map_err(Error::Io)?;
+    let mut child = cmd.spawn().map_err(Error::Io)?;
     let pid = child.id().ok_or_else(|| Error::Validation {
         field: "pid".into(),
         message: "spawned child has no pid".into(),
@@ -873,33 +913,13 @@ pub async fn deploy_diskdb_local(
     let from = log_dir.join("crowdb-diskdb.stdout.log");
     let to = log_dir.join(format!("crowdb-diskdb-{pid}.out.log"));
     let _ = std::fs::rename(&from, &to);
-    // Detach: drop the Child handle so the process is not killed.
+    wait_for_diskdb_ready(&mut child, &mgmt_url, &to, pid, Duration::from_secs(30)).await?;
+    // Detach only after readiness succeeds so the child can be polled for an
+    // early exit without changing ownership of a successful process.
     std::mem::forget(child);
-    if wait_for_http_ok(&mgmt_url, Duration::from_secs(30))
-        .await
-        .is_err()
-    {
-        // Include the last log lines for diagnostics — the process may
-        // have crashed on startup (missing dep, config error, etc).
-        let log_tail = std::fs::read_to_string(&to)
-            .unwrap_or_default()
-            .lines()
-            .rev()
-            .take(20)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let alive = process_is_alive(pid);
-        return Err(Error::UpstreamRpc {
-            node_id: mgmt_url.clone(),
-            status: format!(
-                "did not become healthy within 30s (pid={pid}, alive={alive})\n--- log tail ---\n{log_tail}"
-            ),
-        });
-    }
-    Ok(DeployedServer {
+    Ok(DeployedDiskdb {
         server_id: req.server_id.clone(),
-        mgmt_url,
-        rpc_url,
+        endpoint,
         pid,
     })
 }

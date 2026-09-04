@@ -233,6 +233,51 @@ describe('Add Node dialog', () => {
       body: { rest_port: 19911, rpc_port: 19921 },
     });
   });
+
+  it('closes the dialog after node creation even when DiskDB deployment fails', async () => {
+    let onCloseCalled = false;
+    // Custom mock: success for addNode and deployServer, 502 for deployDiskdb.
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const method = (init?.method || 'GET').toUpperCase();
+      const bodyText = typeof init?.body === 'string' ? init.body : '';
+      captured.push({ url, method, body: bodyText ? JSON.parse(bodyText) : null });
+      const isDiskdbDeploy = url.includes('/diskdb/deploy');
+      return new Response(
+        isDiskdbDeploy ? JSON.stringify({ error: 'AddrInUse' }) : JSON.stringify({ id: 1 }),
+        { status: isDiskdbDeploy ? 502 : 201, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <AddNodeDialog
+        isOpen
+        onClose={() => { onCloseCalled = true; }}
+        racks={[mockRack]}
+        defaultRackId="1"
+        defaultRestPort="19911"
+        defaultRpcPort="19921"
+        defaultDiskdbRpcPort="29921"
+      />,
+      { wrapper },
+    );
+
+    fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('Host'), { target: { value: '127.0.0.1' } });
+    // Both KV and DiskDB are enabled by default.
+    fireEvent.click(screen.getByRole('button', { name: /create node/i }));
+
+    // The dialog must close after node creation, before service results.
+    await waitFor(() => expect(onCloseCalled).toBe(true));
+    // All three requests are sent: addNode, deployServer, deployDiskdb.
+    await waitFor(() => expect(captured.length).toBe(3));
+    expect(captured[0].url).toBe('/api/nodes');
+    expect(captured[1].url).toBe('/api/nodes/1/server/deploy');
+    expect(captured[2].url).toBe('/api/nodes/1/diskdb/deploy');
+    // The error toast surfaces the partial failure.
+    await waitFor(() => expect(screen.queryByText(/DiskDB/)).toBeTruthy());
+  });
 });
 
 describe('Deploy Server dialog', () => {
@@ -331,8 +376,41 @@ describe('diskdbPortDefaultsForNode', () => {
     expect(diskdbPortDefaultsForNode(instances, 1)).toBe('29922');
   });
 
-  it('increments past remembered ports even when no instances exist', () => {
-    expect(diskdbPortDefaultsForNode([], 1, undefined, [29921])).toBe('29922');
+  it('skips the complete range for remembered ports even when no instances exist', () => {
+    expect(diskdbPortDefaultsForNode([], 1, undefined, [29921])).toBe('29924');
+  });
+
+  it('allocates disjoint 3-port ranges across nodes 1, 2, and 3', () => {
+    // Simulate sequential allocation: each node's base is remembered so
+    // the next node skips past the full derived range (base, base+1, base+2).
+    const node1 = Number(diskdbPortDefaultsForNode([], 1));
+    const node2 = Number(diskdbPortDefaultsForNode([], 2, undefined, [node1]));
+    const node3 = Number(diskdbPortDefaultsForNode([], 3, undefined, [node1, node2]));
+
+    const ranges = [node1, node2, node3].map((b) => [b, b + 1, b + 2]);
+    const all = ranges.flat();
+    expect(new Set(all).size).toBe(all.length);
+    // Node 1 starts at its suffix offset (29921).
+    expect(node1).toBe(29921);
+    // Node 2's suffix offset (29922) falls inside node 1's range, so it
+    // skips to the first free 3-port window.
+    expect(node2).toBe(29924);
+    // Node 3's suffix offset (29923) falls inside node 1's range, and
+    // 29924-29926 are node 2's, so it skips further.
+    expect(node3).toBe(29927);
+  });
+
+  it('detects collisions on each derived listener port (main, HTTP, crowdb-rpc)', () => {
+    // An existing instance with crowdb-rpc endpoint 29923 means its main
+    // listener is 29921 and HTTP is 29922 — all three collide with node 1's
+    // default window [29921, 29922, 29923].
+    expect(diskdbPortDefaultsForNode([{ rpc_endpoint: 'http://127.0.0.1:29923' }], 1)).toBe('29924');
+    // Endpoint 29922 → main 29920, HTTP 29921, rpc 29922. Node 1's window
+    // [29921, 29922, 29923] collides on HTTP and rpc.
+    expect(diskdbPortDefaultsForNode([{ rpc_endpoint: 'http://127.0.0.1:29922' }], 1)).toBe('29923');
+    // Endpoint 29921 → main 29919, HTTP 29920, rpc 29921. Node 1's window
+    // collides only on the main port (29921).
+    expect(diskdbPortDefaultsForNode([{ rpc_endpoint: 'http://127.0.0.1:29921' }], 1)).toBe('29922');
   });
 });
 

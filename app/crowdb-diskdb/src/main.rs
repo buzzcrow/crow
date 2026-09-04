@@ -24,7 +24,7 @@ use crowdb_diskdb::service::DiskdbRpcService;
 use crowdb_kv_client::{
     ClientConfig, CrowdbKvClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient,
 };
-use tracing::info;
+use tracing::{error, info};
 
 /// CROWDB diskdb server CLI.
 #[derive(Parser, Debug)]
@@ -366,16 +366,20 @@ async fn main() {
         .http_listen_addr
         .parse()
         .expect("valid http_listen_addr");
+    let http_listener = match tokio::net::TcpListener::bind(http_listen_addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            error!(%http_listen_addr, error = %e, "HTTP health server bind failed");
+            return;
+        }
+    };
     let http_stop = Arc::new(tokio::sync::Notify::new());
     let http_stop_signal = Arc::clone(&http_stop);
     let http_container = Arc::clone(&container);
     let http_handle = tokio::spawn(async move {
         let app = health::router(http_container);
         info!(%http_listen_addr, "HTTP health server listening");
-        let listener = tokio::net::TcpListener::bind(http_listen_addr)
-            .await
-            .expect("bind http_listen_addr");
-        axum::serve(listener, app)
+        axum::serve(http_listener, app)
             .with_graceful_shutdown(async move {
                 http_stop_signal.notified().await;
                 info!("HTTP health server shutting down");

@@ -178,10 +178,26 @@ export function diskdbPortDefaultsForNode(
   rpcStart = DISKDB_RPC_PORT_BASE,
   extraUsedRpcPorts: number[] = [],
 ): string {
-  const usedRpcPorts: number[] = [...extraUsedRpcPorts];
-  for (const inst of instances) {
-    const port = extractPort(inst.rpc_endpoint);
-    if (port) usedRpcPorts.push(port);
+  // The public input is the base listener. DiskDB also binds base + 1 for
+  // HTTP readiness and base + 2 for crowdb-rpc, so reserve the whole range.
+  const usedPorts = new Set<number>();
+  for (const base of extraUsedRpcPorts) {
+    usedPorts.add(base);
+    usedPorts.add(base + 1);
+    usedPorts.add(base + 2);
   }
-  return nextAvailablePort(usedRpcPorts, preferredPortStart(rpcStart, nodeId));
+  for (const inst of instances) {
+    const endpoint = extractPort(inst.rpc_endpoint);
+    if (endpoint) {
+      usedPorts.add(endpoint - 2);
+      usedPorts.add(endpoint - 1);
+      usedPorts.add(endpoint);
+    }
+  }
+
+  let candidate = preferredPortStart(rpcStart, nodeId);
+  while (candidate < 65534 && [candidate, candidate + 1, candidate + 2].some((port) => usedPorts.has(port))) {
+    candidate += 1;
+  }
+  return String(candidate);
 }

@@ -301,11 +301,7 @@ self-contained sidebar + center panel.
 
 ### 12.1 Three domains
 
-The shell keeps the same three-pane structure (sidebar / center /
-inspector). The header's domain toggle switches between three
-domains; `bench` is CLI-only (load injection is not a UI workflow).
-The inspector is unchanged across all domains — Details + Activity
-scoped to the current selection.
+The shell has one shared frame: a top bar, a left tree panel, a center panel, and a right properties panel. The header's domain toggle switches between Cluster, KV, and Chunk. `bench` is CLI-only. Each domain owns the content and behavior of its three panels; shared shell components provide layout, selection, context menus, loading states, and the inspector. The right properties panel is always scoped to the selected item in the active domain.
 
 ```
 ┌─ Header ───────────────────────────────────────────────────────────┐
@@ -319,7 +315,7 @@ scoped to the current selection.
 └───────────────┴────────────────────────────┴────────────────────────┘
 ```
 
-**Domain 1 — Cluster (hardware topology)**
+**Domain 1 — Cluster (physical infrastructure)**
 
 ```
 ┌─ Sidebar ─────┐┌─ Center: hierarchy chart ─────────────────────────┐
@@ -334,12 +330,20 @@ scoped to the current selection.
 └───────────────┘└───────────────────────────────────────────────────┘
 ```
 
-Context menus: Rack (Add Node, Delete Rack) · Node (Ping, Delete
-Node, Deploy Server) · DiskGroup (Add Disk batch, Remove, Set Status)
-· Disk (Remove, Move, Set Status). Cluster-level ops (init / reset /
-clean) are triggered from the header or a toolbar above the canvas.
+The Cluster tree is the physical source for node, KV-server,
+disk-group, and disk management. The center renders the physical
+hierarchy and the properties panel displays the selected physical item
+and recent activity.
 
-**Domain 2 — KV (server lifecycle + logical + data-plane)**
+Context menus: Rack (Add Node, Delete Rack) · Node (Deploy KV Server,
+Deploy DiskDB, Add Disk Group, Ping, Delete Node) · KV Server (Restart,
+Stop, Delete) · DiskGroup (Add Disk batch, Remove, Set Status) · Disk
+(Remove, Set Status). Chunk may reference these shared disk-management
+actions but does not own a second copy of their business logic.
+Cluster-level ops (init / reset / clean) are triggered from the header
+or a toolbar above the canvas.
+
+**Domain 2 — KV (logical data operations)**
 
 ```
 ┌─ Sidebar ─────┐┌─ Center: [Cluster] [KV] ──────────────────────────┐
@@ -363,10 +367,17 @@ KV tab active:
 └───────────────┘└───────────────────────────────────────────────────┘
 ```
 
-Context menus: Node (Deploy / Restart / Stop / Delete Server) · Store
-(Add Group, Delete) · Group (Add Replica, Delete) · Replica (Delete).
-Selection persists across tab switches — inspect a group in Cluster,
-switch to KV, operate on it without re-selecting.
+The KV left tree is the single logical source: datacenter → store →
+group → replica. Logical entities are not repeated under physical KV
+servers. The center always renders the KV operation panel. It supports
+store/group selection, get, put, delete, scan, pagination, and operation
+feedback. The properties panel displays details and activity for the
+selected tree item. Node placement is replica metadata and a cross-jump
+target, not a KV-tree parent.
+
+Context menus: Store (Add Group, Delete) · Group (Add Replica, Delete) ·
+Replica (Delete). KV server lifecycle actions are owned by Cluster and
+are not duplicated in the KV tree.
 
 **Domain 3 — Chunk (chunkdb / diskdb / diskio management)**
 
@@ -386,15 +397,23 @@ switch to KV, operate on it without re-selecting.
 └───────────────┘└───────────────────────────────────────────────────┘
 ```
 
-Disk-groups under a diskdb server are read-only (managed from
-Cluster). The Chunk sub-view is blank until `ops::chunk` is
-implemented — no placeholder text, so future content drops in without
-UI changes.
+The Chunk tree keeps the physical node → disk-group → disk hierarchy
+and shows DiskDB as an additional node item. DiskDB-owned disk-group
+children are deferred. The current duplicate ownership projection is
+not rendered. Disk-group and disk dialogs are shared with Cluster for
+now; Cluster remains the owner of those management actions.
 
-`DomainContext` (renamed from `ViewModeContext`) holds the active
-domain. Selection is shared across all three domains via
-`SelectionContext` — clicking a node in Cluster, switching to KV,
-right-clicking shows the KV-server context menu for the same node.
+The center capacity panel shows usage, busy/free space, scanner and
+recalculation controls for the selected resource. The properties panel
+shows the selected node, DiskDB, disk-group, or disk details and recent
+activity. Future chunk-management operations may extend the center
+panel without changing the shared shell.
+
+`DomainContext` holds the active domain. Selection is shared across all
+three domains via `SelectionContext`, while each domain defines how the
+selected item is resolved and displayed. Switching domains changes the
+tree and center panel without creating duplicate logical entities. The
+inspector remains the right properties panel for the active selection.
 
 ### 12.2 Why three domains (not view-modes)
 
@@ -408,13 +427,14 @@ unifies the two frontends:
   topology and disk lifecycle are both infrastructure concerns and
   belong together. The Capacity center panel moves under the Chunk
   domain (capacity is a property of the chunk/disk storage layer).
-- **KV** keeps the logical KV layer + data-plane, now with server
-  lifecycle under each node (was a separate Physical concern).
+- **KV** keeps the logical KV layer and data-plane. The KV tree is
+  independent of physical server placement; KV server lifecycle belongs
+  to the Cluster domain.
 - **Chunk** is new — it hosts the chunk/disk storage layer (diskdb,
   chunkdb, diskio) and the capacity visualization that belongs to
-  that layer. The Chunk center panel's Chunk sub-view is a placeholder
-  for future chunk-management features (`ops::chunk` is currently
-  stubs).
+  that layer. The Chunk center panel is the capacity panel today.
+  Future chunk-management features may extend this center panel
+  (`ops::chunk` is currently stubs).
 
 ### 12.3 Swagger UI removal
 
@@ -436,24 +456,24 @@ from the former Capacity view, now accessed from the Cluster domain):
 
 ## 13. DiskDB Server Deploy / Restart / Stop
 
-The Chunk domain's DiskDB Server node needs the same service-lifecycle
-ops as KV Server (Restart, Stop, Deploy). The deploy/restart/stop
-handlers enable `AddNodeDialog` to auto-deploy DiskDB alongside KV,
-and the Server context menu works for both types.
+The Cluster domain owns service lifecycle actions for both KV Server and
+DiskDB Server. The Chunk domain displays the DiskDB item but does not
+own a second lifecycle workflow. The deploy/restart/stop handlers enable
+`AddNodeDialog` to auto-deploy DiskDB alongside KV, and the service
+context menu works for both types.
 
 Deployment mechanism: SSH or local fork, same as KV. No Docker. The
 `crowdb-diskdb` binary is spawned via `ssh::deploy_via_ssh` or
-`lifecycle::deploy_local_in_dir`, on the paired ports from
-`ports.rs` (`DISKDB_RPC_BASE` + `DISKDB_HTTP_BASE`).
+`lifecycle::deploy_local_in_dir`. A DiskDB deployment receives one
+user-facing service endpoint port; the internal HTTP health listener and
+any other required listener ports are reserved by the lifecycle layer and
+are not exposed as DiskDB management properties.
 
 New handlers mirroring the KV handlers:
 
 ```rust
 pub struct DeployDiskdbBody {
-    rpc_port: u16,
-    http_port: u16,
-    #[serde(default)]
-    binary: Option<String>,
+    endpoint_port: u16,
 }
 
 pub async fn http_deploy_node_diskdb(
@@ -469,20 +489,20 @@ pub async fn http_stop_node_diskdb(
 ) -> Result<Json<StopResult>, ...>
 ```
 
-- `http_deploy_node_diskdb` — checks no existing diskdb on the node
-  (409 if present), resolves the node, builds a `DeployRequest` with
-  `rpc_port`/`http_port` from `ServicePort::DiskdbRpc`/`DiskdbHttp`
-  defaults (or body overrides), spawns via SSH or local fork, persists
-  a `ServerEntry` with `service_type: Diskdb`, records the pid.
-  Route: `POST /api/nodes/:id/diskdb/deploy`.
-- `http_restart_node_diskdb` — stops the tracked pid, re-deploys on
-  the same ports from the persisted entry. Route:
+- `http_deploy_node_diskdb` — checks no existing DiskDB on the node
+  (409 if present), resolves the node, derives the internal listener
+  ports from the single `endpoint_port`, spawns via SSH or local fork,
+  persists a DiskDB service entry, and records the pid. Route:
+  `POST /api/nodes/:id/diskdb/deploy`.
+- `http_restart_node_diskdb` — stops the tracked pid and re-deploys on
+  the persisted endpoint port. Route:
   `POST /api/nodes/:id/diskdb/restart`.
-- `http_stop_node_diskdb` — stops the tracked pid, clears it, keeps
+- `http_stop_node_diskdb` — stops the tracked pid, clears it, and keeps
   the entry. Route: `POST /api/nodes/:id/diskdb/stop`.
-- `ServerEntry` / `AppState` gains a `service_type` discriminator
-  (`Kv | Diskdb`) so `server_for_node` can return the right entry per
-  type. `runtime_pid` tracking is keyed by `(node_id, service_type)`.
+- KV and DiskDB use distinct service types and public endpoint models.
+  KV includes its HTTP management URL; DiskDB includes its service
+  endpoint, health, and process state but not its internal HTTP health
+  URL. Runtime PID tracking is keyed by `(node_id, service_type)`.
 - `AddNodeDialog` calls `deployServer` (KV) then `deployDiskdb` (new
   API function) after `addNode` succeeds. Both are gated by the
   existing `enableCrowDB`-style checkbox (add `enableDiskDB`, default

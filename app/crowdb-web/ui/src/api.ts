@@ -1183,7 +1183,8 @@ export async function removeDisk(nodeId: number, dgId: number, diskId: string, o
 /** `GET /api/servers` — list all deployed server entries. */
 export interface ServerSummary {
   node_id?: number;
-  mgmt_url: string;
+  mgmt_url?: string;
+  endpoint?: string;
   rpc_url?: string;
   pid?: number;
   health: string;
