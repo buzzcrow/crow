@@ -37,7 +37,7 @@ Implements [the lock design](design-lock-review.md) for
   and WAL tests.
 - [x] **Client latency shards**: remove the request-wide histogram mutex while
   preserving flush counts. Files: `lib/crowdb-kv-client/src/metrics.rs` and tests.
-- [ ] **Collector lock boundary**: snapshot references, collect unlocked, then
+- [x] **Collector lock boundary**: snapshot references, collect unlocked, then
   register discoveries. Files: `app/crowdb-kv-server/src/engine_collector.rs`
   and metrics tests.
 

@@ -8,14 +8,14 @@
 //! are now flushed natively via the `cpp-tree` section (FFI string
 //! from `CrowdbTreeEngine::flush_metrics_str`).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::store_registry::KvStoreRegistry;
+use arc_swap::ArcSwap;
 use crowdb_kv::cluster::px_kv_store::PxKvStore;
 use crowdb_kv::kv::CrowdbTreeEngine;
 use crowdb_kv::metrics::{Counter, Gauge, MetricsRegistry, MetricsRunner};
-use crowdb_kv::wal::wal_engine::BlockDeviceSnapshot;
-use crowdb_rpc_ffi::CrowdbRpcTransportStats;
 
 /// Registered Rust handles for one (store, group): Paxos gauges +
 /// snapshot.pages.c bridge counter.
@@ -27,6 +27,8 @@ struct EngineHandles {
     paxos_leader: Arc<Gauge>,
     paxos_inflight: Arc<Gauge>,
     snapshot_pages: Arc<Counter>,
+    last_snapshot_pages: AtomicU64,
+    last_rmw_count: AtomicU64,
 }
 
 impl EngineHandles {
@@ -45,6 +47,8 @@ impl EngineHandles {
                 .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.inflight_slots.g")),
             snapshot_pages: registry
                 .register_counter(format!("s.{store_id}.g.{group_id}.tree.snapshot.pages.c")),
+            last_snapshot_pages: AtomicU64::new(0),
+            last_rmw_count: AtomicU64::new(0),
         }
     }
 }
@@ -114,8 +118,8 @@ pub fn setup_engine_collector(
 ) {
     type Key = (u64, u64);
 
-    let mut handles: Vec<(Key, EngineHandles)> = Vec::new();
-    let mut rpc_handles: Vec<(u64, RpcTransportHandles)> = Vec::new();
+    let mut handles: Vec<(Key, Arc<EngineHandles>)> = Vec::new();
+    let mut rpc_handles: Vec<(u64, Arc<RpcTransportHandles>)> = Vec::new();
     {
         let mut reg = registry.lock().expect("metrics registry poisoned");
         for entry in &store_registry.stores {
@@ -124,53 +128,35 @@ pub fn setup_engine_collector(
             store.for_each_group(|group| {
                 handles.push((
                     (store_id, group.group_id()),
-                    EngineHandles::register(&mut reg, store_id, group.group_id()),
+                    Arc::new(EngineHandles::register(&mut reg, store_id, group.group_id())),
                 ));
             });
-            rpc_handles.push((store_id, RpcTransportHandles::register(&mut reg, store_id)));
+            rpc_handles.push((
+                store_id,
+                Arc::new(RpcTransportHandles::register(&mut reg, store_id)),
+            ));
         }
     }
 
-    let last_snapshot_pages: Arc<Mutex<std::collections::HashMap<Key, u64>>> =
-        Arc::new(Mutex::new(std::collections::HashMap::new()));
-    let last_block_device: Arc<Mutex<std::collections::HashMap<Key, BlockDeviceSnapshot>>> =
-        Arc::new(Mutex::new(std::collections::HashMap::new()));
-    let last_rpc_stats: Arc<Mutex<std::collections::HashMap<u64, CrowdbRpcTransportStats>>> =
-        Arc::new(Mutex::new(std::collections::HashMap::new()));
-
-    let handles: Arc<Mutex<Vec<(Key, EngineHandles)>>> = Arc::new(Mutex::new(handles));
-    let rpc_handles: Arc<Mutex<Vec<(u64, RpcTransportHandles)>>> = Arc::new(Mutex::new(rpc_handles));
-    let known_keys: Arc<Mutex<std::collections::HashSet<Key>>> = Arc::new(Mutex::new(
-        handles
-            .lock()
-            .expect("handles poisoned")
-            .iter()
-            .map(|(k, _)| *k)
-            .collect(),
-    ));
-    let known_rpc_stores: Arc<Mutex<std::collections::HashSet<u64>>> = Arc::new(Mutex::new(
-        rpc_handles
-            .lock()
-            .expect("rpc_handles poisoned")
-            .iter()
-            .map(|(k, _)| *k)
-            .collect(),
-    ));
+    let handles = Arc::new(ArcSwap::from_pointee(handles));
+    let rpc_handles = Arc::new(ArcSwap::from_pointee(rpc_handles));
 
     let stores = Arc::clone(store_registry);
     let reg = Arc::clone(registry);
 
     // Pre-flush collector: poll Paxos gauges + snapshot.pages.c delta.
     runner.set_collector(move || {
+        let current_handles = handles.load_full();
+        let known_keys: std::collections::HashSet<Key> =
+            current_handles.iter().map(|(key, _)| *key).collect();
         let new_keys: Vec<Key> = {
-            let known = known_keys.lock().expect("known_keys poisoned");
             let mut scan: Vec<Key> = Vec::new();
             for entry in &stores.stores {
                 let store_id = *entry.key();
                 let store = entry.value();
                 store.for_each_group(|group| {
                     let key = (store_id, group.group_id());
-                    if !known.contains(&key) {
+                    if !known_keys.contains(&key) {
                         scan.push(key);
                     }
                 });
@@ -179,36 +165,38 @@ pub fn setup_engine_collector(
         };
         if !new_keys.is_empty() {
             let mut reg = reg.lock().expect("metrics registry poisoned");
-            let mut h = handles.lock().expect("handles poisoned");
-            let mut known = known_keys.lock().expect("known_keys poisoned");
+            let mut next = (*current_handles).clone();
             for key @ (sid, gid) in new_keys {
-                h.push((key, EngineHandles::register(&mut reg, sid, gid)));
-                known.insert(key);
+                next.push((key, Arc::new(EngineHandles::register(&mut reg, sid, gid))));
             }
+            handles.store(Arc::new(next));
         }
 
         // Dynamically register RPC transport handles for new stores.
+        let current_rpc_handles = rpc_handles.load_full();
+        let known_rpc_stores: std::collections::HashSet<u64> = current_rpc_handles
+            .iter()
+            .map(|(store_id, _)| *store_id)
+            .collect();
         let new_rpc_stores: Vec<u64> = {
-            let known = known_rpc_stores.lock().expect("known_rpc_stores poisoned");
             stores
                 .stores
                 .iter()
                 .map(|e| *e.key())
-                .filter(|sid| !known.contains(sid))
+                .filter(|sid| !known_rpc_stores.contains(sid))
                 .collect()
         };
         if !new_rpc_stores.is_empty() {
             let mut reg = reg.lock().expect("metrics registry poisoned");
-            let mut rh = rpc_handles.lock().expect("rpc_handles poisoned");
-            let mut known = known_rpc_stores.lock().expect("known_rpc_stores poisoned");
+            let mut next = (*current_rpc_handles).clone();
             for sid in new_rpc_stores {
-                rh.push((sid, RpcTransportHandles::register(&mut reg, sid)));
-                known.insert(sid);
+                next.push((sid, Arc::new(RpcTransportHandles::register(&mut reg, sid))));
             }
+            rpc_handles.store(Arc::new(next));
         }
 
-        let h = handles.lock().expect("handles poisoned");
-        for (key @ (store_id, _group_id), hd) in &*h {
+        let current_handles = handles.load();
+        for (key @ (store_id, _group_id), hd) in current_handles.iter() {
             let Some(store) = stores.get_store(*store_id) else {
                 continue;
             };
@@ -234,11 +222,8 @@ pub fn setup_engine_collector(
                 if let Some(e) = engine.as_any().downcast_ref::<CrowdbTreeEngine>() {
                     let s = e.stats();
                     let current = s.snapshot_pages_total;
-                    let mut last = last_snapshot_pages.lock().expect("last_snapshot_pages poisoned");
-                    let prev = last.entry(*key).or_default();
-                    let delta = current.saturating_sub(*prev);
-                    *prev = current;
-                    drop(last);
+                    let previous = hd.last_snapshot_pages.swap(current, Ordering::Relaxed);
+                    let delta = current.saturating_sub(previous);
                     if delta > 0 {
                         hd.snapshot_pages.inc_by(delta);
                     }
@@ -253,11 +238,8 @@ pub fn setup_engine_collector(
                 let replica = group.local_replica();
                 if let Some(wal) = replica.wal() {
                     if let Some(snap) = wal.block_device_snapshot() {
-                        let mut last = last_block_device.lock().expect("last_block_device poisoned");
-                        let prev = last.entry(*key).or_default();
-                        let d_rmw = snap.rmw_count.saturating_sub(prev.rmw_count);
-                        *prev = snap;
-                        drop(last);
+                        let previous = hd.last_rmw_count.swap(snap.rmw_count, Ordering::Relaxed);
+                        let d_rmw = snap.rmw_count.saturating_sub(previous);
                         if let Some(h) = wal.block_device_counter_handles() {
                             if d_rmw > 0 {
                                 h.rmw.inc_by(d_rmw);
@@ -269,19 +251,15 @@ pub fn setup_engine_collector(
         }
 
         // RPC transport stats: delta from cumulative crowdb-rpc counters.
-        let rh = rpc_handles.lock().expect("rpc_handles poisoned");
-        for (store_id, hd) in &*rh {
+        let current_rpc_handles = rpc_handles.load();
+        for (store_id, hd) in current_rpc_handles.iter() {
             let Some(store) = stores.get_store(*store_id) else {
                 continue;
             };
             let Some(cur) = store.rpc_transport_stats() else {
                 continue;
             };
-            let mut last = last_rpc_stats.lock().expect("last_rpc_stats poisoned");
-            let prev = last.entry(*store_id).or_default();
             let sw = cur.submit_to_writev;
-            *prev = cur;
-            drop(last);
             hd.submit_to_writev_avg_us
                 .set(sw.sum_ns.checked_div(sw.count).unwrap_or(0) / 1000);
         }
