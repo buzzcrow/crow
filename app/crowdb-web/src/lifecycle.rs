@@ -71,6 +71,22 @@ pub async fn http_list_racks(
     }))
 }
 
+fn has_fully_running_group0(state: &AppState) -> bool {
+    let replica_nodes = {
+        let cfg = state.config.read().unwrap();
+        cfg.group(0, 0).map(|group| {
+            group
+                .replicas
+                .iter()
+                .map(|replica| replica.node_id)
+                .collect::<Vec<_>>()
+        })
+    };
+    replica_nodes.is_some_and(|nodes| {
+        !nodes.is_empty() && nodes.iter().all(|node_id| state.runtime_pid(node_id).is_some())
+    })
+}
+
 /// Add a new rack.
 ///
 /// # Panics
@@ -91,13 +107,15 @@ pub async fn http_add_rack(
         cfg.add_rack(entry.clone()).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
-    // Best-effort sysdata sync (non-blocking — config already committed).
-    if let Ok(ctx) = state.op_context().await {
-        let value = crowdb_protocol::common::RackValue {
-            status: crowdb_protocol::common::HwStatus::Up as i32,
-            node_ids: Vec::new(),
-        };
-        let _ = ctx.sysmd().add_rack(body.id, &value).await;
+    // Avoid the full retry budget before bootstrap or during partial shutdown.
+    if has_fully_running_group0(&state) {
+        if let Ok(ctx) = state.op_context().await {
+            let value = crowdb_protocol::common::RackValue {
+                status: crowdb_protocol::common::HwStatus::Up as i32,
+                node_ids: Vec::new(),
+            };
+            let _ = ctx.sysmd().add_rack(body.id, &value).await;
+        }
     }
     Ok((StatusCode::CREATED, Json(entry)))
 }
@@ -118,9 +136,10 @@ pub async fn http_remove_rack(
         cfg.remove_rack(id).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
-    // Best-effort sysdata sync (non-blocking — config already committed).
-    if let Ok(ctx) = state.op_context().await {
-        let _ = ctx.sysmd().remove_rack_cascade(id).await;
+    if has_fully_running_group0(&state) {
+        if let Ok(ctx) = state.op_context().await {
+            let _ = ctx.sysmd().remove_rack_cascade(id).await;
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -166,16 +185,17 @@ pub async fn http_add_node(
     state
         .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
-    // Best-effort sysdata sync (non-blocking — config already committed).
-    if let Ok(ctx) = state.op_context().await {
-        let value = crowdb_protocol::common::NodeValue {
-            status: crowdb_protocol::common::HwStatus::Up as i32,
-            last_used_dg_id: 0,
-            disk_group_ids: Vec::new(),
-            status_changed_at_ms: 0,
-            temp_failure_since_ms: None,
-        };
-        let _ = ctx.sysmd().add_node(entry.rack_id, entry.id, &value).await;
+    if has_fully_running_group0(&state) {
+        if let Ok(ctx) = state.op_context().await {
+            let value = crowdb_protocol::common::NodeValue {
+                status: crowdb_protocol::common::HwStatus::Up as i32,
+                last_used_dg_id: 0,
+                disk_group_ids: Vec::new(),
+                status_changed_at_ms: 0,
+                temp_failure_since_ms: None,
+            };
+            let _ = ctx.sysmd().add_node(entry.rack_id, entry.id, &value).await;
+        }
     }
     Ok((StatusCode::CREATED, Json(entry)))
 }
@@ -906,10 +926,6 @@ pub async fn http_stop_node_server(
     if state.diskdb_runtime_pid(node_id).is_none() {
         state.monitor_cache.mark_down(node_id, "server stopped").await;
     }
-    // Refresh group-0 leader so the next op_context targets the
-    // post-election leader instead of the stopped node (which would
-    // trigger a 5s transport-error retry cycle in the KV client).
-    state.refresh_group0_leader(Some(node_id)).await;
     Ok(Json(StopResult { sent }))
 }
 

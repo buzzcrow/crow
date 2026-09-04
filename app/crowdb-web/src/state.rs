@@ -446,7 +446,7 @@ impl AppState {
         };
         let alive: Vec<u64> = group0_nodes
             .iter()
-            .filter(|&&n| exclude_node != Some(n))
+            .filter(|&&n| exclude_node != Some(n) && self.runtime_pid(n).is_some())
             .copied()
             .collect();
         tracing::debug!(
