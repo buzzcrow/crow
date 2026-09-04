@@ -166,7 +166,9 @@ Current production-path baseline on the AMD Ryzen 9 5950X, 2026-09-04:
 ## Dependencies
 
 - Depends on R130's `crowdb-cli bench diskdb`, self-contained fixture,
-  regression script, and space-accounting verification.
+  regression script, and space-accounting verification. R132 must close the
+  compaction slot-ordering correctness failure before invalid mix results can
+  become performance baselines.
 - Uses the existing crowdb-rpc latency metrics and KV benchmark methodology;
   no RPC or KV semantic change is required to begin analysis.
 - If busy-record batching changes durability or allocation response

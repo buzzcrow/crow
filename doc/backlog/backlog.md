@@ -11,10 +11,32 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R132** — Bump this line in the same commit when adding a new item.
+**Next R number: R134** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
+- **[R133](R133-chunkdb-behavior-conformance.md)** — chunkdb behavioral
+  conformance and benchmark — Area: chunkdb / client / diskdb / console —
+  review the completed ChunkDB implementation against its lifecycle,
+  placement, routing, persistence, and RPC designs; fix straightforward
+  gaps and split complex findings into focused backlog items. Organize
+  component E2E coverage around the public `ChunkdbClient`, including
+  mirror and EC allocation, append/alter, seal, delete/free, rollback,
+  restart, routing, and concurrent transitions. Add `crowdb-cli bench
+  chunkdb` plus a timestamped regression script that deploys a six-storage-
+  node, three-rack topology with KV, DiskDB, and ChunkDB services and verifies
+  both chunk metadata and DiskDB space accounting.
+- **[R132](R132-diskdb-compaction-slot-ordering.md)** — diskdb
+  compaction slot ordering — Area: kv / protocol / client / diskdb —
+  expose each live KV record's Paxos revision slot, add a bounded scan
+  whose fixed upper cutoff is captured from the contiguous-applied
+  frontier and retained across pagination, and replace DiskDB's
+  pre-submit free timestamp watermark with that slot boundary. This
+  closes the correctness race where a higher-slot free is applied and
+  compacted before a delayed lower-slot free becomes visible. The
+  design relies on immutable free-record keys and single-owner
+  compaction; it does not add general MVCC snapshot semantics or
+  disk-group migration.
 - **[R131](R131-diskdb-allocate-performance.md)** — diskdb allocation
   throughput — Area: diskdb / client / kv / RPC — Trace and measure the
   complete allocation path, isolate bitmap, persistence, scheduling,

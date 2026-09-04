@@ -245,6 +245,9 @@ disk-group create + live diskdb registry + current owner map
   placement requirements. Their eventual behavior should follow the
   feature test layout established here but is not required to complete
   this audit unless already implemented code is encountered.
+- R132 owns the non-trivial compaction ordering fix found by the mix
+  benchmark: per-record Paxos slots, a fixed contiguous-applied scan cutoff,
+  and the slot-based DiskDB compaction watermark.
 
 ## Acceptance
 
