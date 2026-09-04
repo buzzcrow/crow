@@ -189,41 +189,6 @@ below); R32 depends on R115.
 
 ### Medium Priority
 
-- **[R121](R121-tree-cpp-lock-review.md)** — C++ mutex/lock review
-  fixes — Area: tree / rpc / common — Full review of all mutex/lock
-  usage across the C++ codebase (37 files) found 3 critical hot-path
-  findings, 5 medium, 17 OK. Highest-impact: `BufferPool::pin` holds
-  the global mutex during synchronous disk I/O on a cache miss — every
-  cache hit blocks behind every miss, making the buffer pool mutex a
-  global serialization point. Also critical: `ConcurrentSkipList`
-  spinlock (no backoff/fairness) on the `apply_batch` → `MemTable::upsert`
-  write path, and `HandlerRegistry::get_handler` mutex on every RPC
-  frame dispatch (handlers registered once at startup, never change).
-  Medium: `MetricsRegistry::register_*` data race (unsynchronized
-  `push_back` vs. `flush_to` iteration), `thread_name_flag` mutex on
-  every log line, `ConnectionPool` mutex on every connection acquire,
-  `Crowdbtree::resident` cold-path load serialization, `slot_mutex_` set
-  insert on the apply path. R121 tracks the fixes; OK findings document
-  correct patterns and need no action.
-- **[R122](R122-kv-rust-lock-review.md)** — Rust mutex/lock review
-  fixes — Area: kv / client / diskdb / server — Full review of all
-  mutex/`RwLock`/`parking_lot`/`tokio::sync` lock usage across the Rust
-  crates (75 files) found 3 critical hot-path findings, 7 medium, ~30
-  OK. The codebase leans heavily on lock-free patterns (`DashMap`,
-  `Atomic*`, `arc_swap`, `OnceLock`, per-bit CAS), so findings are
-  fewer/milder than C++ (R121). Highest-impact:
-  `PxLearner::out_of_order` `Mutex<BTreeMap>` taken on every accepted
-  slot on a follower for the chosen-frontier advance — serializes
-  concurrent out-of-order applies. Also critical: `WalEngine::index`
-  `Mutex<SegmentIndex>` held during every flush batch insert (multi-
-  pipeline flush completions serialize; GC stalls flushes), and
-  `ClientMetrics::window_lat` `std::Mutex` on every client RPC
-  completion. Medium: `RangeBindingClient` `RwLock` read on every route
-  (should use `arc_swap`), `MetricsRunner` collector inside
-  `registry.lock()` (same root cause as R121 #4), `PxGroup` coalescer/
-  peer-watermark mutexes, `PxLocalReplica` gap-slots/election-state
-  locked reads. R122 tracks the fixes; OK findings document notably
-  good lock-free design.
 - **[R83](R83-chunkdb-complete-recovery-flow.md)** — chunkdb
   complete recovery flow (real data recovery + speed control) —
   Area: chunkdb / diskdb / diskio — diskdb's recovery is disk-layer
