@@ -3,6 +3,7 @@
 
 #include "crowdb-rpc/buffer.h"
 #include "crowdb-rpc/framing.h"
+#include "crowdb-rpc/server/handler.h"
 #include "crowdb-rpc/server/server.h"
 #include "crowdb-rpc/transport/socket_transport.h"
 
@@ -20,10 +21,39 @@
 using crowdb::rpc::Buffer;
 using crowdb::rpc::Connection;
 using crowdb::rpc::Frame;
+using crowdb::rpc::HandlerRegistry;
 using crowdb::rpc::Header;
 using crowdb::rpc::OutFrame;
 using crowdb::rpc::RpcServer;
 using crowdb::rpc::SystemBufferPool;
+
+TEST(HandlerRegistryTest, ConcurrentLookupAndLateRegistrationSeeCompleteTables)
+{
+    HandlerRegistry registry;
+    registry.register_handler(1, [](Frame *, Connection *) { return static_cast<OutFrame *>(nullptr); });
+
+    std::atomic<bool>        stop{false};
+    std::atomic<bool>        missing_initial{false};
+    std::vector<std::thread> readers;
+    for (int i = 0; i < 8; ++i) {
+        readers.emplace_back([&] {
+            while (!stop.load(std::memory_order_acquire)) {
+                if (!registry.get_handler(1)) {
+                    missing_initial.store(true, std::memory_order_release);
+                }
+                (void)registry.get_handler(2);
+            }
+        });
+    }
+
+    registry.register_handler(2, [](Frame *, Connection *) { return static_cast<OutFrame *>(nullptr); });
+    EXPECT_TRUE(static_cast<bool>(registry.get_handler(2)));
+    stop.store(true, std::memory_order_release);
+    for (auto &reader : readers) {
+        reader.join();
+    }
+    EXPECT_FALSE(missing_initial.load(std::memory_order_acquire));
+}
 
 // Full loopback: server listens, client connects and sends a frame, server
 // dispatches to a registered handler.

@@ -66,9 +66,9 @@ void shutdown_logging();
 // init_logging is called, so spdlog's default stderr logger is used).
 [[nodiscard]] bool logger_initialized();
 
-// Set the current thread's name for CT_LOG output (stored thread_local and
-// also passed to pthread_setname_np for debugger/htop visibility). Should be
-// called at the start of each engine thread's body.
+// Set the current thread's name for CT_LOG output and pthread diagnostics.
+// Names are published through a lock-free immutable snapshot so the async
+// formatter can resolve the originating thread id without serialization.
 void set_current_thread_name(const char *name);
 
 } // namespace crowdb::common

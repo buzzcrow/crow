@@ -19,8 +19,10 @@ doc does not repeat them.
   state rather than duplicate publication.
 - `HandlerRegistry::mu_`: publish an immutable handler table with atomic
   shared ownership. Registration clones and swaps; dispatch only loads.
-- `thread_name_flag` mutex: store the current thread's name in thread-local
-  storage. Formatting reads its own thread-local value without shared state.
+- `thread_name_flag` mutex: publish an immutable thread-id/name map with atomic
+  shared ownership. Formatting loads one snapshot without locking; name changes
+  clone and swap. Formatter TLS is invalid because spdlog formats on its async
+  backend thread while `log_msg.thread_id` identifies the originating thread.
 - `PxLearner::out_of_order` and `applied_out_of_order`: shard gap ownership by
   slot and serialize only the short contiguous-drain cursor. Publish the
   `(last_chosen_slot, last_chosen_term)` pair through one atomic state so the

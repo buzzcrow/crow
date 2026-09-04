@@ -21,10 +21,10 @@ Implements [the lock design](design-lock-review.md) for
 - [ ] **Buffer-pool reservation state**: define per-frame loading/writeback
   states and move miss/victim/flush I/O outside `mu_`. Files:
   `lib/crowdb-tree/{include/crowdb-tree/buffer_pool.h,src/buffer_pool.cpp,tests/unit/buffer_pool_test.cpp}`.
-- [ ] **Handler RCU table**: atomic immutable handler-table publication and
+- [x] **Handler RCU table**: atomic immutable handler-table publication and
   late-registration test. Files: `lib/crowdb-rpc/include/crowdb-rpc/server/handler.h`,
   `lib/crowdb-rpc/tests/server_test.cpp`.
-- [ ] **Thread-local log name**: eliminate shared lookup on formatting. Files:
+- [x] **Lock-free log name lookup**: eliminate shared lookup on formatting. Files:
   `lib/crowdb-common/cpp/{src/log.cpp,tests/log_test.cpp}`.
 
 ## Rust Hot Paths

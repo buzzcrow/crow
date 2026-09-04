@@ -8,8 +8,9 @@
 #include "crowdb-rpc/framing.h"
 #include "crowdb-rpc/transport.h"
 
+#include <atomic>
 #include <functional>
-#include <mutex>
+#include <memory>
 #include <unordered_map>
 
 namespace crowdb::rpc
@@ -38,19 +39,31 @@ OutFrame *handle_unknown(Frame *request, Connection *conn);
 class HandlerRegistry
 {
   public:
-    HandlerRegistry() = default;
+    using HandlerTable = std::unordered_map<uint16_t, HandlerFn>;
+
+    HandlerRegistry() : handlers_(std::make_shared<const HandlerTable>())
+    {
+    }
 
     void register_handler(uint16_t msg_type, HandlerFn handler)
     {
-        std::lock_guard<std::mutex> lock(mu_);
-        handlers_[msg_type] = std::move(handler);
+        auto current = handlers_.load(std::memory_order_acquire);
+        for (;;) {
+            auto next                                     = std::make_shared<HandlerTable>(*current);
+            (*next)[msg_type]                             = handler;
+            std::shared_ptr<const HandlerTable> published = std::move(next);
+            if (handlers_.compare_exchange_weak(current, std::move(published), std::memory_order_release,
+                                                std::memory_order_acquire)) {
+                return;
+            }
+        }
     }
 
-    HandlerFn get_handler(uint16_t msg_type)
+    HandlerFn get_handler(uint16_t msg_type) const
     {
-        std::lock_guard<std::mutex> lock(mu_);
-        auto                        it = handlers_.find(msg_type);
-        if (it != handlers_.end()) {
+        auto table = handlers_.load(std::memory_order_acquire);
+        auto it    = table->find(msg_type);
+        if (it != table->end()) {
             return it->second;
         }
         return nullptr;
@@ -58,13 +71,11 @@ class HandlerRegistry
 
     void clear()
     {
-        std::lock_guard<std::mutex> lock(mu_);
-        handlers_.clear();
+        handlers_.store(std::make_shared<const HandlerTable>(), std::memory_order_release);
     }
 
   private:
-    std::mutex                              mu_;
-    std::unordered_map<uint16_t, HandlerFn> handlers_;
+    std::atomic<std::shared_ptr<const HandlerTable>> handlers_;
 };
 
 } // namespace crowdb::rpc

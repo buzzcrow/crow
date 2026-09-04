@@ -36,14 +36,22 @@ std::atomic<bool> g_enabled{true};
 
 } // namespace
 
-std::mutex                              g_thread_names_mu;
-std::unordered_map<size_t, std::string> g_thread_names;
+using ThreadNames = std::unordered_map<size_t, std::string>;
+std::atomic<std::shared_ptr<const ThreadNames>> g_thread_names{std::make_shared<const ThreadNames>()};
 
 void set_current_thread_name(const char *name)
 {
-    size_t                      tid = spdlog::details::os::thread_id();
-    std::lock_guard<std::mutex> lk(g_thread_names_mu);
-    g_thread_names[tid] = name;
+    const size_t tid     = spdlog::details::os::thread_id();
+    auto         current = g_thread_names.load(std::memory_order_acquire);
+    for (;;) {
+        auto next                                    = std::make_shared<ThreadNames>(*current);
+        (*next)[tid]                                 = name;
+        std::shared_ptr<const ThreadNames> published = std::move(next);
+        if (g_thread_names.compare_exchange_weak(current, std::move(published), std::memory_order_release,
+                                                 std::memory_order_acquire)) {
+            break;
+        }
+    }
 #    if defined(__APPLE__)
     pthread_setname_np(name);
 #    elif defined(__linux__)
@@ -58,8 +66,8 @@ class thread_name_flag : public spdlog::custom_flag_formatter
   public:
     void format(const spdlog::details::log_msg &msg, const std::tm & /*tm*/, spdlog::memory_buf_t &dest) override
     {
-        std::lock_guard<std::mutex> lk(g_thread_names_mu);
-        if (auto it = g_thread_names.find(msg.thread_id); it != g_thread_names.end()) {
+        auto names = g_thread_names.load(std::memory_order_acquire);
+        if (auto it = names->find(msg.thread_id); it != names->end()) {
             dest.append(it->second.data(), it->second.data() + it->second.size());
         }
     }
