@@ -22,6 +22,8 @@ use thiserror::Error;
 pub enum DiskdbClientError {
     #[error("diskdb server unreachable: {0}")]
     Unreachable(String),
+    #[error("diskdb server does not own the requested resource: {0}")]
+    NotOwner(String),
     #[error("diskdb RPC error: {0}")]
     Rpc(String),
 }

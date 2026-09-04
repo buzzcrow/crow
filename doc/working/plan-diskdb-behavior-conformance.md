@@ -16,7 +16,7 @@ Data migration and owner handoff remain in R102.
   to claim some ranges and then exhaust capacity; prove all claims are
   returned and free-space accounting is unchanged. Files:
   `app/crowdb-diskdb/tests/disk_alloc.rs`.
-- [ ] **Cover missing bind isolation**: publish an owner without a bind
+- [x] **Cover missing bind isolation**: publish an owner without a bind
   and prove diskdb neither creates a writable group nor reads/writes
   zone records through `(0, 0)`. Files:
   `app/crowdb-diskdb/tests/keepalive_sync.rs`.
@@ -24,29 +24,29 @@ Data migration and owner handoff remain in R102.
   each startup disk is loaded exactly once and into the group retained
   by the container. Files:
   `app/crowdb-diskdb/tests/startup_sync.rs`.
-- [ ] **Cover failed recovery quarantine**: fail journal replay and full
+- [x] **Cover failed recovery quarantine**: fail journal replay and full
   scan; prove the disk and process do not become writable and group 0
   does not retain `Up`. Files:
   `app/crowdb-diskdb/tests/recovery.rs`.
 
 ## Phase 2: Allocation and Startup Safety
 
-- [~] **Return or roll back every allocation claim**: preserve partial
+- [x] **Return or roll back every allocation claim**: preserve partial
   claims through the model/orchestration boundary and release incomplete
   results before returning failure. Preserve KV persistence errors rather
   than translating them to `NoSpace`. Files:
   `app/crowdb-diskdb/src/model/disk_group.rs`,
   `app/crowdb-diskdb/src/orchestration/alloc.rs`.
-- [ ] **Reject incomplete ownership views**: build owner, bind, group,
+- [x] **Reject incomplete ownership views**: build owner, bind, group,
   node, and disk state before publishing any delta. Missing binds and
   failed reads retain the last-known-good state and set degraded mode.
   Files: `app/crowdb-diskdb/src/liveness/keepalive.rs`.
-- [ ] **Unify startup loading**: use one whole-group startup loader;
+- [x] **Unify startup loading**: use one whole-group startup loader;
   reserve per-disk loading for disks discovered after startup. Fence
   completion by current owner/bind generation. Files:
   `app/crowdb-diskdb/src/main.rs`,
   `app/crowdb-diskdb/src/liveness/keepalive.rs`.
-- [ ] **Keep failed recovery non-writable**: do not substitute empty
+- [~] **Keep failed recovery non-writable**: do not substitute empty
   zones after failed recovery. Persist failure/offline status before a
   later reconciliation can enable the disk. Files:
   `app/crowdb-diskdb/src/recovery/zone_loader.rs`,
@@ -54,7 +54,7 @@ Data migration and owner handoff remain in R102.
 
 ## Phase 3: Client Routing and Service State
 
-- [ ] **Replace routing snapshots**: remove stale endpoint and
+- [x] **Replace routing snapshots**: remove stale endpoint and
   disk-to-group entries on refresh. Treat `NotOwner` as a topology
   invalidation and bounded retry signal. Files:
   `lib/crowdb-diskdb-client/src/client.rs`.
@@ -63,7 +63,7 @@ Data migration and owner handoff remain in R102.
   Files: `lib/crowdb-diskdb-client/src/client.rs`,
   `lib/crowdb-diskdb-client/tests/diskdb_full_flow_test.rs` (move to
   `allocation_lifecycle_test.rs` in Phase 6).
-- [ ] **Use one mutation gate**: allocate, commit, and free must apply
+- [x] **Use one mutation gate**: allocate, commit, and free must apply
   the same lifecycle, degraded, ownership, and bind checks. Files:
   `app/crowdb-diskdb/src/service/diskdb_rpc_service.rs`.
 - [x] **Make readiness truthful**: return ready only for `Up` and
@@ -72,22 +72,22 @@ Data migration and owner handoff remain in R102.
 
 ## Phase 4: Owner Creation
 
-- [ ] **Commit group and owner together**: for serialized management
+- [x] **Commit group and owner together**: for serialized management
   creates, select the least-loaded live diskdb instance, break ties by
   stable instance ID, and batch the disk-group and owner records. Files:
   `lib/crowdb-kv-client/src/hardware.rs`,
   `app/crowdb-web/src/lifecycle.rs`.
-- [ ] **Fail closed on assignment**: reject creation when no live owner
+- [x] **Fail closed on assignment**: reject creation when no live owner
   exists or group-0 persistence fails; keep local configuration and
   group-0 state consistent through compensation. Files:
   `app/crowdb-web/src/lifecycle.rs`,
   `lib/crowdb-console-shared/src/ops/hardware.rs`.
-- [ ] **Enforce immutable ownership**: reject a different owner and
+- [x] **Enforce immutable ownership**: reject a different owner and
   permit only same-instance lease renewal. Do not add owner handoff or
   data migration. Files: `lib/crowdb-kv-client/src/hardware.rs`,
   `app/crowdb-web/src/diskdb.rs`,
   `lib/crowdb-console-shared/src/clients/console.rs`.
-- [ ] **Verify serial balancing**: create 13 disk-groups through the
+- [~] **Verify serial balancing**: create 13 disk-groups through the
   management API with three live groups and assert one owner per group
   with counts `[4, 4, 5]`. Files:
   `lib/crowdb-diskdb-client/tests/owner_creation.rs`,

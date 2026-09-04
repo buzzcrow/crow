@@ -50,6 +50,14 @@ pub struct KeepAliveOutcome {
     pub sync_duration_ms: u64,
 }
 
+struct ObservedDiskGroup {
+    owner: crowdb_protocol::DiskdbOwnerEntry,
+    bind: (u64, u64),
+    node_status: HwStatus,
+    group_status: HwStatus,
+    disks: Vec<(DiskId, DiskValue)>,
+}
+
 /// Handle to a running per-disk recovery scan task. The cancel flag
 /// is set on `HwStatus::Up` recovery; the join handle is awaited on
 /// shutdown.
@@ -225,20 +233,9 @@ impl KeepAlive {
     pub async fn tick(&self) -> KeepAliveOutcome {
         let start = std::time::Instant::now();
 
-        // a. Keep-alive heartbeat.
-        if !self.heartbeat().await {
-            if let Some(m) = &self.metrics {
-                m.sync_failure_total.inc();
-            }
-            return KeepAliveOutcome {
-                sync_duration_ms: elapsed_ms(start),
-                ..Default::default()
-            };
-        }
-
-        // b+c. Observe ownership (owner map + bind map).
+        // Observe a complete group-0 snapshot before publishing changes.
         let read_start = std::time::Instant::now();
-        let Some((owned, groups_added, groups_removed)) = self.observe_ownership().await else {
+        let Some(observed) = self.observe_group0().await else {
             if let Some(m) = &self.metrics {
                 m.sync_failure_total.inc();
             }
@@ -248,13 +245,22 @@ impl KeepAlive {
             };
         };
 
-        // d+e+f. Reconcile disk-groups + observe disks.
-        let mut outcome = self.observe_disks(&owned).await;
+        let (groups_added, groups_removed) = self.reconcile_ownership(&observed);
+        let mut outcome = self.reconcile_observed_disks(&observed).await;
         if let Some(m) = &self.metrics {
             m.sync_read_group0_latency.observe(elapsed_ns(read_start));
         }
         outcome.groups_added = groups_added;
         outcome.groups_removed = groups_removed;
+
+        // Publish the reconciled ownership and usage in the heartbeat.
+        if !self.heartbeat().await {
+            if let Some(m) = &self.metrics {
+                m.sync_failure_total.inc();
+            }
+            outcome.sync_duration_ms = elapsed_ms(start);
+            return outcome;
+        }
 
         // h. Reset missed count on success.
         let apply_start = std::time::Instant::now();
@@ -323,36 +329,20 @@ impl KeepAlive {
         true
     }
 
-    /// Read the owner map + bind map from group 0, filter to owned
-    /// disk-groups, and reconcile the container (add new, update
-    /// binds, remove gone). Returns `None` on I/O failure (caller
-    /// skips the rest of the tick). Returns `(owned, groups_added,
-    /// groups_removed)` on success.
-    async fn observe_ownership(&self) -> Option<(Vec<crowdb_protocol::DiskdbOwnerEntry>, usize, usize)> {
-        let instance_id = self.container.instance_id;
-
-        // Read ownership map.
+    async fn observe_group0(&self) -> Option<Vec<ObservedDiskGroup>> {
         let owners = match self.hw.list_owners().await {
-            Ok(o) => o,
-            Err(e) => {
-                warn!(error = %e, "sync: read owner map failed");
-                let count = self.missed_count.fetch_add(1, Ordering::SeqCst) + 1;
-                if count >= self.config.miss_threshold {
-                    self.container.enter_degraded_mode();
-                }
+            Ok(owners) => owners,
+            Err(error) => {
+                warn!(%error, "sync: read owner map failed");
+                self.record_observation_failure();
                 return None;
             }
         };
-
-        // Read bind map.
         let binds = match self.hw.list_binds().await {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(error = %e, "sync: read bind map failed");
-                let count = self.missed_count.fetch_add(1, Ordering::SeqCst) + 1;
-                if count >= self.config.miss_threshold {
-                    self.container.enter_degraded_mode();
-                }
+            Ok(binds) => binds,
+            Err(error) => {
+                warn!(%error, "sync: read bind map failed");
+                self.record_observation_failure();
                 return None;
             }
         };
@@ -360,79 +350,132 @@ impl KeepAlive {
             .into_iter()
             .map(|b| (b.dg_id, (b.store_id, b.group_id)))
             .collect();
-
-        // Filter to owned disk-groups.
         let owned: Vec<_> = owners
             .into_iter()
-            .filter(|o| o.instance_id == instance_id)
+            .filter(|owner| owner.instance_id == self.container.instance_id)
             .collect();
 
-        // Reconcile disk-groups: add new, update binds, remove gone.
+        let mut observed = Vec::with_capacity(owned.len());
+        for owner in owned {
+            let Some(&bind) = bind_map.get(&owner.dg_id) else {
+                warn!(dg_id = owner.dg_id, "sync: owned disk-group has no bind");
+                self.record_observation_failure();
+                return None;
+            };
+            observed.push(self.observe_disk_group(owner, bind).await?);
+        }
+        Some(observed)
+    }
+
+    async fn observe_disk_group(
+        &self,
+        owner: crowdb_protocol::DiskdbOwnerEntry,
+        bind: (u64, u64),
+    ) -> Option<ObservedDiskGroup> {
+        let node = match self.hw.get_node(owner.rack_id, owner.node_id).await {
+            Ok(Some(node)) => node,
+            Ok(None) => {
+                warn!(
+                    rack_id = owner.rack_id,
+                    node_id = owner.node_id,
+                    "sync: owned node is absent"
+                );
+                self.record_observation_failure();
+                return None;
+            }
+            Err(error) => {
+                warn!(%error, rack_id = owner.rack_id, node_id = owner.node_id, "sync: read node failed");
+                self.record_observation_failure();
+                return None;
+            }
+        };
+        let group = match self
+            .hw
+            .get_disk_group(owner.rack_id, owner.node_id, owner.dg_id)
+            .await
+        {
+            Ok(Some(group)) => group,
+            Ok(None) => {
+                warn!(dg_id = owner.dg_id, "sync: owned disk-group record is absent");
+                self.record_observation_failure();
+                return None;
+            }
+            Err(error) => {
+                warn!(%error, dg_id = owner.dg_id, "sync: read disk-group failed");
+                self.record_observation_failure();
+                return None;
+            }
+        };
+        let disks = match self
+            .hw
+            .list_disks_in_group(owner.rack_id, owner.node_id, owner.dg_id)
+            .await
+        {
+            Ok(disks) => disks,
+            Err(error) => {
+                warn!(%error, dg_id = owner.dg_id, "sync: list disks failed");
+                self.record_observation_failure();
+                return None;
+            }
+        };
+        let node_status = HwStatus::try_from(node.status).ok()?;
+        let group_status = HwStatus::try_from(group.value.status).ok()?;
+        Some(ObservedDiskGroup {
+            owner,
+            bind,
+            node_status,
+            group_status,
+            disks,
+        })
+    }
+
+    fn record_observation_failure(&self) {
+        let count = self.missed_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if count >= self.config.miss_threshold {
+            self.container.enter_degraded_mode();
+        }
+    }
+
+    fn reconcile_ownership(&self, observed: &[ObservedDiskGroup]) -> (usize, usize) {
         let current_ids: Vec<_> = self.container.disk_group_ids();
         let mut groups_added = 0usize;
         let mut groups_removed = 0usize;
 
-        for entry in &owned {
-            if !current_ids.contains(&entry.dg_id) {
-                // New disk-group assigned.
-                let dg = Arc::new(DdbDiskGroup::new(entry.dg_id, entry.node_id, entry.rack_id));
-                // Set bind from the bind map.
-                if let Some(&(store_id, group_id)) = bind_map.get(&entry.dg_id) {
-                    *dg.bind.write().unwrap() = (store_id, group_id);
-                }
+        for entry in observed {
+            if !current_ids.contains(&entry.owner.dg_id) {
+                let dg = Arc::new(DdbDiskGroup::new(
+                    entry.owner.dg_id,
+                    entry.owner.node_id,
+                    entry.owner.rack_id,
+                ));
+                *dg.bind.write().unwrap() = entry.bind;
                 self.container.add_disk_group(dg);
                 groups_added += 1;
-            } else if let Some(dg) = self.container.get_disk_group(entry.dg_id) {
-                // Update bind if changed.
-                if let Some(&(store_id, group_id)) = bind_map.get(&entry.dg_id) {
-                    let mut bind = dg.bind.write().unwrap();
-                    if *bind != (store_id, group_id) {
-                        *bind = (store_id, group_id);
-                    }
+            } else if let Some(dg) = self.container.get_disk_group(entry.owner.dg_id) {
+                let mut bind = dg.bind.write().unwrap();
+                if *bind != entry.bind {
+                    *bind = entry.bind;
                 }
             }
         }
 
-        // Detect removed disk-groups.
         for &id in &current_ids {
-            if !owned.iter().any(|o| o.dg_id == id) {
+            if !observed.iter().any(|entry| entry.owner.dg_id == id) {
                 self.container.remove_disk_group(id);
                 groups_removed += 1;
             }
         }
 
-        Some((owned, groups_added, groups_removed))
+        (groups_added, groups_removed)
     }
 
-    /// For each owned disk-group, read member disks from group 0 and
-    /// reconcile (disk-add init, status changes, removals). Drives
-    /// the `HwStateMachine` on status changes.
-    async fn observe_disks(&self, owned: &[crowdb_protocol::DiskdbOwnerEntry]) -> KeepAliveOutcome {
+    async fn reconcile_observed_disks(&self, observed: &[ObservedDiskGroup]) -> KeepAliveOutcome {
         let mut outcome = KeepAliveOutcome::default();
-        for entry in owned {
-            let Some(dg) = self.container.get_disk_group(entry.dg_id) else {
+        for entry in observed {
+            let Some(dg) = self.container.get_disk_group(entry.owner.dg_id) else {
                 continue;
             };
-            let disks = match self
-                .hw
-                .list_disks_in_group(entry.rack_id, entry.node_id, entry.dg_id)
-                .await
-            {
-                Ok(d) => d,
-                Err(e) => {
-                    warn!(error = %e, dg_id = entry.dg_id, "sync: list disks failed");
-                    continue;
-                }
-            };
-            self.reconcile_disks(
-                &dg,
-                entry.rack_id,
-                entry.node_id,
-                entry.dg_id,
-                &disks,
-                &mut outcome,
-            )
-            .await;
+            self.reconcile_disks(&dg, entry, &mut outcome).await;
         }
         outcome
     }
@@ -450,36 +493,15 @@ impl KeepAlive {
     async fn reconcile_disks(
         &self,
         dg: &Arc<DdbDiskGroup>,
-        rack_id: RackId,
-        node_id: NodeId,
-        dg_id: DiskGroupId,
-        disks: &[(DiskId, DiskValue)],
+        observed: &ObservedDiskGroup,
         outcome: &mut KeepAliveOutcome,
     ) {
-        // A.1: fetch node + disk-group status from group 0.
-        let node_status = match self.hw.get_node(rack_id, node_id).await {
-            Ok(Some(nv)) => HwStatus::try_from(nv.status).unwrap_or(HwStatus::Up),
-            Ok(None) => {
-                warn!(rack_id, node_id, "sync: node value absent; assuming Up");
-                HwStatus::Up
-            }
-            Err(e) => {
-                warn!(error = %e, rack_id, node_id, "sync: get_node failed; assuming Up");
-                HwStatus::Up
-            }
-        };
-        let group_status = match self.hw.get_disk_group(rack_id, node_id, dg_id).await {
-            Ok(Some(dgv)) => HwStatus::try_from(dgv.value.status).unwrap_or(HwStatus::Up),
-            Ok(None) => {
-                warn!(dg_id, "sync: disk-group value absent; assuming Up");
-                HwStatus::Up
-            }
-            Err(e) => {
-                warn!(error = %e, dg_id, "sync: get_disk_group failed; assuming Up");
-                HwStatus::Up
-            }
-        };
-
+        let rack_id = observed.owner.rack_id;
+        let node_id = observed.owner.node_id;
+        let dg_id = observed.owner.dg_id;
+        let disks = &observed.disks;
+        let node_status = observed.node_status;
+        let group_status = observed.group_status;
         // A.1: apply group status to the in-memory DdbDiskGroup.
         let current_group_status = *dg.status.read().unwrap();
         if current_group_status != group_status {

@@ -490,7 +490,8 @@ async fn recovery_strategy2_journal_replay() {
     let recovery = ZoneLoader::new(Arc::clone(&recovery_kv), 4);
     let recovered_dg = recovery
         .load_disk_group(DG_ID, NODE_ID, RACK_ID, bind2, &disks, 4)
-        .await;
+        .await
+        .expect("recover disk-group");
 
     // 5. Verify busy segments' bits are set. With Option B (persist-
     // only recovery), freed segments' bits are ALSO set (conservative
@@ -1039,7 +1040,8 @@ async fn recovery_persist_only_is_idempotent() {
     let recovery1 = ZoneLoader::new(Arc::clone(&recovery_kv1), 4);
     let dg1 = recovery1
         .load_disk_group(DG_ID, NODE_ID, RACK_ID, bind, &disk_values, 4)
-        .await;
+        .await
+        .expect("first recovery");
 
     // 5. Collect used_count per zone per disk from first recovery.
     // Use (disk_id_low, zone_index, used_count) — disk_id.low is a
@@ -1064,7 +1066,8 @@ async fn recovery_persist_only_is_idempotent() {
     let recovery2 = ZoneLoader::new(Arc::clone(&recovery_kv2), 4);
     let dg2 = recovery2
         .load_disk_group(DG_ID, NODE_ID, RACK_ID, bind, &disk_values, 4)
-        .await;
+        .await
+        .expect("second recovery");
 
     // 7. Collect used_count per zone per disk from second recovery.
     let mut state2: Vec<(u64, u32, u32)> = Vec::new();

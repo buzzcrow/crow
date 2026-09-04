@@ -5,5 +5,6 @@
 
 pub mod diskdb_rpc_service;
 pub mod diskdb_service;
+mod mutation_gate;
 
 pub use diskdb_rpc_service::DiskdbRpcService;

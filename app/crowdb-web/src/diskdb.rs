@@ -610,7 +610,15 @@ pub async fn http_set_disk_group_owner(
     };
     hw.set_owner(rack_id, node_id, dg_id, instance_id, body.lease_expiry_ms)
         .await
-        .map_err(|e| err_502(format!("set_owner: {e}")))?;
+        .map_err(|e| match e {
+            crowdb_kv_client::Error::OwnerConflict { .. } => (
+                StatusCode::CONFLICT,
+                Json(ErrorBody {
+                    error: format!("set_owner: {e}"),
+                }),
+            ),
+            other => err_502(format!("set_owner: {other}")),
+        })?;
     Ok(StatusCode::NO_CONTENT)
 }
 

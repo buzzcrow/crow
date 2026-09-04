@@ -29,7 +29,7 @@ use crowdb_protocol::key::{
 use crowdb_protocol::sysdata::{DiskGroupEntry, DiskdbOwnerEntry, KVGroupBindEntry};
 
 use crate::client::{GetOutcome, ScanOutcome};
-use crate::{CrowdbKvClient, Error, Result};
+use crate::{BatchOp, CrowdbKvClient, Error, Result};
 
 /// Group-0 store/group IDs (the system group).
 const G0_STORE: u64 = 0;
@@ -680,8 +680,71 @@ impl HardwareClient {
 // ── ownership map ───────────────────────────────────────────────
 
 impl HardwareClient {
-    /// Set the ownership-map entry for a disk-group (which diskdb
-    /// instance owns it + lease expiry).
+    /// Atomically persist a disk-group record and its initial immutable
+    /// owner in one group-0 batch.
+    pub async fn add_disk_group_with_owner(
+        &self,
+        rack_id: RackId,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
+        disk_group: &DiskGroupValue,
+        instance_id: u64,
+        lease_expiry_ms: u64,
+    ) -> Result<()> {
+        if let Some(current) = self.get_owner(rack_id, node_id, dg_id).await? {
+            if current.instance_id != instance_id {
+                return Err(Error::OwnerConflict {
+                    disk_group_id: dg_id,
+                    current: current.instance_id,
+                    requested: instance_id,
+                });
+            }
+        }
+        let group_key = DiskGroupKey {
+            rack_id,
+            node_id,
+            disk_group_id: dg_id,
+        }
+        .to_path();
+        let owner_key = OwnerMapKey {
+            rack_id,
+            node_id,
+            disk_group_id: dg_id,
+        }
+        .to_path();
+        let owner = crowdb_protocol::common::OwnerMapValue {
+            instance_id,
+            lease_expiry_ms,
+        };
+        let group_value = serde_json::to_vec(disk_group).map_err(|error| Error::SysdataDecode {
+            key: group_key.clone(),
+            reason: error.to_string(),
+        })?;
+        let owner_value = serde_json::to_vec(&owner).map_err(|error| Error::SysdataDecode {
+            key: owner_key.clone(),
+            reason: error.to_string(),
+        })?;
+        self.kv
+            .batch_write(
+                G0_STORE,
+                G0_GROUP,
+                &[
+                    BatchOp::Put {
+                        key: bytes::Bytes::from(group_key),
+                        value: bytes::Bytes::from(group_value),
+                    },
+                    BatchOp::Put {
+                        key: bytes::Bytes::from(owner_key),
+                        value: bytes::Bytes::from(owner_value),
+                    },
+                ],
+            )
+            .await
+            .map(|_| ())
+    }
+
+    /// Create an ownership-map entry or renew its lease for the same
+    /// instance. Replacing an existing owner is rejected.
     pub async fn set_owner(
         &self,
         rack_id: RackId,
@@ -690,6 +753,15 @@ impl HardwareClient {
         instance_id: u64,
         lease_expiry_ms: u64,
     ) -> Result<()> {
+        if let Some(current) = self.get_owner(rack_id, node_id, dg_id).await? {
+            if current.instance_id != instance_id {
+                return Err(Error::OwnerConflict {
+                    disk_group_id: dg_id,
+                    current: current.instance_id,
+                    requested: instance_id,
+                });
+            }
+        }
         let key = OwnerMapKey {
             rack_id,
             node_id,

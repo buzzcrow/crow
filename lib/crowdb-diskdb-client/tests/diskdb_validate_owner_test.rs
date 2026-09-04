@@ -77,7 +77,7 @@ async fn diskdb_client_e2e_validate_owner() {
         })
         .await;
     assert!(
-        matches!(&result, Err(DiskdbClientError::Rpc(msg)) if msg.contains("not owner")),
+        matches!(&result, Err(DiskdbClientError::NotOwner(msg)) if msg.contains("owner mismatch")),
         "expected not-owner error for wrong owner, got {result:?}"
     );
     eprintln!("  free with wrong owner: rejected (NotOwner)");

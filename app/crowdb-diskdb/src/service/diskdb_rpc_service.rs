@@ -60,6 +60,7 @@ use crate::recovery::{unit_capacity_for_zone, ZoneLoader};
 use crate::scanner::{ScanState, ScanSummary};
 
 use super::diskdb_service::{elapsed_ns, ALL_ZONES, MAX_ALLOCATE_COUNT};
+use super::mutation_gate;
 
 /// Disk-group + usage + `disk_ids` + disks tuple for query responses.
 type DiskGroupQueryEntry = (Arc<DdbDiskGroup>, DiskGroupUsage, Vec<DiskId>, Vec<Arc<DdbDisk>>);
@@ -234,6 +235,16 @@ impl DiskdbRpcService {
                     );
                     submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
                 }
+                Err(AllocError::Persistence) => {
+                    let ctrl = build_allocate_response(
+                        req_id,
+                        create_nano,
+                        FBDiskdbRetCode::Internal,
+                        Some("allocation persistence failed"),
+                        &[],
+                    );
+                    submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
+                }
             }
         });
     }
@@ -258,13 +269,7 @@ impl DiskdbRpcService {
             return Err((FBDiskdbRetCode::InvalidArgument, "count exceeds maximum"));
         }
 
-        let phase = self.container.lifecycle_phase();
-        if !phase.allows_mutating_rpcs() {
-            return Err((FBDiskdbRetCode::Unavailable, "diskdb not ready"));
-        }
-        if self.container.is_degraded() {
-            return Err((FBDiskdbRetCode::Degraded, "diskdb in degraded mode"));
-        }
+        mutation_gate::validate(&self.container)?;
 
         let disk_group_id = fb_req.disk_group_id();
         let dg = self
@@ -335,28 +340,15 @@ impl DiskdbRpcService {
             }
         };
 
-        let phase = self.container.lifecycle_phase();
-        if !phase.allows_mutating_rpcs() {
+        if let Err((code, message)) = mutation_gate::validate(&self.container) {
             submit_error(
                 server,
                 req.conn_handle,
                 req_id,
                 create_nano,
                 msg_type,
-                FBDiskdbRetCode::Unavailable,
-                "diskdb not ready",
-            );
-            return;
-        }
-        if self.container.is_degraded() {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBDiskdbRetCode::Degraded,
-                "diskdb in degraded mode",
+                code,
+                message,
             );
             return;
         }
@@ -455,16 +447,15 @@ impl DiskdbRpcService {
             }
         };
 
-        let phase = self.container.lifecycle_phase();
-        if !phase.allows_mutating_rpcs() {
+        if let Err((code, message)) = mutation_gate::validate(&self.container) {
             submit_error(
                 server,
                 req.conn_handle,
                 req_id,
                 create_nano,
                 msg_type,
-                FBDiskdbRetCode::Unavailable,
-                "diskdb not ready",
+                code,
+                message,
             );
             return;
         }

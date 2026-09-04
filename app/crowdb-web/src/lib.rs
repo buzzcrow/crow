@@ -18,6 +18,7 @@ pub mod health;
 pub mod kv;
 pub mod lifecycle;
 pub mod mgmt;
+pub mod owner_assignment;
 pub mod physical;
 pub mod physical_view;
 pub mod spa;

@@ -217,7 +217,6 @@ async fn main() {
         None
     };
     let keepalive = KeepAlive::new(hw, svc, container.clone(), keepalive_cfg)
-        .with_ddb_kv_client(dg_kv_sync)
         .with_cas_retry_metric(Arc::clone(&metrics.allocate_retry_cas_bit))
         .with_config_handle(Arc::clone(&config))
         .with_rpc_endpoint(config.load().server.rpc_listen_addr.clone())
@@ -236,6 +235,7 @@ async fn main() {
         duration_ms = init_outcome.sync_duration_ms,
         "initial keep-alive tick complete"
     );
+    let keepalive = keepalive.with_ddb_kv_client(dg_kv_sync);
 
     // Build the crowdb-rpc service + start serving immediately (before
     // zone loading). Mutating RPCs are gated on lifecycle phase = Up,
@@ -419,6 +419,7 @@ async fn run_zone_load(
             continue;
         };
         let bind = *dg.bind.read().unwrap();
+        let group_status = *dg.status.read().unwrap();
         let disks: Vec<(
             crowdb_protocol::common::DiskId,
             crowdb_protocol::diskdb::rpc::DiskValue,
@@ -440,6 +441,24 @@ async fn run_zone_load(
                 config.storage.zone_rotate_count,
             )
             .await;
+        let loaded = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                tracing::error!(dg_id, %error, "disk-group recovery failed; instance remains non-writable");
+                container.enter_degraded_mode();
+                return;
+            }
+        };
+        let Some(current) = container.get_disk_group(dg_id) else {
+            info!(dg_id, "discarding completed load for no-longer-owned disk-group");
+            continue;
+        };
+        if !Arc::ptr_eq(&current, &dg) || *current.bind.read().unwrap() != bind {
+            info!(dg_id, "discarding stale disk-group load result");
+            continue;
+        }
+        *loaded.status.write().unwrap() = group_status;
+        loaded.rebuild_allocating_disks();
         container.replace_disk_group(loaded);
         metrics
             .recovery_duration_ms

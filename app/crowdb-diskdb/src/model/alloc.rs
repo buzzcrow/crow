@@ -165,6 +165,7 @@ pub async fn allocate_block(
             compact_fallback(dg, kv, zone_rotate_count, metrics).await;
             dg.allocate_block(unit_count, &[], cas_retry_limit, zone_rotate_count)?
         }
+        Err(error @ AllocError::Persistence) => return Err(error),
     };
 
     // Record per-disk event counter after Phase 1 CAS succeeds.
@@ -188,7 +189,7 @@ pub async fn allocate_block(
         // Rollback Phase 1.
         let _ = zone.rollback_allocate(range.unit_offset, range.unit_count);
         tracing::warn!("allocate persist failed, rolled back bitmap: {e}");
-        return Err(AllocError::NoSpace);
+        return Err(AllocError::Persistence);
     }
 
     Ok(Segment {
@@ -247,6 +248,7 @@ pub async fn allocate_blocks(
                 zone_rotate_count,
             )?
         }
+        Err(error @ AllocError::Persistence) => return Err(error),
     };
 
     // Record per-disk event counters after Phase 1 CAS succeeds.
@@ -287,7 +289,7 @@ pub async fn allocate_blocks(
         }
         tracing::warn!("allocate_blocks persist failed, rolled back {count} claims: {e}");
         metrics.allocate_errors_total.inc();
-        return Err(AllocError::NoSpace);
+        return Err(AllocError::Persistence);
     }
     metrics
         .allocate_kv_persist_latency

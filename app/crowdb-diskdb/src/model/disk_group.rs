@@ -184,6 +184,7 @@ impl DdbDiskGroup {
                     results.push((disk, zone, range));
                 }
                 Err(AllocError::NoSpace) => break,
+                Err(error @ AllocError::Persistence) => return Err(error),
             }
         }
 
@@ -345,6 +346,8 @@ pub struct DiskGroupUsage {
 pub enum AllocError {
     /// No disk/zone can satisfy the request.
     NoSpace,
+    /// Durable allocation record persistence failed.
+    Persistence,
 }
 
 /// Current wall-clock time in nanoseconds (monotonic source for

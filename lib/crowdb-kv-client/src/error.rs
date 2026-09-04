@@ -14,6 +14,13 @@ pub enum Error {
     #[error("server rejected the request: {0}")]
     Server(String),
 
+    #[error("disk-group {disk_group_id} owner is immutable: current={current}, requested={requested}")]
+    OwnerConflict {
+        disk_group_id: u64,
+        current: u64,
+        requested: u64,
+    },
+
     /// A `JournalScan` asked for slots already GC'd below the WAL trim
     /// point (server `KV_ERROR_JOURNAL_SCAN_GC_GAP`). Deterministic —
     /// the client does not retry it; the caller (diskdb recovery) falls

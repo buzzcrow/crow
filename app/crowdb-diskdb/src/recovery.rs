@@ -51,6 +51,8 @@ pub enum ZoneLoadError {
     /// Snapshot CRC mismatch — the `ZoneValue` is corrupted. The
     /// caller should fall back to strategy 1.
     SnapshotCrcFail,
+    /// Both recovery strategies failed, or a zone task did not complete.
+    LoadFailed(String),
 }
 
 impl std::fmt::Display for ZoneLoadError {
@@ -59,6 +61,7 @@ impl std::fmt::Display for ZoneLoadError {
             Self::Kv(e) => write!(f, "kv error: {e}"),
             Self::JournalScanGcGap => write!(f, "journal scan gc gap (slots already GC'd)"),
             Self::SnapshotCrcFail => write!(f, "snapshot CRC mismatch"),
+            Self::LoadFailed(message) => write!(f, "zone load failed: {message}"),
         }
     }
 }
@@ -121,7 +124,7 @@ impl ZoneLoader {
         bind: Bind,
         disks: &[(DiskId, DiskValue)],
         zone_rotate_count: u32,
-    ) -> Arc<DdbDiskGroup> {
+    ) -> Result<Arc<DdbDiskGroup>, ZoneLoadError> {
         let dg = Arc::new(DdbDiskGroup::new(dg_id, node_id, rack_id));
         *dg.bind.write().unwrap() = bind;
 
@@ -185,9 +188,11 @@ impl ZoneLoader {
                                     disk_id = ?*disk_id,
                                     zone_index = zi,
                                     error = %e2,
-                                    "strategy 1 fallback also failed; using empty zone"
+                                    "strategy 1 fallback also failed; keeping disk-group non-writable"
                                 );
-                                (DdbZone::new(*disk_id, zi, dg_id, unit_capacity), 0)
+                                return Err(ZoneLoadError::LoadFailed(format!(
+                                    "disk {disk_id:?} zone {zi}: journal replay: {e}; full scan: {e2}"
+                                )));
                             }
                         }
                     }
@@ -196,9 +201,11 @@ impl ZoneLoader {
                             disk_id = ?*disk_id,
                             zone_index = zi,
                             error = %e,
-                            "zone load task panicked; using empty zone"
+                            "zone load task failed; keeping disk-group non-writable"
                         );
-                        (DdbZone::new(*disk_id, zi, dg_id, unit_capacity), 0)
+                        return Err(ZoneLoadError::LoadFailed(format!(
+                            "disk {disk_id:?} zone {zi}: task join: {e}"
+                        )));
                     }
                 };
                 disk.add_zone(Arc::new(zone));
@@ -233,7 +240,7 @@ impl ZoneLoader {
         // ahead of ours.
         dg.init_free_ts_source_after_load(max_freed_ts_in_dg);
 
-        dg
+        Ok(dg)
     }
 
     /// Strategy 1 — full scan rebuild of one zone's usage bitmap from

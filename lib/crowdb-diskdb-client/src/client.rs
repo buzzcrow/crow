@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::HashMap, collections::HashSet};
 
 use dashmap::DashMap;
 use tracing::warn;
@@ -89,15 +90,23 @@ impl DiskdbClient {
             .read_all_diskdb_instances()
             .await
             .map_err(|e| DiskdbClientError::Unreachable(format!("read_all_diskdb_instances: {e}")))?;
+        let mut observed = HashMap::new();
         for (_id, value) in instances {
             if let Some(extra) = &value.extra {
                 if let Some(diskdb) = &extra.diskdb {
                     for &dg_id in &diskdb.owned_dg_ids {
-                        self.endpoint_cache.insert(dg_id, value.rpc_endpoint.clone());
+                        observed.insert(dg_id, value.rpc_endpoint.clone());
                     }
                 }
             }
         }
+        let observed_ids: HashSet<_> = observed.keys().copied().collect();
+        self.endpoint_cache
+            .retain(|dg_id, _| observed_ids.contains(dg_id));
+        for (dg_id, endpoint) in observed {
+            self.endpoint_cache.insert(dg_id, endpoint);
+        }
+        self.disk_to_dg.retain(|_, dg_id| observed_ids.contains(dg_id));
         Ok(())
     }
 
@@ -461,9 +470,14 @@ impl DiskdbClient {
             match op(endpoint, Arc::clone(&rpc)).await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    if matches!(e, DiskdbClientError::Unreachable(_)) {
+                    if matches!(
+                        e,
+                        DiskdbClientError::Unreachable(_) | DiskdbClientError::NotOwner(_)
+                    ) {
                         warn!(dg_id, attempt, error = %e, "rpc transient error, retrying");
                         last_err = Some(e);
+                        self.endpoint_cache.remove(&dg_id);
+                        self.disk_to_dg.retain(|_, cached_dg_id| *cached_dg_id != dg_id);
                         let _ = self.refresh_endpoints().await;
                         tokio::time::sleep(backoff).await;
                         backoff *= 2;

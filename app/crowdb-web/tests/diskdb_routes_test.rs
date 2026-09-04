@@ -13,11 +13,45 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crowdb_console_shared::ConsoleConfig;
+use crowdb_console_shared::{ConsoleConfig, DiskGroupEntry, NodeEntry, RackEntry};
 use crowdb_web::{router, AppState};
 use serde_json::{json, Value};
 
 async fn spawn_web() -> SocketAddr {
+    spawn_web_with_config(ConsoleConfig::default()).await
+}
+
+async fn spawn_web_with_disk_group(rack_id: u64, node_id: u64, dg_id: u64) -> SocketAddr {
+    let mut config = ConsoleConfig::default();
+    config
+        .add_rack(RackEntry {
+            id: rack_id,
+            name: format!("r{rack_id}"),
+        })
+        .unwrap();
+    config
+        .add_node(NodeEntry {
+            id: node_id,
+            rack_id,
+            host: "127.0.0.1".to_string(),
+            ssh_port: 22,
+            ssh_user: String::new(),
+            ssh_key: None,
+            ssh_password: None,
+        })
+        .unwrap();
+    config
+        .add_disk_group(DiskGroupEntry {
+            id: dg_id,
+            rack_id,
+            node_id,
+            name: String::new(),
+        })
+        .unwrap();
+    spawn_web_with_config(config).await
+}
+
+async fn spawn_web_with_config(cfg: ConsoleConfig) -> SocketAddr {
     let addr_bind = SocketAddr::from(([127, 0, 0, 1], 0));
     let listener = tokio::net::TcpListener::bind(addr_bind).await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
@@ -31,7 +65,6 @@ async fn spawn_web() -> SocketAddr {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let cfg_path = dir.join("console.toml");
-    let cfg = ConsoleConfig::load(&cfg_path).unwrap_or_default();
     let state = AppState::with_config(cfg, Some(cfg_path));
     tokio::spawn(async move {
         axum::serve(listener, router(state)).await.unwrap();
@@ -109,38 +142,13 @@ async fn set_disk_status_returns_404_for_unknown_disk() {
     assert_eq!(s.as_u16(), 404, "unknown disk: {s}");
 }
 
-async fn setup_rack_node_dg(client: &reqwest::Client, base: &str, rack_id: u64, node_id: u64, dg_id: u64) {
-    let (s, v) = json_post(
-        client,
-        &format!("{base}/api/racks"),
-        json!({ "id": rack_id, "name": format!("r{rack_id}") }),
-    )
-    .await;
-    assert!(s.is_success(), "create rack: {s} {v}");
-    let (s, v) = json_post(
-        client,
-        &format!("{base}/api/racks/{rack_id}/nodes"),
-        json!({ "id": node_id, "rack_id": rack_id, "host": "127.0.0.1" }),
-    )
-    .await;
-    assert!(s.is_success(), "create node: {s} {v}");
-    let (s, v) = json_post(
-        client,
-        &format!("{base}/api/nodes/{node_id}/disk-groups"),
-        json!({ "id": dg_id }),
-    )
-    .await;
-    assert!(s.is_success(), "create dg: {s} {v}");
-}
-
 #[tokio::test]
 async fn set_disk_status_returns_400_for_invalid_status() {
-    let addr = spawn_web().await;
+    let addr = spawn_web_with_disk_group(1, 10, 1).await;
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
 
     // We need a disk in the config first. Create rack → node → dg → disk.
-    setup_rack_node_dg(&client, &base, 1, 10, 1).await;
     let (s, v) = json_post(
         &client,
         &format!("{base}/api/nodes/10/disk-groups/1/disks"),
@@ -160,11 +168,9 @@ async fn set_disk_status_returns_400_for_invalid_status() {
 
 #[tokio::test]
 async fn batch_disk_add_creates_all_valid_disks() {
-    let addr = spawn_web().await;
+    let addr = spawn_web_with_disk_group(2, 20, 1).await;
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
-
-    setup_rack_node_dg(&client, &base, 2, 20, 1).await;
 
     let (s, v) = json_post(
         &client,
@@ -190,11 +196,9 @@ async fn batch_disk_add_creates_all_valid_disks() {
 
 #[tokio::test]
 async fn batch_disk_add_rejects_malformed_disk_id() {
-    let addr = spawn_web().await;
+    let addr = spawn_web_with_disk_group(3, 30, 1).await;
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
-
-    setup_rack_node_dg(&client, &base, 3, 30, 1).await;
 
     let (s, v) = json_post(
         &client,
@@ -217,11 +221,9 @@ async fn batch_disk_add_rejects_malformed_disk_id() {
 
 #[tokio::test]
 async fn batch_disk_add_rejects_duplicate_ids_within_batch() {
-    let addr = spawn_web().await;
+    let addr = spawn_web_with_disk_group(4, 40, 1).await;
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
-
-    setup_rack_node_dg(&client, &base, 4, 40, 1).await;
 
     let (s, v) = json_post(
         &client,
