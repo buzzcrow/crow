@@ -153,4 +153,32 @@ test.describe('inspector · activity log', () => {
       await step('inspector: stop server 47', () => stopNodeServer(baseURL!, 47));
     }
   });
+
+  test('clears stale properties when the domain changes or the cluster resets', async ({ page, baseURL }) => {
+    await step('inspector: seed reset node', () => seedRackAndNode(baseURL!, 48, 48));
+    await step('inspector: open selected node', async () => {
+      await page.goto('/');
+      const node = page.getByRole('treeitem').filter({ hasText: 'N-48' });
+      await expect(node).toBeVisible();
+      await node.getByRole('button', { name: 'N-48' }).click();
+      await expect(page.getByRole('complementary', { name: 'Entity inspector' })).toBeVisible();
+
+      await page.getByTestId('domain-kv').click();
+      await expect(page.getByRole('complementary', { name: 'Entity inspector' })).toHaveCount(0);
+
+      await page.getByTestId('domain-cluster').click();
+      await node.getByRole('button', { name: 'N-48' }).click();
+      await expect(page.getByRole('complementary', { name: 'Entity inspector' })).toBeVisible();
+    });
+
+    await step('inspector: reset clears selection', async () => {
+      await page.getByRole('button', { name: /^Reset$/ }).click();
+      const dialog = page.getByRole('dialog', { name: 'Delete Cluster' });
+      await expect(dialog).toBeVisible();
+      const responsePromise = page.waitForResponse((response) => response.url().includes('/api/cluster/destroy'));
+      await dialog.getByRole('button', { name: 'Delete Cluster' }).click();
+      expect((await responsePromise).ok()).toBeTruthy();
+      await expect(page.getByRole('complementary', { name: 'Entity inspector' })).toHaveCount(0);
+    });
+  });
 });

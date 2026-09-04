@@ -118,6 +118,37 @@ test.describe('todo-ui behavior · service deployment and view ownership', () =>
         await addGroup(baseURL!, STORE_ID, GROUP_ID, REPLICA_ID, [NODE_IDS[0]]);
         await addDiskGroup(baseURL!, NODE_IDS[0], DISK_GROUP_ID, 'Physical Group');
         await addDisksBatch(baseURL!, NODE_IDS[0], DISK_GROUP_ID, [{ disk_id: DISK_ID }]);
+        const api = await apiContext(baseURL!);
+        try {
+          const diskdbPort = deploymentPorts.get(NODE_IDS[0])!.diskdbRpc + 2;
+          let instanceId = '';
+          await expect.poll(async () => {
+            const response = await api.get('/api/diskdb/instances');
+            if (!response.ok()) return false;
+            const instances = await response.json();
+            const instance = instances.find((entry: any) => String(entry.rpc_endpoint).includes(`:${diskdbPort}`));
+            instanceId = String(instance?.instance_id ?? '');
+            return instanceId.length > 0;
+          }, { timeout: 10_000, intervals: [100] }).toBe(true);
+          const ownerResponse = await api.put(`/api/disk-groups/${RACK_ID}/${NODE_IDS[0]}/${DISK_GROUP_ID}/owner`, {
+            data: { instance_id: instanceId, lease_expiry_ms: Date.now() + 3_600_000 },
+          });
+          expect(ownerResponse.ok(), await ownerResponse.text()).toBeTruthy();
+          const bindResponse = await api.put(`/api/disk-groups/${RACK_ID}/${NODE_IDS[0]}/${DISK_GROUP_ID}/bind`, {
+            data: { store_id: STORE_ID, group_id: GROUP_ID },
+          });
+          expect(bindResponse.ok(), await bindResponse.text()).toBeTruthy();
+          await expect.poll(async () => {
+            const response = await api.get('/api/diskdb/instances');
+            if (!response.ok()) return false;
+            const instances = await response.json();
+            return instances.some((entry: any) =>
+              String(entry.instance_id) === instanceId && entry.owned_dg_ids.includes(DISK_GROUP_ID),
+            );
+          }, { timeout: 10_000, intervals: [100] }).toBe(true);
+        } finally {
+          await api.dispose();
+        }
       });
 
       await step('todo-ui: cluster owns physical children and KV server', async () => {
@@ -130,10 +161,21 @@ test.describe('todo-ui behavior · service deployment and view ownership', () =>
         await expect(node).toBeVisible({ timeout: 10_000 });
         if (await node.getByRole('button', { name: 'Expand' }).count()) await node.getByRole('button', { name: 'Expand' }).click();
         await expect(aside.getByText(`KV-${NODE_IDS[0]}`, { exact: true })).toBeVisible();
-        await expect(aside.getByText(/Physical Group.*DG-7710/)).toBeVisible();
-        const diskGroup = aside.getByRole('treeitem').filter({ hasText: /DG-7710/ });
+        const diskdbSubtree = aside.getByTestId(`tree-node-DDB-${NODE_IDS[0]}`);
+        await expect(diskdbSubtree).toBeVisible({ timeout: 10_000 });
+        await expect(diskdbSubtree.getByText(/Physical Group.*DG-7710/)).toBeVisible({ timeout: 10_000 });
+        const diskGroup = diskdbSubtree.getByRole('treeitem').filter({ hasText: /DG-7710/ });
         if (await diskGroup.getByRole('button', { name: 'Expand' }).count()) await diskGroup.getByRole('button', { name: 'Expand' }).click();
-        await expect(aside.getByText(DISK_ID.slice(0, 12), { exact: false })).toBeVisible();
+        await expect(diskdbSubtree.getByText(DISK_ID.slice(0, 12), { exact: false })).toBeVisible();
+
+        await node.click({ button: 'right' });
+        await expect(page.getByRole('menuitem', { name: /ping/i })).toBeVisible();
+        await expect(page.getByRole('menuitem', { name: /add disk group/i })).toHaveCount(0);
+        await page.keyboard.press('Escape');
+
+        const canvasDiskGroup = page.locator('.react-flow__node').filter({ hasText: /Physical Group.*DG-7710/ });
+        await expect(canvasDiskGroup).toBeVisible({ timeout: 10_000 });
+        await expect(canvasDiskGroup.getByTestId('compact-disk-stack')).toContainText(DISK_ID.slice(0, 12));
       });
 
       await step('todo-ui: KV logical tree, operations center, and inspector', async () => {

@@ -83,7 +83,7 @@ center panel layouts are detailed in §12.1.
 
 ```
 ┌─ Header ───────────────────────────────────────────────────────────┐
-│ brand · health pill · domain toggle (Cluster/KV/Chunk) · refresh   │
+│ brand · health pill · domain toggle (Cluster/KV/Capacity) · refresh│
 ├─ Sidebar ─────┬─ Center panel ─────────────┬─ Inspector ────────────┤
 │ (per-domain   │ (per-domain layout,        │ Details (key/value)    │
 │  tree, see    │  see §12.1)                │ Activity (recent ops)  │
@@ -301,11 +301,11 @@ self-contained sidebar + center panel.
 
 ### 12.1 Three domains
 
-The shell has one shared frame: a top bar, a left tree panel, a center panel, and a right properties panel. The header's domain toggle switches between Cluster, KV, and Chunk. `bench` is CLI-only. Each domain owns the content and behavior of its three panels; shared shell components provide layout, selection, context menus, loading states, and the inspector. The right properties panel is always scoped to the selected item in the active domain.
+The shell has one shared frame: a top bar, a left tree panel, a center panel, and a right properties panel. The header's domain toggle switches between Cluster, KV, and Capacity. `Capacity` is the user-facing name of the internal Chunk domain; `bench` is CLI-only. Each domain owns the content and behavior of its three panels; shared shell components provide layout, selection, context menus, loading states, and the inspector. Changing domains clears the selection so the right properties panel never shows an item from an inactive domain.
 
 ```
 ┌─ Header ───────────────────────────────────────────────────────────┐
-│ brand · health pill · domain toggle (Cluster/KV/Chunk) · refresh   │
+│ brand · health pill · domain toggle (Cluster/KV/Capacity) · refresh│
 ├─ Sidebar ─────┬─ Center panel ─────────────┬─ Inspector ────────────┤
 │ (per-domain   │ (per-domain layout,        │ Details (key/value)    │
 │  tree, see    │  see below)                │ Activity (recent ops)  │
@@ -330,16 +330,19 @@ The shell has one shared frame: a top bar, a left tree panel, a center panel, an
 └───────────────┘└───────────────────────────────────────────────────┘
 ```
 
-The Cluster tree is the physical source for node, KV-server,
-disk-group, and disk management. The center renders the physical
-hierarchy and the properties panel displays the selected physical item
-and recent activity.
+The Cluster tree is the physical source for node and service lifecycle.
+Disk groups assigned to a DiskDB instance appear beneath that owning DDB
+service rather than directly beneath the node; unassigned disk groups are
+not projected in Cluster. The center mirrors this ownership hierarchy and
+renders each disk group as one compact card with its disks stacked inside.
+The properties panel displays the selected physical item and recent
+activity.
 
 Context menus: Rack (Add Node, Delete Rack) · Node (Deploy KV Server,
-Deploy DiskDB, Add Disk Group, Ping, Delete Node) · KV Server (Restart,
-Stop, Delete) · DiskGroup (Add Disk batch, Remove, Set Status) · Disk
-(Remove, Set Status). Chunk may reference these shared disk-management
-actions but does not own a second copy of their business logic.
+Deploy DiskDB, Ping, Delete Node) · KV Server and DiskDB (Restart, Stop,
+Delete) · DiskGroup (Add Disk batch, Remove, Set Status) · Disk (Remove,
+Set Status). Adding disk groups is available only in Capacity; shared
+disk-management actions do not duplicate their business logic.
 Cluster-level ops (init / reset / clean) are triggered from the header
 or a toolbar above the canvas.
 
@@ -379,7 +382,7 @@ Context menus: Store (Add Group, Delete) · Group (Add Replica, Delete) ·
 Replica (Delete). KV server lifecycle actions are owned by Cluster and
 are not duplicated in the KV tree.
 
-**Domain 3 — Chunk (chunkdb / diskdb / diskio management)**
+**Domain 3 — Capacity (internal Chunk domain; chunkdb / diskdb / diskio management)**
 
 ```
 ┌─ Sidebar ─────┐┌─ Center: [Capacity] [Chunk] ──────────────────────┐
@@ -397,11 +400,11 @@ are not duplicated in the KV tree.
 └───────────────┘└───────────────────────────────────────────────────┘
 ```
 
-The Chunk tree keeps the physical node → disk-group → disk hierarchy
-and shows DiskDB as an additional node item. DiskDB-owned disk-group
-children are deferred. The current duplicate ownership projection is
-not rendered. Disk-group and disk dialogs are shared with Cluster for
-now; Cluster remains the owner of those management actions.
+The Capacity tree keeps the physical node → disk-group → disk hierarchy
+and shows DiskDB as an additional node item. It is the only domain that
+allows adding disk groups. Disk-group and disk dialogs are shared with
+the Cluster ownership projection, while Capacity owns creation and full
+physical disk management.
 
 The center capacity panel shows usage, busy/free space, scanner and
 recalculation controls for the selected resource. The properties panel
@@ -535,10 +538,10 @@ The `DiskdbClient` is lazily initialized on first diskdb REST request
 
 Handlers:
 
-- `GET /api/diskdb/instances` — reads `read_all_diskdb_instances`
-  from the service registry directly (no crowdb-rpc fan-out). Returns
-  instance id, endpoint, `last_heartbeat_ms`, `owned_dg_ids`, and the
-  keepalive `group_usages` summaries.
+- `GET /api/diskdb/instances` — reads live instances from the service
+  registry and merges `owned_dg_ids` from the authoritative group-0
+  ownership map (no crowdb-rpc fan-out). Returns instance id, endpoint,
+  `last_heartbeat_ms`, current ownership, and keepalive `group_usages`.
 - `GET /api/diskdb/usage?dg=<id>&disk=<disk_id>&zone=<zi>` —
   `QueryCapacityStats` drill-down (all params optional). When `dg` is
   omitted, iterate all registered instances and merge the responses

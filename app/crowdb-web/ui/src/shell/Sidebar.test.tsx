@@ -74,8 +74,10 @@ function renderSidebar(domain: Domain, props: Record<string, unknown> = {}) {
           stores={stores}
           nodeHealthById={{ '10': NodeHealth.Up, '11': NodeHealth.Unknown }}
           nodeDiskGroups={diskGroups}
+          diskdbInstances={[{ instance_id: '10', rpc_endpoint: '127.0.0.1:29922', last_heartbeat_ms: 1, owned_dg_ids: [100], group_usages: [] }]}
           diskdbNodeIds={new Set([10])}
           diskdbHealthById={new Map([[10, 'up']])}
+          diskdbInstanceIdByNodeId={new Map([[10, '10']])}
           {...props}
         />
       </SelectionProvider>
@@ -94,11 +96,18 @@ describe('Sidebar · Cluster tree projection', () => {
     expect(queryByText('KV-11')).toBeNull();
   });
 
-  it('renders disk groups and disks under the node alongside the KV server', () => {
-    const { getByText } = renderSidebar(Domain.Cluster);
-    expect(getByText(/Physical Group.*DG-100/)).toBeTruthy();
-    // Disk ID is truncated to 12 chars + ellipsis.
-    expect(getByText('0123456789ab…')).toBeTruthy();
+  it('renders assigned disk groups and disks under the owning DiskDB service', () => {
+    const { getByTestId, getByText } = renderSidebar(Domain.Cluster);
+    const diskdbSubtree = getByTestId('tree-node-DDB-10');
+    expect(diskdbSubtree.contains(getByText(/Physical Group.*DG-100/))).toBe(true);
+    expect(diskdbSubtree.contains(getByText('0123456789ab…'))).toBe(true);
+  });
+
+  it('does not render unassigned disk groups', () => {
+    const { queryByText } = renderSidebar(Domain.Cluster, {
+      diskdbInstances: [{ instance_id: '10', rpc_endpoint: '127.0.0.1:29922', last_heartbeat_ms: 1, owned_dg_ids: [], group_usages: [] }],
+    });
+    expect(queryByText(/Physical Group.*DG-100/)).toBeNull();
   });
 });
 

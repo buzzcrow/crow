@@ -11,7 +11,7 @@ export function isCrowdbKVServerAvailable(server: Pick<CrowdbKVServerView, 'proc
   return isAvailableProcess(server?.process);
 }
 
-function extractPort(urlOrAddr?: string | null): number | null {
+export function extractPort(urlOrAddr?: string | null): number | null {
   const value = (urlOrAddr || '').trim();
   if (!value) return null;
 

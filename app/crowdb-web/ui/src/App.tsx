@@ -5,7 +5,7 @@ import { Suspense, useState, useCallback, useMemo, lazy, useEffect, useRef, type
 import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive, Boxes, CheckCircle2, XCircle, PowerOff, Wrench, AlertTriangle, EyeOff, HelpCircle } from 'lucide-react';
 import type { CenterPanelMode } from './shell/Header';
 import { DomainProvider, useDomain } from './contexts/DomainContext';
-import { SelectionProvider, useSelection } from './contexts/SelectionContext';
+import { SelectionProvider, useSelection, type SelectedEntity } from './contexts/SelectionContext';
 import { ToastProvider, useToast } from './contexts/ToastContext';
 import { ActivityProvider, useActivity } from './contexts/ActivityContext';
 import { useClusterTree } from './data/useClusterTree';
@@ -59,7 +59,7 @@ import {
   listServers,
 } from './api';
 import { deployPortDefaultsForNode, diskdbPortDefaultsForNode, nextIdFromSuffix, nextNumericId } from './components/dialogs/defaults';
-import { buildCrowdbKVServers, crowdbKvServerNodeIds } from './data/crowdbKvServers';
+import { buildCrowdbKVServers, crowdbKvServerNodeIds, extractPort } from './data/crowdbKvServers';
 import { isCrowdbKVServerAvailable } from './data/crowdbKvServers';
 import { toUiHealth, HW_STATUS_NAMES } from './utils/entityDisplay';
 import { ClusterView } from './views/ClusterView';
@@ -85,7 +85,7 @@ export interface CrowdbConsoleProps {
 
 function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: CrowdbConsoleProps) {
   const { domain } = useDomain();
-  const { selectedEntity } = useSelection();
+  const { selectedEntity, selectEntity, clearSelection } = useSelection();
   const { success, error } = useToast();
   const { log } = useActivity();
 
@@ -105,6 +105,22 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
   const [inspectorWidth, setInspectorWidth] = useState(320);
   const [resizing, setResizing] = useState<'left' | 'right' | null>(null);
   const [canvasFocusRequest, setCanvasFocusRequest] = useState<{ targetId: string; subtree: boolean; nonce: number } | null>(null);
+  // When a cross-jump drives the domain change, it sets a pending
+  // selection that must survive the domain-change effect (which
+  // otherwise clears the selection). The ref is checked once, then
+  // reset, so subsequent manual domain switches still clear.
+  const pendingSelectionRef = useRef<SelectedEntity | null>(null);
+
+  useEffect(() => {
+    if (pendingSelectionRef.current) {
+      const pending = pendingSelectionRef.current;
+      pendingSelectionRef.current = null;
+      selectEntity(pending);
+    } else {
+      clearSelection();
+    }
+    setCanvasFocusRequest(null);
+  }, [domain, clearSelection, selectEntity]);
 
   const [dialog, setDialog] = useState<{
     addRack?: boolean;
@@ -157,6 +173,13 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
     }
     return merged;
   }, [capNodeDiskGroups, clusterDiskGroups]);
+  const existingDiskGroupIds = useMemo(
+    () => Array.from(new Set([
+      ...Object.values(nodeDiskGroups).flatMap((entry) => entry.diskGroups.map((dg) => dg.id)),
+      ...(hardwareCapacity?.disk_groups || []).map((group) => group.disk_group_id),
+    ])),
+    [nodeDiskGroups, hardwareCapacity],
+  );
 
   const loading = physLoading || logLoading || capLoading;
   const dataError = physError || logError || capError;
@@ -195,6 +218,21 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
     }
     return m;
   }, [allServers]);
+  const diskdbInstanceIdByNodeId = useMemo(() => {
+    const instanceByPort = new Map(
+      diskdbInstances
+        .map((instance) => [extractPort(instance.rpc_endpoint), instance.instance_id] as const)
+        .filter((entry): entry is readonly [number, string] => entry[0] != null),
+    );
+    const result = new Map<number, string>();
+    for (const server of allServers) {
+      if (server.service_type !== 'diskdb' || server.node_id == null) continue;
+      const port = extractPort(server.endpoint || server.rpc_url);
+      const instanceId = port == null ? undefined : instanceByPort.get(port);
+      if (instanceId != null) result.set(server.node_id, instanceId);
+    }
+    return result;
+  }, [allServers, diskdbInstances]);
   // Cluster is initialized once the system store (store 0) exists.
   const clusterInitialized = useMemo(
     () => stores.some((s) => String(s.store_id) === '0'),
@@ -291,10 +329,15 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
       delete: {
         type: 'Cluster',
         id: 'all',
-        onDelete: async () => { await runMutation('Reset Cluster', 'all', () => resetCluster()); },
+        onDelete: async () => {
+          await runMutation('Reset Cluster', 'all', async () => {
+            await resetCluster();
+            clearSelection();
+          });
+        },
       },
     }));
-  }, [runMutation]);
+  }, [runMutation, clearSelection]);
 
   // Status icons for the "Change Status" submenu.
   const statusIcons: Record<string, ReactNode> = {
@@ -944,6 +987,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
         nodeDiskGroups={nodeDiskGroups}
         diskdbNodeIds={diskdbNodeIds}
         diskdbHealthById={diskdbHealthById}
+        diskdbInstanceIdByNodeId={diskdbInstanceIdByNodeId}
       />
 
       <div
@@ -970,6 +1014,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
             nodeHealthById={nodeHealthById}
             diskdbNodeIds={diskdbNodeIds}
             diskdbInstances={diskdbInstances}
+            diskdbInstanceIdByNodeId={diskdbInstanceIdByNodeId}
             nodeDiskGroups={nodeDiskGroups}
             refreshToken={lastRefreshTime.getTime()}
             focusRequest={canvasFocusRequest}
@@ -1007,7 +1052,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
       </main>
 
       <Suspense fallback={null}>
-        <Inspector readonly={readonly} modules={modules} nodes={nodes} racks={racks} servers={servers} stores={stores} capacityUsage={capacityUsage} hardwareCapacity={hardwareCapacity} diskdbInstances={diskdbInstances} width={inspectorWidth} />
+        <Inspector readonly={readonly} modules={modules} nodes={nodes} racks={racks} servers={servers} stores={stores} capacityUsage={capacityUsage} hardwareCapacity={hardwareCapacity} diskdbInstances={diskdbInstances} width={inspectorWidth} pendingSelectionRef={pendingSelectionRef} />
       </Suspense>
 
       {selectedEntity && (
@@ -1122,10 +1167,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
           isOpen
           onClose={closeDialogs}
           nodeId={dialog.addDiskGroup.nodeId}
-          existingDgIds={[
-            ...(nodeDiskGroups[dialog.addDiskGroup.nodeId]?.diskGroups || []).map((dg) => dg.id),
-            ...(hardwareCapacity?.disk_groups || []).map((g) => g.disk_group_id),
-          ]}
+          existingDgIds={existingDiskGroupIds}
           onSuccess={handleRefresh}
         />
       )}

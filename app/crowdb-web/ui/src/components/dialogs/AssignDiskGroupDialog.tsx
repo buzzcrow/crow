@@ -64,7 +64,7 @@ export function AssignDiskGroupDialog({
     try {
       const leaseMs = Date.now() + 3_600_000;
       await setDiskGroupOwner(rackId, nodeId, dgId, {
-        instance_id: Number(instanceId),
+        instance_id: instanceId,
         lease_expiry_ms: leaseMs,
       });
       await setDiskGroupBind(rackId, nodeId, dgId, {

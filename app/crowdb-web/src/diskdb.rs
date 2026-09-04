@@ -239,7 +239,7 @@ fn merge_capacity_responses(responses: Vec<QueryCapacityStatsResponse>) -> Usage
 
 #[derive(Debug, Serialize)]
 pub struct DiskdbInstanceInfo {
-    pub instance_id: u64,
+    pub instance_id: String,
     pub rpc_endpoint: String,
     pub last_heartbeat_ms: u64,
     pub owned_dg_ids: Vec<u64>,
@@ -255,7 +255,7 @@ impl From<(InstanceId, InstanceValue)> for DiskdbInstanceInfo {
             .map(|d: &DiskdbExtra| (d.owned_dg_ids.clone(), d.group_usages.clone()))
             .unwrap_or_default();
         Self {
-            instance_id: id,
+            instance_id: id.to_string(),
             rpc_endpoint: val.rpc_endpoint,
             last_heartbeat_ms: val.last_heartbeat_ms,
             owned_dg_ids,
@@ -266,11 +266,11 @@ impl From<(InstanceId, InstanceValue)> for DiskdbInstanceInfo {
 
 // ── handlers ─────────────────────────────────────────────────────
 
-/// `GET /api/diskdb/instances` — all diskdb instances from the
-/// service registry (no crowdb-rpc fan-out).
+/// `GET /api/diskdb/instances` — live diskdb instances from the service
+/// registry with ownership refreshed from the authoritative group-0 map.
 ///
 /// # Errors
-/// Returns `502` if the service registry read fails.
+/// Returns `502` if the service registry or ownership read fails.
 pub async fn http_list_diskdb_instances(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<DiskdbInstanceInfo>>, (StatusCode, Json<ErrorBody>)> {
@@ -282,9 +282,22 @@ pub async fn http_list_diskdb_instances(
         .read_all_diskdb_instances()
         .await
         .map_err(|e| err_502(format!("read_all_diskdb_instances: {e}")))?;
-    Ok(Json(
-        instances.into_iter().map(DiskdbInstanceInfo::from).collect(),
-    ))
+    let owners = hw
+        .list_owners()
+        .await
+        .map_err(|e| err_502(format!("list_owners: {e}")))?;
+    let mut infos: Vec<_> = instances.into_iter().map(DiskdbInstanceInfo::from).collect();
+    for info in &mut infos {
+        let instance_id = info.instance_id.parse::<u64>().unwrap_or_default();
+        info.owned_dg_ids = owners
+            .iter()
+            .filter(|owner| owner.instance_id == instance_id)
+            .map(|owner| owner.dg_id)
+            .collect();
+        info.owned_dg_ids.sort_unstable();
+        info.owned_dg_ids.dedup();
+    }
+    Ok(Json(infos))
 }
 
 /// `GET /api/diskdb/usage?dg=<id>&disk=<disk_id>&zone=<zi>` —
@@ -591,7 +604,11 @@ pub async fn http_set_disk_group_owner(
     let hw = build_hardware_client(&state)
         .await
         .ok_or_else(|| err_502("no group-0 endpoint; cluster not initialized"))?;
-    hw.set_owner(rack_id, node_id, dg_id, body.instance_id, body.lease_expiry_ms)
+    let instance_id = match body.instance_id {
+        InstanceIdValue::Number(id) => id,
+        InstanceIdValue::String(id) => id.parse().map_err(|_| err_400("invalid instance_id"))?,
+    };
+    hw.set_owner(rack_id, node_id, dg_id, instance_id, body.lease_expiry_ms)
         .await
         .map_err(|e| err_502(format!("set_owner: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
@@ -653,8 +670,15 @@ pub struct SetStatusBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum InstanceIdValue {
+    Number(u64),
+    String(String),
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SetOwnerBody {
-    pub instance_id: u64,
+    pub instance_id: InstanceIdValue,
     #[serde(default)]
     pub lease_expiry_ms: u64,
 }

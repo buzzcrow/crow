@@ -485,7 +485,7 @@ export async function assignDiskGroup(
   rackId: number,
   nodeId: number,
   dgId: number,
-  instanceId: number,
+  instanceId: string,
   storeId: number,
   groupId: number,
 ) {

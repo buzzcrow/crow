@@ -44,6 +44,7 @@ interface SidebarProps {
   nodeDiskGroups?: Record<number, NodeDiskGroups>;
   diskdbNodeIds?: Set<number>;
   diskdbHealthById?: Map<number, string>;
+  diskdbInstanceIdByNodeId?: Map<number, string>;
 }
 
 export function Sidebar({
@@ -65,6 +66,7 @@ export function Sidebar({
   nodeDiskGroups = {},
   diskdbNodeIds,
   diskdbHealthById,
+  diskdbInstanceIdByNodeId = new Map(),
 }: SidebarProps) {
   const { domain } = useDomain();
   const [filterQuery, setFilterQuery] = useState('');
@@ -72,7 +74,7 @@ export function Sidebar({
 
   const treeNodes = useMemo<TreeNode[]>(() => {
     if (domain === Domain.Cluster) {
-      // Cluster domain: rack → node → disk-group → disk (hardware topology).
+      // Cluster domain: rack → node → services → owned disk groups and disks.
       // No KV stores/groups — those live in the KV domain.
       if (racks.length === 0) return [];
 
@@ -105,11 +107,12 @@ export function Sidebar({
         icon: <FolderTree className="tw-h-4 tw-w-4 tw-text-muted" />,
         children: (rack.nodes || []).map((entry) => {
           const nodeId: number = entry.id;
-          const ndg = nodeDiskGroups[nodeId];
-          const diskGroups = ndg?.diskGroups || [];
+          const diskdbInstanceId = diskdbInstanceIdByNodeId.get(nodeId);
+          const diskdbInstance = diskdbInstances.find((instance) => instance.instance_id === diskdbInstanceId);
+          const ownedDgIds = new Set(diskdbInstance?.owned_dg_ids || []);
           const children: TreeNode[] = [];
 
-          // Cluster owns the KV service entry and physical disk hierarchy.
+          // Cluster projects services and DiskDB-owned disk groups.
           const server = serverByNodeId.get(nodeId);
           if (server) {
             children.push({
@@ -124,38 +127,12 @@ export function Sidebar({
             });
           }
 
-          for (const dg of diskGroups) {
-            const disks = ndg?.disksByDg[dg.id] || [];
-            const dgStatus = dgStatusByKey.get(`${rack.id}:${nodeId}:${dg.id}`);
-            children.push({
-              id: `CL-DG-${nodeId}-${dg.id}`,
-              rawId: dg.id,
-              label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
-              type: 'DiskGroup' as const,
-              icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
-              hwStatus: dgStatus ?? undefined,
-              parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
-              children: disks.map((d) => {
-                const diskStatus = diskStatusById.get(d.disk_id);
-                return {
-                  id: `CL-D-${nodeId}-${dg.id}-${d.disk_id}`,
-                  rawId: d.disk_id,
-                  label: d.disk_id.slice(0, 12) + '…',
-                  type: 'Disk' as const,
-                  icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
-                  hwStatus: diskStatus ?? undefined,
-                  parentIds: {
-                    rack_id: rack.id,
-                    node_id: nodeId,
-                    disk_group_id: dg.id,
-                    disk_id: d.disk_id,
-                  },
-                };
-              }),
-            });
-          }
-
           if (diskdbNodeIds?.has(nodeId)) {
+            const diskGroups = Object.values(nodeDiskGroups).flatMap((entry) =>
+              entry.diskGroups
+                .filter((dg) => ownedDgIds.has(dg.id))
+                .map((dg) => ({ dg, disks: entry.disksByDg[dg.id] || [] })),
+            );
             children.push({
               id: `DDB-${nodeId}`,
               rawId: `${nodeId}-ddb`,
@@ -165,6 +142,27 @@ export function Sidebar({
               health: toUiHealth(diskdbHealthById?.get(nodeId)),
               serviceType: 'diskdb',
               parentIds: { rack_id: rack.id, node_id: nodeId },
+              children: diskGroups.map(({ dg, disks }) => {
+                const dgStatus = dgStatusByKey.get(`${dg.rack_id}:${dg.node_id}:${dg.id}`);
+                return {
+                  id: `CL-DG-${dg.node_id}-${dg.id}`,
+                  rawId: dg.id,
+                  label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
+                  type: 'DiskGroup' as const,
+                  icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
+                  hwStatus: dgStatus ?? undefined,
+                  parentIds: { rack_id: dg.rack_id, node_id: dg.node_id, disk_group_id: dg.id },
+                  children: disks.map((d) => ({
+                    id: `CL-D-${dg.node_id}-${dg.id}-${d.disk_id}`,
+                    rawId: d.disk_id,
+                    label: d.disk_id.slice(0, 12) + '…',
+                    type: 'Disk' as const,
+                    icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+                    hwStatus: diskStatusById.get(d.disk_id) ?? undefined,
+                    parentIds: { rack_id: dg.rack_id, node_id: dg.node_id, disk_group_id: dg.id, disk_id: d.disk_id },
+                  })),
+                };
+              }),
             });
           }
 
@@ -336,7 +334,7 @@ export function Sidebar({
         }),
       };
     }))];
-  }, [nodeHealthById, nodeStores, serverByNodeId, stores, domain, racks, diskdbInstances, capacityUsage, hardwareCapacity, nodeDiskGroups, diskdbNodeIds, diskdbHealthById]);
+  }, [nodeHealthById, nodeStores, serverByNodeId, stores, domain, racks, diskdbInstances, capacityUsage, hardwareCapacity, nodeDiskGroups, diskdbNodeIds, diskdbHealthById, diskdbInstanceIdByNodeId]);
 
   const filtered = useMemo(() => {
     if (!filterQuery.trim()) return treeNodes;
@@ -379,7 +377,7 @@ export function Sidebar({
 
       <div className="tw-flex tw-items-center tw-justify-between tw-px-3 tw-py-2 tw-border-b tw-border-border">
         <h3 className="tw-text-xs tw-font-semibold tw-text-muted tw-uppercase tw-tracking-wider">
-          {domain === Domain.Cluster ? 'Cluster' : domain === Domain.KV ? 'KV' : 'Chunk'}
+          {domain === Domain.Cluster ? 'Cluster' : domain === Domain.KV ? 'KV' : 'Capacity'}
         </h3>
         {!readonly && onAdd && domain !== Domain.Chunk && (
           domain === Domain.KV && !clusterInitialized ? (

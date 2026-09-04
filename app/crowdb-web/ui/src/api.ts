@@ -1026,7 +1026,7 @@ export async function setDiskGroupOwner(
   rackId: number,
   nodeId: number,
   dgId: number,
-  body: { instance_id: number; lease_expiry_ms: number },
+  body: { instance_id: string; lease_expiry_ms: number },
   options?: RequestOptions,
 ): Promise<void> {
   const resp = await fetchWithOptions(`/api/disk-groups/${rackId}/${nodeId}/${dgId}/owner`, {

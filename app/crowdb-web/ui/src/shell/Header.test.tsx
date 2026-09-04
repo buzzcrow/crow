@@ -44,11 +44,11 @@ describe('Header', () => {
     expect(getByTitle('Cluster health: Healthy')).toBeTruthy();
   });
 
-  it('renders all three domain toggle buttons', () => {
+  it('renders Cluster, KV, and Capacity domain toggle buttons', () => {
     const { getByTestId } = renderHeader();
-    expect(getByTestId('domain-cluster')).toBeTruthy();
-    expect(getByTestId('domain-kv')).toBeTruthy();
-    expect(getByTestId('domain-chunk')).toBeTruthy();
+    expect(getByTestId('domain-cluster')).toHaveTextContent('Cluster');
+    expect(getByTestId('domain-kv')).toHaveTextContent('KV');
+    expect(getByTestId('domain-chunk')).toHaveTextContent('Capacity');
   });
 
   it('marks the active domain button with aria-pressed=true', () => {

@@ -296,7 +296,7 @@ export interface DiskEntry {
 }
 
 export interface DiskdbInstanceInfo {
-  instance_id: number;
+  instance_id: string;
   rpc_endpoint: string;
   last_heartbeat_ms: number;
   owned_dg_ids: number[];

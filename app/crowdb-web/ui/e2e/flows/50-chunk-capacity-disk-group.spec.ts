@@ -433,7 +433,7 @@ test.describe('chunk · capacity · disk-group', () => {
     await apiDeployDiskdb(baseURL!, nodeId, rpcPort);
 
     // Fetch the diskdb instance id (auto-generated, not the node id).
-    let instanceId = 0;
+    let instanceId = '';
     {
       const api = await apiContext(baseURL!);
       try {
@@ -442,12 +442,12 @@ test.describe('chunk · capacity · disk-group', () => {
         // the instance appears in the service registry — the diskdb
         // process registers asynchronously after startup.
         const rpcListenPort = rpcPort + 2;
-        let ddb: { instance_id: number } | undefined;
+        let ddb: { instance_id: string } | undefined;
         for (let attempt = 0; attempt < 30; attempt++) {
           const r = await api.get('/api/diskdb/instances');
           if (r.ok()) {
             const instances = await r.json();
-            ddb = (instances as { rpc_endpoint: string; instance_id: number }[]).find(
+            ddb = (instances as { rpc_endpoint: string; instance_id: string }[]).find(
               (i) => i.rpc_endpoint.includes(String(rpcListenPort)),
             );
             if (ddb) break;
@@ -881,7 +881,7 @@ test.describe('chunk · capacity · disk-group', () => {
     }
   });
 
-  test('DGs remain visible in Cluster domain after web server restart (no diskdb running)', async ({ page, baseURL }) => {
+  test('unassigned DGs are not projected in Cluster domain (no diskdb running)', async ({ page, baseURL }) => {
     test.setTimeout(30_000);
     const rackId = DISKDB_RACK;
     const nodeId = DISKDB_NODE;
@@ -890,13 +890,11 @@ test.describe('chunk · capacity · disk-group', () => {
     await apiAddDiskGroup(baseURL!, nodeId, dgId, 'test-dg-persist');
 
     try {
-      // No diskdb is deployed on this node, so the DG should still
-      // appear under the node in the Cluster domain.
+      // No diskdb is deployed on this node, so the DG has no owner and
+      // must NOT appear in the Cluster domain (design: unassigned disk
+      // groups are not projected in Cluster). It remains visible in
+      // the Capacity domain, which keeps the full physical hierarchy.
       await page.goto('/');
-      // The Cluster domain's disk-group data arrives via a fetch chain
-      // (listNodes → fetchNodeDiskGroups) that lags the racks tree on
-      // slow CI runners. Wait for the disk-groups response for this
-      // node before asserting, rather than relying on the 5 s poll.
       const dgResponse = page.waitForResponse((r: { url(): string }) => r.url().includes(`/nodes/${nodeId}/disk-groups`));
       await page.getByTestId('domain-cluster').click();
       await dgResponse;
@@ -909,8 +907,20 @@ test.describe('chunk · capacity · disk-group', () => {
       const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNode.count() > 0) await expandNode.click();
 
-      // DG should be visible even without a running diskdb.
-      await expect(aside.getByText(/DG-593/, { exact: true })).toBeVisible({ timeout: 5_000 });
+      // DG should NOT be visible in Cluster without an owning diskdb.
+      await expect(aside.getByText(/DG-593/, { exact: true })).not.toBeVisible({ timeout: 5_000 });
+
+      // Switch to Capacity domain — the DG should be visible there.
+      await page.getByTestId('domain-chunk').click();
+      const capAside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+      const capDgResponse = page.waitForResponse((r: { url(): string }) => r.url().includes(`/nodes/${nodeId}/disk-groups`));
+      await capDgResponse;
+      const capExpandRack = capAside.getByRole('treeitem').filter({ hasText: `R-${rackId}` }).locator('button[aria-label="Expand"]');
+      if (await capExpandRack.count() > 0) await capExpandRack.click();
+      await expect(capAside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+      const capExpandNode = capAside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
+      if (await capExpandNode.count() > 0) await capExpandNode.click();
+      await expect(capAside.getByText(/DG-593/, { exact: true })).toBeVisible({ timeout: 10_000 });
     } finally {
       await apiRemoveDiskGroup(baseURL!, nodeId, dgId);
     }

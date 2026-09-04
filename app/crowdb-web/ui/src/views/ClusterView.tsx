@@ -17,6 +17,7 @@ export interface ClusterViewProps {
   nodeHealthById: Record<string, NodeHealth>;
   diskdbNodeIds: Set<number>;
   diskdbInstances: DiskdbInstanceInfo[];
+  diskdbInstanceIdByNodeId: Map<number, string>;
   nodeDiskGroups: Record<number, NodeDiskGroups>;
   refreshToken: number;
   focusRequest: { targetId: string; subtree: boolean; nonce: number } | null;
