@@ -427,10 +427,53 @@ std::set<uint32_t> select_sparse_blocks(const std::vector<std::pair<uint64_t, ui
     return selected;
 }
 
+Status snapshot_frame(PageBase *page, const uint8_t **frame, uint32_t *frame_len)
+{
+    switch (page->type) {
+    case page_type::kLeafBase:
+        *frame     = static_cast<LeafBase *>(page)->frame();
+        *frame_len = static_cast<LeafBase *>(page)->page_bytes();
+        return Status::Ok();
+    case page_type::kInnerBase:
+        *frame     = static_cast<InnerBase *>(page)->frame();
+        *frame_len = static_cast<InnerBase *>(page)->page_bytes();
+        return Status::Ok();
+    case page_type::kOverflowFrame:
+        *frame     = static_cast<OverflowBase *>(page)->frame();
+        *frame_len = static_cast<OverflowBase *>(page)->page_bytes();
+        return Status::Ok();
+    default:
+        return Status::internal_error("snapshot: unexpected resident page type");
+    }
+}
+
 } // namespace
 
+struct Crowdbtree::SnapshotPrepareContext
+{
+    PreparedSnapshot                                           *out;
+    PageStore                                                  *store;
+    uint32_t                                                    iu;
+    uint64_t                                                    gc;
+    uint64_t                                                    block_size;
+    bool                                                        have_prev;
+    CommitAnchor                                                prev;
+    SpaceAllocator                                              alloc;
+    std::set<uint32_t>                                          relocation_blocks;
+    std::vector<PrefetchedPage>                                 prefetched;
+    std::unordered_map<uint64_t, PrefetchedPage *>              prefetch_by_page_id;
+    std::set<uint64_t>                                          forced_segment_images;
+    std::unordered_map<uint64_t, std::pair<uint64_t, uint32_t>> pending_addr;
+    std::vector<DirEntry>                                       directory_entries;
+    uint64_t                                                    pages_written    = 0;
+    uint64_t                                                    pages_relocated  = 0;
+    uint64_t                                                    bytes_relocated  = 0;
+    uint64_t                                                    segments_written = 0;
+    uint64_t                                                    live_page_count  = 0;
+};
+
 Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<PrefetchedPage> prefetched,
-                                           bool relocate_sparse_blocks)
+                                           std::set<uint32_t> relocation_blocks)
 {
     PageStore *store = opt_.page_store;
     if (store == nullptr) {
@@ -470,351 +513,346 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<Pr
         build_allocator(std::move(live), store->size(), iu, region_base, store->block_size(), sparse_threshold, name_);
     out->empty_blocks = alloc.empty_blocks;
 
-    std::set<uint32_t> relocation_blocks;
-    const uint64_t     block_size = store->block_size();
-    if (relocate_sparse_blocks && block_size > 0 && have_prev) {
-        std::vector<std::pair<uint64_t, uint64_t>> current_live;
-        if (!collect_live_extents_from_directory(*store, prev, iu, &current_live)) {
-            return Status::corruption("snapshot: current segment directory unreadable");
-        }
-        relocation_blocks =
-            select_sparse_blocks(current_live, block_size, sparse_threshold, opt_.merge_gc_max_relocation_bytes);
-        out->blocks_selected = relocation_blocks.size();
+    const uint64_t block_size = store->block_size();
+    out->blocks_selected      = relocation_blocks.size();
+
+    SnapshotPrepareContext ctx{.out                   = out,
+                               .store                 = store,
+                               .iu                    = iu,
+                               .gc                    = gc,
+                               .block_size            = block_size,
+                               .have_prev             = have_prev,
+                               .prev                  = prev,
+                               .alloc                 = std::move(alloc),
+                               .relocation_blocks     = std::move(relocation_blocks),
+                               .prefetched            = std::move(prefetched),
+                               .prefetch_by_page_id   = {},
+                               .forced_segment_images = {},
+                               .pending_addr          = {},
+                               .directory_entries     = {}};
+    for (auto &pf : ctx.prefetched) {
+        ctx.prefetch_by_page_id[pf.page_id] = &pf;
+        ctx.forced_segment_images.insert(pf.page_id / MappingTable::kSegmentSize);
     }
 
-    uint64_t pages_written   = 0;
-    uint64_t pages_relocated = 0;
-    uint64_t bytes_relocated = 0;
+    Status pages = prepare_snapshot_pages_locked(ctx);
+    if (!pages.ok()) {
+        return pages;
+    }
+    Status segments = prepare_snapshot_segments_locked(ctx);
+    if (!segments.ok()) {
+        return segments;
+    }
+    prepare_snapshot_metadata_locked(ctx);
+    return Status::Ok();
+}
 
-    // Build a lookup map for prefetched unloaded pages (R129). Each entry
-    // was read outside write_mutex_; revalidation under the mutex checks
-    // that the mapping word still matches before using the prefetched blob.
-    std::unordered_map<uint64_t, const PrefetchedPage *> prefetch_by_page_id;
-    std::set<uint64_t>                                   forced_segment_images;
-    for (const auto &pf : prefetched) {
-        prefetch_by_page_id[pf.page_id] = &pf;
-        forced_segment_images.insert(pf.page_id / MappingTable::kSegmentSize);
+Status Crowdbtree::fold_snapshot_page_locked(uint64_t page_id, uint64_t gc, PageBase **page)
+{
+    if ((*page)->type == page_type::kBatchDelta) {
+        PageBase *base = *page;
+        while (base != nullptr && base->type == page_type::kBatchDelta) {
+            base = base->next;
+        }
+        if (base == nullptr || base->type != page_type::kLeafBase) {
+            return Status::internal_error("snapshot: delta chain without leaf base");
+        }
+        uint64_t              right = static_cast<LeafBase *>(base)->right_sibling();
+        std::vector<uint64_t> dead_overflow;
+        LeafBase *fresh = build_leaf_spilling_locked(resolve_leaf_chain_for_rebuild(*page, gc, &dead_overflow), right);
+        mapping_.store(page_id, fresh);
+        for (PageBase *node = *page; node != nullptr;) {
+            PageBase *next = node->next;
+            retire_page(node);
+            node = next;
+        }
+        for (uint64_t head : dead_overflow) {
+            retire_overflow_chain_locked(head);
+        }
+        *page = fresh;
+        return Status::Ok();
+    }
+    if ((*page)->type != page_type::kLeafBase) {
+        return Status::Ok();
     }
 
-    // Persist one page's content (write its blob only when dirty, PT10).
-    // Returns the (addr, logical_len) to encode into the owning segment's
-    // image -- either a freshly queued write's address, or the page's
-    // existing durable location if it's already clean. The on-disk extent
-    // (blob length) is the durable_plen, so reload (resident) and GC
-    // (collect_live_extents_from_directory) read the exact span.
-    auto persist_one = [&](uint64_t the_page_id, PageBase *pg, const uint8_t *frame, uint32_t plen, bool relocate,
-                           uint64_t *out_addr, uint32_t *out_len) -> Status {
-        if (pg->durable_addr == kNoAddr || relocate) {
-            std::vector<uint8_t> blob;
-            encode_durable_page(frame, plen, opt_.compression, &blob);
-            auto     logical = static_cast<uint32_t>(blob.size());
-            uint64_t addr    = alloc.alloc(logical);
-            blob.resize(round_up_to_iu(logical, iu), 0); // zero-pad to the IU extent (PT9)
-            // NOT pg->durable_addr = addr here -- see this function's doc
-            // comment on crowdb-tree.h: that must wait until commit_prepared_
-            // snapshot() confirms the byte write actually landed.
-            out->page_writes.push_back(PreparedPageWrite{.page_id     = the_page_id,
-                                                         .page        = pg,
-                                                         .prior_addr  = pg->durable_addr,
-                                                         .addr        = addr,
-                                                         .logical_len = logical,
-                                                         .blob        = std::move(blob)});
-            *out_addr = addr;
-            *out_len  = logical;
-            ++pages_written;
-            if (relocate) {
-                ++pages_relocated;
-                bytes_relocated += logical;
-            }
-        }
-        else { // clean: already durable from a prior generation, no rewrite
-            *out_addr = pg->durable_addr;
-            *out_len  = pg->durable_plen;
-            if (metrics_.snapshot_page_write_cache_c != nullptr) {
-                metrics_.snapshot_page_write_cache_c->inc();
-            }
+    auto         *leaf               = static_cast<LeafBase *>(*page);
+    LeafFrameView view               = leaf->view();
+    bool          eligible_tombstone = false;
+    for (uint32_t entry = 0; entry < view.count() && !eligible_tombstone; ++entry) {
+        CellView cell{view.cell(entry)};
+        eligible_tombstone = cell.is_tombstone() && cell.slot() <= gc;
+    }
+    for (uint32_t entry = 0; entry < view.delta_count() && !eligible_tombstone; ++entry) {
+        CellView cell{view.delta_cell(entry)};
+        eligible_tombstone = cell.is_tombstone() && cell.slot() <= gc;
+    }
+    if (!eligible_tombstone) {
+        return Status::Ok();
+    }
+
+    std::vector<uint64_t> dead_overflow;
+    size_t                dropped = 0;
+    LeafBase *fresh = build_leaf_spilling_locked(resolve_leaf_chain_for_rebuild(*page, gc, &dead_overflow, &dropped),
+                                                 leaf->right_sibling());
+    mapping_.store(page_id, fresh);
+    retire_page(*page);
+    for (uint64_t head : dead_overflow) {
+        retire_overflow_chain_locked(head);
+    }
+    if (metrics_.gc_tombstones_c != nullptr && dropped > 0) {
+        metrics_.gc_tombstones_c->inc_by(dropped);
+    }
+    *page = fresh;
+    return Status::Ok();
+}
+
+Status Crowdbtree::queue_snapshot_page_locked(SnapshotPrepareContext &ctx, uint64_t page_id, PageBase *page,
+                                              const uint8_t *frame, uint32_t frame_len, bool relocate, uint64_t *addr,
+                                              uint32_t *logical_len)
+{
+    if (page->durable_addr != kNoAddr && !relocate) {
+        *addr        = page->durable_addr;
+        *logical_len = page->durable_plen;
+        if (metrics_.snapshot_page_write_cache_c != nullptr) {
+            metrics_.snapshot_page_write_cache_c->inc();
         }
         return Status::Ok();
-    };
+    }
 
-    // Dispatch a resolved (non-delta) resident page to its frame+length,
-    // shared by pass 1's content persist and (indirectly, via `pg->frame()`
-    // itself) nothing else -- both Leaf/Inner (design's "base") and
-    // Overflow frames are persisted identically byte-wise.
-    auto frame_of = [](PageBase *pg, const uint8_t **frame, uint32_t *plen) -> Status {
-        switch (pg->type) {
-        case page_type::kLeafBase:
-            *frame = static_cast<LeafBase *>(pg)->frame();
-            *plen  = static_cast<LeafBase *>(pg)->page_bytes();
-            return Status::Ok();
-        case page_type::kInnerBase:
-            *frame = static_cast<InnerBase *>(pg)->frame();
-            *plen  = static_cast<InnerBase *>(pg)->page_bytes();
-            return Status::Ok();
-        case page_type::kOverflowFrame:
-            *frame = static_cast<OverflowBase *>(pg)->frame();
-            *plen  = static_cast<OverflowBase *>(pg)->page_bytes();
-            return Status::Ok();
-        default:
-            return Status::internal_error("snapshot: unexpected resident page type");
+    std::vector<uint8_t> blob;
+    encode_durable_page(frame, frame_len, opt_.compression, &blob);
+    auto logical = static_cast<uint32_t>(blob.size());
+    *addr        = ctx.alloc.alloc(logical);
+    *logical_len = logical;
+    blob.resize(round_up_to_iu(logical, ctx.iu), 0);
+    ctx.out->page_writes.push_back(PreparedPageWrite{.page_id     = page_id,
+                                                     .page        = page,
+                                                     .prior_addr  = page->durable_addr,
+                                                     .addr        = *addr,
+                                                     .logical_len = logical,
+                                                     .blob        = std::move(blob)});
+    ++ctx.pages_written;
+    if (relocate) {
+        ++ctx.pages_relocated;
+        ctx.bytes_relocated += logical;
+    }
+    return Status::Ok();
+}
+
+Status Crowdbtree::prepare_snapshot_resident_page_locked(SnapshotPrepareContext &ctx, uint64_t page_id,
+                                                         uint64_t seg_idx)
+{
+    uint64_t word = mapping_.get_word(page_id);
+    if (!slot_word::is_resident(word)) {
+        return Status::Ok();
+    }
+    PageBase *page = slot_word::resident_ptr(word);
+    Status    fold = fold_snapshot_page_locked(page_id, ctx.gc, &page);
+    if (!fold.ok()) {
+        return fold;
+    }
+    const uint8_t *frame     = nullptr;
+    uint32_t       frame_len = 0;
+    Status         resolved  = snapshot_frame(page, &frame, &frame_len);
+    if (!resolved.ok()) {
+        return resolved;
+    }
+    bool     relocate    = page->durable_addr != kNoAddr && ctx.block_size > 0 &&
+                           ctx.relocation_blocks.contains(static_cast<uint32_t>(page->durable_addr / ctx.block_size));
+    uint64_t addr        = 0;
+    uint32_t logical_len = 0;
+    Status   queued = queue_snapshot_page_locked(ctx, page_id, page, frame, frame_len, relocate, &addr, &logical_len);
+    if (!queued.ok()) {
+        return queued;
+    }
+    if (page->durable_addr == kNoAddr || relocate) {
+        ctx.pending_addr[page_id] = {addr, logical_len};
+        if (relocate) {
+            ctx.forced_segment_images.insert(seg_idx);
         }
-    };
+    }
+    return Status::Ok();
+}
 
-    // pending_addr remembers *this round's* freshly assigned (addr, len) for
-    // a page whose content persist_one just queued -- PageBase::durable_addr
-    // stays kNoAddr until commit_prepared_snapshot() confirms the byte write
-    // landed (see persist_one's doc comment), so pass 2 (below) can't read
-    // it from the page itself yet.
-    std::unordered_map<uint64_t, std::pair<uint64_t, uint32_t>> pending_addr;
-
-    // Pass 1: fold delta chains and persist dirty page content, discovered
-    // by scanning every *dirty* mapping-table segment directly (no
-    // reachable-page tree walk -- see this file's header comment). A
-    // segment is dirty exactly when some page in its PID range was
-    // created/mutated/retired since the last snapshot (every mapping_.
-    // store*/clear call bumps its segment's write_seq), so this is complete.
-    //
-    // Ascending seg_idx/slot order matters here: PIDs are allocated
-    // strictly monotonically (D1), so any *new* page a fold creates always
-    // lands at-or-after the current scan position and is naturally
-    // discovered later in this same pass -- but a fold's dead_overflow
-    // retire can *clear* a slot in an *already-visited* (lower-index)
-    // segment. Building each segment's final image is therefore deferred
-    // to pass 2, after every segment's folding/retiring side effects (in
-    // any order) have fully settled.
+Status Crowdbtree::prepare_snapshot_pages_locked(SnapshotPrepareContext &ctx)
+{
+    // Ascending order discovers pages created by folds later in the same pass.
     for (uint64_t seg_idx = 0; seg_idx < MappingTable::kMaxSegments; ++seg_idx) {
-        MappingSegment *seg = mapping_.segment_at(seg_idx);
-        if (seg == nullptr) {
+        MappingSegment *segment = mapping_.segment_at(seg_idx);
+        if (segment == nullptr) {
             continue;
         }
-        for (uint32_t i = 0; i < seg->slot_count; ++i) {
-            uint64_t page_id = (seg_idx * MappingTable::kSegmentSize) + i;
-            uint64_t w       = seg->slots[i].load(std::memory_order_relaxed);
-            if (!slot_word::is_resident(w)) {
-                continue; // empty or already an on-disk descriptor: nothing to fold/persist
-            }
-            PageBase *page = slot_word::resident_ptr(w);
-            if (page->type == page_type::kBatchDelta) {
-                // Fold into a fresh consolidated base (deltas only stack on
-                // leaves); the fresh base is dirty and replaces the chain
-                // in-tree, the old chain epoch-retires. Large new values
-                // spill into overflow chains; superseded ones retire too.
-                PageBase *b = page;
-                while (b != nullptr && b->type == page_type::kBatchDelta) {
-                    b = b->next;
-                }
-                if (b == nullptr || b->type != page_type::kLeafBase) {
-                    return Status::internal_error("snapshot: delta chain without leaf base");
-                }
-                uint64_t              right = static_cast<LeafBase *>(b)->right_sibling();
-                std::vector<uint64_t> dead_overflow;
-                LeafBase             *fresh =
-                    build_leaf_spilling_locked(resolve_leaf_chain_for_rebuild(page, gc, &dead_overflow), right);
-                mapping_.store(page_id, fresh);
-                for (PageBase *n = page; n != nullptr;) {
-                    PageBase *nx = n->next;
-                    retire_page(n);
-                    n = nx;
-                }
-                for (uint64_t h : dead_overflow) {
-                    retire_overflow_chain_locked(h);
-                }
-                page = fresh;
-            }
-            else if (page->type == page_type::kLeafBase) {
-                auto         *leaf                   = static_cast<LeafBase *>(page);
-                LeafFrameView view                   = leaf->view();
-                bool          has_eligible_tombstone = false;
-                for (uint32_t entry = 0; entry < view.count() && !has_eligible_tombstone; ++entry) {
-                    CellView cell{view.cell(entry)};
-                    has_eligible_tombstone = cell.is_tombstone() && cell.slot() <= gc;
-                }
-                for (uint32_t entry = 0; entry < view.delta_count() && !has_eligible_tombstone; ++entry) {
-                    CellView cell{view.delta_cell(entry)};
-                    has_eligible_tombstone = cell.is_tombstone() && cell.slot() <= gc;
-                }
-                if (has_eligible_tombstone) {
-                    std::vector<uint64_t> dead_overflow;
-                    size_t                dropped = 0;
-                    LeafBase             *fresh   = build_leaf_spilling_locked(
-                        resolve_leaf_chain_for_rebuild(page, gc, &dead_overflow, &dropped), leaf->right_sibling());
-                    mapping_.store(page_id, fresh);
-                    retire_page(page);
-                    for (uint64_t h : dead_overflow) {
-                        retire_overflow_chain_locked(h);
-                    }
-                    if (metrics_.gc_tombstones_c != nullptr && dropped > 0) {
-                        metrics_.gc_tombstones_c->inc_by(dropped);
-                    }
-                    page = fresh;
-                }
-            }
-            const uint8_t *frame = nullptr;
-            uint32_t       plen  = 0;
-            Status         fs    = frame_of(page, &frame, &plen);
-            if (!fs.ok()) {
-                return fs;
-            }
-            uint64_t addr;
-            uint32_t len;
-            bool     relocate = page->durable_addr != kNoAddr && block_size > 0 &&
-                                relocation_blocks.contains(static_cast<uint32_t>(page->durable_addr / block_size));
-            Status   ps       = persist_one(page_id, page, frame, plen, relocate, &addr, &len);
-            if (!ps.ok()) {
-                return ps;
-            }
-            if (page->durable_addr == kNoAddr || relocate) {
-                pending_addr[page_id] = {addr, len};
-                if (relocate) {
-                    forced_segment_images.insert(seg_idx);
-                }
+        for (uint32_t slot = 0; slot < segment->slot_count; ++slot) {
+            uint64_t page_id = (seg_idx * MappingTable::kSegmentSize) + slot;
+            Status   status  = prepare_snapshot_resident_page_locked(ctx, page_id, seg_idx);
+            if (!status.ok()) {
+                return status;
             }
         }
     }
-    snapshot_pages_written_.store(pages_written);
-    snapshot_pages_total_.fetch_add(pages_written, std::memory_order_relaxed);
-    if (metrics_.snapshot_pages_c != nullptr && pages_written > 0) {
-        metrics_.snapshot_pages_c->inc_by(pages_written);
+    snapshot_pages_written_.store(ctx.pages_written);
+    snapshot_pages_total_.fetch_add(ctx.pages_written, std::memory_order_relaxed);
+    if (metrics_.snapshot_pages_c != nullptr && ctx.pages_written > 0) {
+        metrics_.snapshot_pages_c->inc_by(ctx.pages_written);
     }
-    uint64_t segments_written = 0;
+    return Status::Ok();
+}
 
-    // Pass 2: build a fresh image for every segment still dirty after pass
-    // 1 settled (an unchanged segment reuses its already-durable image/
-    // generation as-is), and assemble the full directory (every present
-    // segment, dirty or not).
-    std::vector<DirEntry> directory_entries;
-    uint64_t              live_page_count = 0;
-    for (uint64_t seg_idx = 0; seg_idx < MappingTable::kMaxSegments; ++seg_idx) {
-        MappingSegment *seg = mapping_.segment_at(seg_idx);
-        if (seg == nullptr) {
-            continue;
+Status Crowdbtree::prepare_snapshot_slot_locked(SnapshotPrepareContext &ctx, uint64_t page_id, uint64_t word,
+                                                uint64_t *durable_word, uint32_t *live_count)
+{
+    if (slot_word::is_empty(word)) {
+        *durable_word = slot_word::kEmpty;
+        return Status::Ok();
+    }
+    if (slot_word::is_resident(word)) {
+        PageBase *page    = slot_word::resident_ptr(word);
+        auto      pending = ctx.pending_addr.find(page_id);
+        uint64_t  addr    = pending == ctx.pending_addr.end() ? page->durable_addr : pending->second.first;
+        uint32_t  len     = pending == ctx.pending_addr.end() ? page->durable_plen : pending->second.second;
+        if (addr == kNoAddr) {
+            return Status::internal_error("snapshot: dirty resident page missing pending write");
         }
-        if (!seg->is_dirty() && !forced_segment_images.contains(seg_idx)) {
-            directory_entries.push_back(DirEntry{.seg_idx    = static_cast<uint32_t>(seg_idx),
-                                                 .generation = seg->generation.load(std::memory_order_relaxed),
-                                                 .image_addr = seg->image_addr,
-                                                 .image_len  = seg->image_len,
-                                                 .image_crc  = seg->image_crc});
-            continue;
+        uint64_t iu_index = addr / ctx.iu;
+        auto     iu_count = static_cast<uint32_t>(round_up_to_iu(len, ctx.iu) / ctx.iu);
+        if (!slot_word::fits_unloaded(iu_index, iu_count)) {
+            return Status::internal_error("snapshot: page addr/len too large for the unloaded descriptor");
         }
+        *durable_word = slot_word::pack_unloaded(iu_index, iu_count);
+        ++*live_count;
+        return Status::Ok();
+    }
 
-        std::vector<uint64_t> words(seg->slot_count);
-        uint32_t              live = 0;
-        for (uint32_t i = 0; i < seg->slot_count; ++i) {
-            uint64_t page_id = (seg_idx * MappingTable::kSegmentSize) + i;
-            uint64_t w       = seg->slots[i].load(std::memory_order_relaxed);
-            if (slot_word::is_empty(w)) {
-                words[i] = slot_word::kEmpty;
-                continue;
-            }
-            if (slot_word::is_unloaded(w)) {
-                uint64_t old_addr = slot_word::unloaded_iu_index(w) * iu;
-                auto     block    = block_size == 0 ? 0U : static_cast<uint32_t>(old_addr / block_size);
-                if (block_size == 0 || !relocation_blocks.contains(block)) {
-                    words[i] = w;
-                    ++live;
-                    continue;
-                }
-                uint32_t             padded_len = slot_word::unloaded_iu_count(w) * iu;
-                std::vector<uint8_t> blob;
-                // Use the prefetched blob if the mapping word still matches
-                // (R129); otherwise read inline as a fallback. A mismatch
-                // means the page changed since prefetch and is skipped for
-                // this pass — it stays dirty for the next snapshot.
-                auto pf_it = prefetch_by_page_id.find(page_id);
-                if (pf_it != prefetch_by_page_id.end() && pf_it->second->old_word == w) {
-                    blob = pf_it->second->blob; // copy the prefetched content
-                }
-                else if (pf_it != prefetch_by_page_id.end() && pf_it->second->old_word != w) {
-                    // Stale prefetch: skip this relocation, keep the old word.
-                    words[i] = w;
-                    ++live;
-                    continue;
-                }
-                else {
-                    blob.resize(padded_len);
-                    Status rs = store->read_at(old_addr, blob.data(), blob.size());
-                    if (!rs.ok()) {
-                        return rs;
-                    }
-                }
-                uint64_t new_addr = alloc.alloc(padded_len);
-                uint64_t iu_index = new_addr / iu;
-                uint32_t iu_count = padded_len / iu;
-                if (!slot_word::fits_unloaded(iu_index, iu_count)) {
-                    return Status::internal_error("snapshot: relocated page address too large");
-                }
-                uint64_t new_word = slot_word::pack_unloaded(iu_index, iu_count);
-                out->page_writes.push_back(PreparedPageWrite{.page_id     = page_id,
-                                                             .page        = nullptr,
-                                                             .prior_addr  = old_addr,
-                                                             .addr        = new_addr,
-                                                             .logical_len = padded_len,
-                                                             .blob        = std::move(blob)});
-                out->unloaded_relocations.push_back(
-                    PreparedUnloadedRelocation{.page_id = page_id, .old_word = w, .new_word = new_word});
-                forced_segment_images.insert(seg_idx);
-                words[i] = new_word;
-                ++live;
-                ++pages_relocated;
-                bytes_relocated += padded_len;
-                continue;
-            }
-            PageBase *page = slot_word::resident_ptr(w);
-            uint64_t  addr;
-            uint32_t  plen;
-            auto      pending = pending_addr.find(page_id);
-            if (pending != pending_addr.end()) {
-                addr = pending->second.first;
-                plen = pending->second.second;
-            }
-            else if (page->durable_addr != kNoAddr) {
-                addr = page->durable_addr;
-                plen = page->durable_plen;
-            }
-            else {
-                return Status::internal_error("snapshot: dirty resident page missing pending write");
-            }
-            uint64_t iu_index = addr / iu;
-            auto     iu_count = static_cast<uint32_t>(round_up_to_iu(plen, iu) / iu);
-            if (!slot_word::fits_unloaded(iu_index, iu_count)) {
-                return Status::internal_error("snapshot: page addr/len too large for the unloaded descriptor");
-            }
-            words[i] = slot_word::pack_unloaded(iu_index, iu_count);
-            ++live;
+    uint64_t old_addr = slot_word::unloaded_iu_index(word) * ctx.iu;
+    auto     block    = ctx.block_size == 0 ? 0U : static_cast<uint32_t>(old_addr / ctx.block_size);
+    if (ctx.block_size == 0 || !ctx.relocation_blocks.contains(block)) {
+        *durable_word = word;
+        ++*live_count;
+        return Status::Ok();
+    }
+    uint32_t             padded_len = slot_word::unloaded_iu_count(word) * ctx.iu;
+    std::vector<uint8_t> blob;
+    auto                 prefetched = ctx.prefetch_by_page_id.find(page_id);
+    if (prefetched != ctx.prefetch_by_page_id.end() && prefetched->second->old_word == word) {
+        blob = prefetched->second->blob;
+    }
+    else if (prefetched != ctx.prefetch_by_page_id.end()) {
+        *durable_word = word;
+        ++*live_count;
+        return Status::Ok();
+    }
+    else {
+        blob.resize(padded_len);
+        Status read = ctx.store->read_at(old_addr, blob.data(), blob.size());
+        if (!read.ok()) {
+            return read;
         }
+    }
 
-        uint64_t seen_write_seq = seg->write_seq.load(std::memory_order_relaxed);
-        uint64_t new_generation = seg->generation.load(std::memory_order_relaxed) + 1;
+    uint64_t new_addr = ctx.alloc.alloc(padded_len);
+    uint64_t iu_index = new_addr / ctx.iu;
+    uint32_t iu_count = padded_len / ctx.iu;
+    if (!slot_word::fits_unloaded(iu_index, iu_count)) {
+        return Status::internal_error("snapshot: relocated page address too large");
+    }
+    uint64_t new_word = slot_word::pack_unloaded(iu_index, iu_count);
+    ctx.out->page_writes.push_back(PreparedPageWrite{.page_id     = page_id,
+                                                     .page        = nullptr,
+                                                     .prior_addr  = old_addr,
+                                                     .addr        = new_addr,
+                                                     .logical_len = padded_len,
+                                                     .blob        = std::move(blob)});
+    ctx.out->unloaded_relocations.push_back(
+        PreparedUnloadedRelocation{.page_id = page_id, .old_word = word, .new_word = new_word});
+    *durable_word = new_word;
+    ++*live_count;
+    ++ctx.pages_relocated;
+    ctx.bytes_relocated += padded_len;
+    return Status::Ok();
+}
 
-        SegmentImageHeader hdr;
-        hdr.seg_idx    = static_cast<uint32_t>(seg_idx);
-        hdr.generation = new_generation;
-        hdr.slot_count = seg->slot_count;
-        hdr.live_count = live;
-        std::vector<uint8_t> image;
-        uint32_t             body_crc = 0;
-        encode_segment_image(hdr, words, &image, &body_crc);
-        auto     image_logical_len = static_cast<uint32_t>(image.size());
-        uint64_t image_addr        = alloc.alloc(image_logical_len);
-        image.resize(round_up_to_iu(image_logical_len, iu), 0); // pad to the IU extent (PT9)
+Status Crowdbtree::prepare_snapshot_segment_locked(SnapshotPrepareContext &ctx, uint64_t seg_idx,
+                                                   MappingSegment *segment)
+{
+    if (!segment->is_dirty() && !ctx.forced_segment_images.contains(seg_idx)) {
+        ctx.directory_entries.push_back(DirEntry{.seg_idx    = static_cast<uint32_t>(seg_idx),
+                                                 .generation = segment->generation.load(std::memory_order_relaxed),
+                                                 .image_addr = segment->image_addr,
+                                                 .image_len  = segment->image_len,
+                                                 .image_crc  = segment->image_crc});
+        return Status::Ok();
+    }
 
-        out->segment_writes.push_back(PreparedSegmentWrite{.seg_idx        = seg_idx,
-                                                           .seg            = seg,
+    std::vector<uint64_t> words(segment->slot_count);
+    uint32_t              live_count = 0;
+    for (uint32_t slot = 0; slot < segment->slot_count; ++slot) {
+        uint64_t page_id = (seg_idx * MappingTable::kSegmentSize) + slot;
+        uint64_t word    = segment->slots[slot].load(std::memory_order_relaxed);
+        Status   status  = prepare_snapshot_slot_locked(ctx, page_id, word, &words[slot], &live_count);
+        if (!status.ok()) {
+            return status;
+        }
+    }
+
+    uint64_t             seen_write_seq = segment->write_seq.load(std::memory_order_relaxed);
+    uint64_t             generation     = segment->generation.load(std::memory_order_relaxed) + 1;
+    SegmentImageHeader   header{.seg_idx    = static_cast<uint32_t>(seg_idx),
+                                .generation = generation,
+                                .slot_count = segment->slot_count,
+                                .live_count = live_count};
+    std::vector<uint8_t> image;
+    uint32_t             image_crc = 0;
+    encode_segment_image(header, words, &image, &image_crc);
+    auto     image_len  = static_cast<uint32_t>(image.size());
+    uint64_t image_addr = ctx.alloc.alloc(image_len);
+    image.resize(round_up_to_iu(image_len, ctx.iu), 0);
+    ctx.out->segment_writes.push_back(PreparedSegmentWrite{.seg_idx        = seg_idx,
+                                                           .seg            = segment,
                                                            .seen_write_seq = seen_write_seq,
-                                                           .new_generation = new_generation,
+                                                           .new_generation = generation,
                                                            .addr           = image_addr,
-                                                           .logical_len    = image_logical_len,
-                                                           .image_crc      = body_crc,
+                                                           .logical_len    = image_len,
+                                                           .image_crc      = image_crc,
                                                            .blob           = std::move(image)});
-        ++segments_written;
-        directory_entries.push_back(DirEntry{.seg_idx    = static_cast<uint32_t>(seg_idx),
-                                             .generation = new_generation,
+    ctx.directory_entries.push_back(DirEntry{.seg_idx    = static_cast<uint32_t>(seg_idx),
+                                             .generation = generation,
                                              .image_addr = image_addr,
-                                             .image_len  = image_logical_len,
-                                             .image_crc  = body_crc});
-        live_page_count += live;
+                                             .image_len  = image_len,
+                                             .image_crc  = image_crc});
+    ++ctx.segments_written;
+    ctx.live_page_count += live_count;
+    return Status::Ok();
+}
+
+Status Crowdbtree::prepare_snapshot_segments_locked(SnapshotPrepareContext &ctx)
+{
+    for (uint64_t seg_idx = 0; seg_idx < MappingTable::kMaxSegments; ++seg_idx) {
+        MappingSegment *segment = mapping_.segment_at(seg_idx);
+        if (segment == nullptr) {
+            continue;
+        }
+        Status status = prepare_snapshot_segment_locked(ctx, seg_idx, segment);
+        if (!status.ok()) {
+            return status;
+        }
     }
+    return Status::Ok();
+}
+
+void Crowdbtree::prepare_snapshot_metadata_locked(SnapshotPrepareContext &ctx)
+{
+    PreparedSnapshot   *out               = ctx.out;
+    const uint32_t      iu                = ctx.iu;
+    const bool          have_prev         = ctx.have_prev;
+    const CommitAnchor &prev              = ctx.prev;
+    auto               &alloc             = ctx.alloc;
+    auto               &directory_entries = ctx.directory_entries;
+    const uint64_t      pages_written     = ctx.pages_written;
+    const uint64_t      pages_relocated   = ctx.pages_relocated;
+    const uint64_t      bytes_relocated   = ctx.bytes_relocated;
+    const uint64_t      segments_written  = ctx.segments_written;
+    const uint64_t      live_page_count   = ctx.live_page_count;
 
     std::vector<uint8_t> directory;
     encode_segment_directory(directory_entries, &directory);
@@ -851,7 +889,6 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<Pr
     out->pages_relocated   = pages_relocated;
     out->bytes_relocated   = bytes_relocated;
     snapshot_segments_written_.store(segments_written);
-    return Status::Ok();
 }
 
 void Crowdbtree::commit_prepared_snapshot(const PreparedSnapshot &prepared)
@@ -1177,56 +1214,30 @@ void Crowdbtree::snapshot_write_next_async(                    // NOLINT(readabi
 #endif
 }
 
-Status Crowdbtree::compact_sparse_blocks(MergeGcStats *out_stats)
+Status Crowdbtree::prefetch_sparse_pages(std::vector<PrefetchedPage> *out, std::set<uint32_t> *selected_blocks)
 {
-    auto         t0 = std::chrono::steady_clock::now();
-    MergeGcStats stats;
-
-    if (out_stats == nullptr) {
-        return Status::invalid_argument("compact_sparse_blocks: null output");
-    }
-    *out_stats = stats;
-
-    if (opt_.page_store == nullptr) {
-        return Status::invalid_argument("compact_sparse_blocks: no page_store");
-    }
-    if (opt_.page_store->block_size() == 0) {
-        return Status::Ok();
-    }
-    if (opt_.merge_gc_max_relocation_bytes == 0) {
-        return Status::Ok();
-    }
-
-    const uint32_t iu          = opt_.page_store->iu_size();
-    const uint64_t block_size  = opt_.page_store->block_size();
-    const uint64_t region_base = region_base_for(iu);
-    (void)region_base;
-
-    // Prefetch phase (R129 §2.3): read the newest anchor and compute the
-    // relocation candidate set outside write_mutex_, then read each
-    // candidate's unloaded page content from the store. The mapping word
-    // captured here is revalidated under the mutex during prepare.
-    std::vector<CommitAnchor> anchors = read_valid_anchors(*opt_.page_store, iu);
+    selected_blocks->clear();
+    const uint32_t            iu         = opt_.page_store->iu_size();
+    const uint64_t            block_size = opt_.page_store->block_size();
+    std::vector<CommitAnchor> anchors    = read_valid_anchors(*opt_.page_store, iu);
     if (anchors.empty()) {
         return Status::Ok();
     }
-    CommitAnchor prev = anchors.back();
 
     double sparse_threshold =
         opt_.merge_gc_block_free_threshold > 0.0 ? opt_.merge_gc_block_free_threshold : kSparseBlockThreshold;
     std::vector<std::pair<uint64_t, uint64_t>> current_live;
-    if (!collect_live_extents_from_directory(*opt_.page_store, prev, iu, &current_live)) {
+    if (!collect_live_extents_from_directory(*opt_.page_store, anchors.back(), iu, &current_live)) {
         CRB_LOG_WARN("[{}] compact_sparse_blocks: current anchor unreadable", name_);
         return Status::corruption("compact_sparse_blocks: current anchor unreadable");
     }
-    std::set<uint32_t> selected_blocks =
+    *selected_blocks =
         select_sparse_blocks(current_live, block_size, sparse_threshold, opt_.merge_gc_max_relocation_bytes);
-    if (selected_blocks.empty()) {
+    if (selected_blocks->empty()) {
         return Status::Ok();
     }
 
-    // Prefetch unloaded pages in selected blocks (outside write_mutex_).
-    std::vector<PrefetchedPage> prefetched;
+    // Reads stay outside write_mutex_; prepare revalidates each mapping word.
     for (uint64_t seg_idx = 0; seg_idx < MappingTable::kMaxSegments; ++seg_idx) {
         MappingSegment *seg = mapping_.segment_at(seg_idx);
         if (seg == nullptr) {
@@ -1234,94 +1245,92 @@ Status Crowdbtree::compact_sparse_blocks(MergeGcStats *out_stats)
         }
         for (uint32_t i = 0; i < seg->slot_count; ++i) {
             uint64_t page_id = (seg_idx * MappingTable::kSegmentSize) + i;
-            uint64_t w       = seg->slots[i].load(std::memory_order_relaxed);
-            if (!slot_word::is_unloaded(w)) {
+            uint64_t word    = seg->slots[i].load(std::memory_order_relaxed);
+            if (!slot_word::is_unloaded(word)) {
                 continue;
             }
-            uint64_t old_addr = slot_word::unloaded_iu_index(w) * iu;
-            auto     block    = static_cast<uint32_t>(old_addr / block_size);
-            if (!selected_blocks.contains(block)) {
+            uint64_t old_addr = slot_word::unloaded_iu_index(word) * iu;
+            if (!selected_blocks->contains(static_cast<uint32_t>(old_addr / block_size))) {
                 continue;
             }
-            uint32_t             padded_len = slot_word::unloaded_iu_count(w) * iu;
+            uint32_t             padded_len = slot_word::unloaded_iu_count(word) * iu;
             std::vector<uint8_t> blob(padded_len);
-            Status               rs = opt_.page_store->read_at(old_addr, blob.data(), blob.size());
-            if (!rs.ok()) {
+            Status               read = opt_.page_store->read_at(old_addr, blob.data(), blob.size());
+            if (!read.ok()) {
                 CRB_LOG_WARN("[{}] compact_sparse_blocks: prefetch read failed for page {}: {}", name_, page_id,
-                             rs.to_string());
+                             read.to_string());
                 continue;
             }
-            prefetched.push_back(PrefetchedPage{.page_id = page_id, .old_word = w, .blob = std::move(blob)});
+            out->push_back(PrefetchedPage{.page_id = page_id, .old_word = word, .blob = std::move(blob)});
         }
     }
+    return Status::Ok();
+}
 
-    // Run the snapshot with prefetched data. The existing snapshot gate
-    // serializes against any concurrent snapshot.
+Status Crowdbtree::persist_compaction_snapshot(std::vector<PrefetchedPage> prefetched,
+                                               std::set<uint32_t> selected_blocks, PreparedSnapshot *prepared)
+{
     acquire_snapshot_slot();
-    PreparedSnapshot prepared;
-    Status           ps;
+    Status prepare;
     {
         std::lock_guard<std::mutex> lk(write_mutex_);
-        ps = prepare_snapshot_locked(&prepared, std::move(prefetched), true);
+        prepare = prepare_snapshot_locked(prepared, std::move(prefetched), std::move(selected_blocks));
     }
-    if (!ps.ok()) {
-        CRB_LOG_ERROR("[{}] compact_sparse_blocks: prepare failed: {}", name_, ps.to_string());
+    if (!prepare.ok()) {
+        CRB_LOG_ERROR("[{}] compact_sparse_blocks: prepare failed: {}", name_, prepare.to_string());
         release_snapshot_slot();
-        return ps;
+        return prepare;
     }
-    for (auto &w : prepared.page_writes) {
-        Status s = opt_.page_store->write_at(w.addr, w.blob.data(), w.blob.size());
-        if (!s.ok()) {
+
+    for (auto &write : prepared->page_writes) {
+        Status status = opt_.page_store->write_at(write.addr, write.blob.data(), write.blob.size());
+        if (!status.ok()) {
             release_snapshot_slot();
-            return s;
+            return status;
         }
     }
-    for (auto &sw : prepared.segment_writes) {
-        Status s = opt_.page_store->write_at(sw.addr, sw.blob.data(), sw.blob.size());
-        if (!s.ok()) {
+    for (auto &write : prepared->segment_writes) {
+        Status status = opt_.page_store->write_at(write.addr, write.blob.data(), write.blob.size());
+        if (!status.ok()) {
             release_snapshot_slot();
-            return s;
+            return status;
         }
     }
-    Status dw = opt_.page_store->write_at(prepared.directory_write.addr, prepared.directory_write.blob.data(),
-                                          prepared.directory_write.blob.size());
-    if (!dw.ok()) {
+    Status directory = opt_.page_store->write_at(prepared->directory_write.addr, prepared->directory_write.blob.data(),
+                                                 prepared->directory_write.blob.size());
+    if (!directory.ok()) {
         release_snapshot_slot();
-        return dw;
+        return directory;
     }
-    Status sync1 = opt_.page_store->sync();
-    if (!sync1.ok()) {
+    Status durable_contents = opt_.page_store->sync();
+    if (!durable_contents.ok()) {
         release_snapshot_slot();
-        return sync1;
+        return durable_contents;
     }
-    Status aw = opt_.page_store->write_at(prepared.anchor_write.addr, prepared.anchor_write.blob.data(),
-                                          prepared.anchor_write.blob.size());
-    if (!aw.ok()) {
+    Status anchor = opt_.page_store->write_at(prepared->anchor_write.addr, prepared->anchor_write.blob.data(),
+                                              prepared->anchor_write.blob.size());
+    if (!anchor.ok()) {
         release_snapshot_slot();
-        return aw;
+        return anchor;
     }
-    Status sync2 = opt_.page_store->sync();
-    if (!sync2.ok()) {
-        // The anchor write may be visible even though its commit barrier
-        // failed. Invalidate that candidate slot and durably restore the
-        // previous anchor as the only recoverable generation.
-        std::vector<uint8_t> invalid_anchor(prepared.anchor_write.blob.size(), 0);
-        Status               rollback_write =
-            opt_.page_store->write_at(prepared.anchor_write.addr, invalid_anchor.data(), invalid_anchor.size());
-        if (rollback_write.ok()) {
+    Status committed = opt_.page_store->sync();
+    if (!committed.ok()) {
+        std::vector<uint8_t> invalid_anchor(prepared->anchor_write.blob.size(), 0);
+        Status               rollback =
+            opt_.page_store->write_at(prepared->anchor_write.addr, invalid_anchor.data(), invalid_anchor.size());
+        if (rollback.ok()) {
             (void)opt_.page_store->sync();
         }
         release_snapshot_slot();
-        return sync2;
+        return committed;
     }
-    finalize_prepared_snapshot(prepared);
+    finalize_prepared_snapshot(*prepared);
     release_snapshot_slot();
+    return Status::Ok();
+}
 
-    stats.blocks_selected = prepared.blocks_selected;
-    stats.pages_relocated = prepared.pages_relocated;
-    stats.bytes_relocated = prepared.bytes_relocated;
-    stats.blocks_deleted  = prepared.blocks_deleted;
-
+void Crowdbtree::record_compaction_metrics(const MergeGcStats &stats, uint64_t elapsed_ns)
+{
     if (metrics_.merge_gc_blocks_c != nullptr && stats.blocks_selected > 0) {
         metrics_.merge_gc_blocks_c->inc_by(stats.blocks_selected);
     }
@@ -1332,12 +1341,44 @@ Status Crowdbtree::compact_sparse_blocks(MergeGcStats *out_stats)
         metrics_.merge_gc_deleted_c->inc_by(stats.blocks_deleted);
     }
     if (metrics_.merge_gc_l != nullptr) {
-        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
-        metrics_.merge_gc_l->observe(static_cast<uint64_t>(ns));
+        metrics_.merge_gc_l->observe(elapsed_ns);
     }
     CRB_LOG_INFO("[{}] compact_sparse_blocks: selected={} relocated={} bytes={} deleted={}", name_,
                  stats.blocks_selected, stats.pages_relocated, stats.bytes_relocated, stats.blocks_deleted);
-    *out_stats = stats;
+}
+
+Status Crowdbtree::compact_sparse_blocks(MergeGcStats *out_stats)
+{
+    auto started_at = std::chrono::steady_clock::now();
+    if (out_stats == nullptr) {
+        return Status::invalid_argument("compact_sparse_blocks: null output");
+    }
+    *out_stats = {};
+    if (opt_.page_store == nullptr) {
+        return Status::invalid_argument("compact_sparse_blocks: no page_store");
+    }
+    if (opt_.page_store->block_size() == 0 || opt_.merge_gc_max_relocation_bytes == 0) {
+        return Status::Ok();
+    }
+
+    std::vector<PrefetchedPage> prefetched;
+    std::set<uint32_t>          selected_blocks;
+    Status                      prefetch = prefetch_sparse_pages(&prefetched, &selected_blocks);
+    if (!prefetch.ok() || selected_blocks.empty()) {
+        return prefetch;
+    }
+
+    PreparedSnapshot prepared;
+    Status persist = persist_compaction_snapshot(std::move(prefetched), std::move(selected_blocks), &prepared);
+    if (!persist.ok()) {
+        return persist;
+    }
+    *out_stats   = MergeGcStats{.blocks_selected = prepared.blocks_selected,
+                                .pages_relocated = prepared.pages_relocated,
+                                .bytes_relocated = prepared.bytes_relocated,
+                                .blocks_deleted  = prepared.blocks_deleted};
+    auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at);
+    record_compaction_metrics(*out_stats, static_cast<uint64_t>(elapsed.count()));
     return Status::Ok();
 }
 

@@ -26,11 +26,6 @@ when adding or resolving a tracked item.
 - **`lib/crowdb-tree/include/crowdb-tree/mapping_table.h:120`** —
   `Options::mapping_segment_slots` is fixed at `kSegmentSize`; needs
   parameterization for variable segment slot counts.
-- **`lib/crowdb-tree/src/persist.cpp`** — `prepare_snapshot_locked()` and
-  `compact_sparse_blocks()` exceed the function-size limit and mix candidate
-  selection, page relocation, snapshot encoding, and commit orchestration.
-  Extract shared sparse-block selection and split snapshot preparation into
-  focused passes without widening the writer-lock scope.
 ## crowdb-chunk-client
 
 - **`lib/crowdb-chunk-client/tests/common/mod.rs`** — `LocalFileDiskWriter`
