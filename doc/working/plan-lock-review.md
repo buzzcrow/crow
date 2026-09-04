@@ -32,7 +32,7 @@ Implements [the lock design](design-lock-review.md) for
 - [x] **Learner frontier state**: atomic slot/term pair, sharded gap storage,
   and bounded drain owner. Files: `lib/crowdb-kv/src/paxos/learner.rs` and
   learner integration tests.
-- [ ] **WAL index shards**: partition updates by pipeline and snapshot shards
+- [x] **WAL index shards**: partition updates by pipeline and snapshot shards
   for replay/GC. Files: `lib/crowdb-kv/src/wal/{wal_engine.rs,pipeline_writer.rs,index.rs}`
   and WAL tests.
 - [x] **Client latency shards**: remove the request-wide histogram mutex while

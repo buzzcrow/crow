@@ -21,7 +21,7 @@ use crate::metrics::{Bandwidth, Counter, LatencySummary};
 use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
 
-use super::index::{SegmentIndex, SlotLocation};
+use super::index::{ShardedSegmentIndex, SlotLocation};
 use super::pipeline::WalPipeline;
 use super::pipeline_backend::{WalBlockAlignment, WalPipelineBackend};
 use super::pipeline_writer::{spawn_pipeline_writer, EncodedRecord, PendingWrite, WriterCommand};
@@ -75,7 +75,7 @@ pub struct WalEngine {
     /// appends — the writer task owns the segment exclusively.
     pipelines: Vec<WalPipeline>,
     /// In-memory index: slot → location. Updated by writer tasks after flush.
-    index: Arc<parking_lot::Mutex<SegmentIndex>>,
+    index: Arc<ShardedSegmentIndex>,
     /// Monotonically increasing segment id counter.
     next_segment_id: Arc<AtomicU64>,
     /// Number of configured pipelines (cached for lock-free `select_pipeline`).
@@ -156,7 +156,7 @@ impl WalEngine {
     ) -> io::Result<Arc<Self>> {
         let pipeline_count = config.wal_disks.len();
         let failed = Arc::new(AtomicBool::new(false));
-        let index = Arc::new(parking_lot::Mutex::new(SegmentIndex::new()));
+        let index = Arc::new(ShardedSegmentIndex::new(pipeline_count, group_id));
         let next_segment_id = Arc::new(AtomicU64::new(initial_next_segment_id));
         let flush_count = Arc::new(AtomicU64::new(0));
         let records_flushed = Arc::new(AtomicU64::new(0));
@@ -370,7 +370,7 @@ impl WalEngine {
     }
 
     /// Access the segment index (for GC, replay, lookup).
-    pub fn index(&self) -> &parking_lot::Mutex<SegmentIndex> {
+    pub fn index(&self) -> &ShardedSegmentIndex {
         &self.index
     }
 

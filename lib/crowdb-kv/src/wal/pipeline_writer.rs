@@ -37,7 +37,7 @@ use crate::metrics::{Bandwidth, LatencySummary};
 use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
 
-use super::index::{SegmentIndex, SegmentMeta, SlotLocation};
+use super::index::{SegmentMeta, ShardedSegmentIndex, SlotLocation};
 use super::record::{RecordFrame, WalRecordFormat};
 use super::segment::WalSegment;
 use super::IoBackend;
@@ -109,7 +109,7 @@ pub(crate) fn spawn_pipeline_writer(
     watchdog: Duration,
     batch_bytes: usize,
     failed: Arc<AtomicBool>,
-    index: Arc<parking_lot::Mutex<SegmentIndex>>,
+    index: Arc<ShardedSegmentIndex>,
     flush_count: Arc<AtomicU64>,
     records_flushed: Arc<AtomicU64>,
     watchdog_wakeups: Arc<AtomicU64>,
@@ -154,7 +154,7 @@ async fn pipeline_writer_loop(
     watchdog: Duration,
     batch_bytes: usize,
     failed: Arc<AtomicBool>,
-    index: Arc<parking_lot::Mutex<SegmentIndex>>,
+    index: Arc<ShardedSegmentIndex>,
     flush_count: Arc<AtomicU64>,
     records_flushed: Arc<AtomicU64>,
     watchdog_wakeups: Arc<AtomicU64>,
@@ -281,7 +281,7 @@ async fn handle_write_command(
     skip_fsync: bool,
     fsync_summary: &OnceLock<Arc<LatencySummary>>,
     write_bandwidth: &OnceLock<Arc<Bandwidth>>,
-    index: &Arc<parking_lot::Mutex<SegmentIndex>>,
+    index: &Arc<ShardedSegmentIndex>,
     pipeline_idx: usize,
     flush_count: &Arc<AtomicU64>,
     records_flushed: &Arc<AtomicU64>,
@@ -378,7 +378,7 @@ async fn recv_command(
     rx: &mut mpsc::UnboundedReceiver<WriterCommand>,
     watchdog: Duration,
     segment: &mut WalSegment,
-    index: &Arc<parking_lot::Mutex<SegmentIndex>>,
+    index: &Arc<ShardedSegmentIndex>,
     pipeline_idx: usize,
     watchdog_wakeups: &Arc<AtomicU64>,
 ) -> Option<WriterCommand> {
@@ -413,7 +413,7 @@ async fn handle_seal_command(
     next_segment_id: &Arc<AtomicU64>,
     group_id: PxGroupId,
     record_format: WalRecordFormat,
-    index: &Arc<parking_lot::Mutex<SegmentIndex>>,
+    index: &Arc<ShardedSegmentIndex>,
     pipeline_idx: usize,
     failed: &Arc<AtomicBool>,
 ) -> bool {
@@ -476,16 +476,16 @@ fn drain_pending_commands(
 
 /// Insert index entries for every non-metadata record in the batch.
 fn update_index_for_batch(
-    index: &Arc<parking_lot::Mutex<SegmentIndex>>,
+    index: &Arc<ShardedSegmentIndex>,
     batch: &[PendingWrite],
     offsets: &[u64],
     pipeline_idx: usize,
     segment_id: u64,
 ) {
-    let mut idx = index.lock();
     for (i, req) in batch.iter().enumerate() {
         if req.slot != 0 {
-            idx.insert(
+            index.insert(
+                pipeline_idx,
                 req.slot,
                 SlotLocation {
                     disk_idx: pipeline_idx,
@@ -507,7 +507,7 @@ async fn rotate_if_full(
     next_segment_id: &Arc<AtomicU64>,
     group_id: PxGroupId,
     record_format: WalRecordFormat,
-    index: &Arc<parking_lot::Mutex<SegmentIndex>>,
+    index: &Arc<ShardedSegmentIndex>,
     pipeline_idx: usize,
     segment_size: u64,
 ) -> io::Result<()> {
@@ -544,7 +544,7 @@ async fn process_pending_seal_acks(
     next_segment_id: &Arc<AtomicU64>,
     group_id: PxGroupId,
     record_format: WalRecordFormat,
-    index: &Arc<parking_lot::Mutex<SegmentIndex>>,
+    index: &Arc<ShardedSegmentIndex>,
     pipeline_idx: usize,
     failed: &Arc<AtomicBool>,
 ) -> bool {
@@ -682,7 +682,7 @@ async fn create_segment(
 }
 
 /// Register a sealed segment in the index.
-fn register_sealed(index: &parking_lot::Mutex<SegmentIndex>, segment: &WalSegment, pipeline_idx: usize) {
+fn register_sealed(index: &ShardedSegmentIndex, segment: &WalSegment, pipeline_idx: usize) {
     let meta = SegmentMeta {
         segment_id: segment.segment_id,
         disk_idx: pipeline_idx,
@@ -690,7 +690,7 @@ fn register_sealed(index: &parking_lot::Mutex<SegmentIndex>, segment: &WalSegmen
         max_slot: segment.max_slot,
         record_count: segment.record_count,
     };
-    index.lock().register_segment(meta);
+    index.register_segment(pipeline_idx, meta);
     debug!(
         segment_id = segment.segment_id,
         min_slot = segment.min_slot,

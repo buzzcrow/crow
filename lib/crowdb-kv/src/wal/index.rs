@@ -23,7 +23,7 @@ pub struct SlotLocation {
 /// This is a rebuildable cache used for lookup and GC metadata. Multiple WAL
 /// records may exist for the same slot; inserting a later location overwrites
 /// the cache entry while replay still scans every durable record.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct SegmentIndex {
     map: BTreeMap<SlotIndex, SlotLocation>,
     /// All known `segment_ids` per disk, with their slot ranges.
@@ -99,5 +99,98 @@ impl SegmentIndex {
             }
             self.segments.insert(seg_id, meta);
         }
+    }
+}
+
+/// Pipeline-partitioned live WAL index.
+///
+/// Each writer mutates only its own shard. Cross-pipeline consumers take a
+/// bounded snapshot one shard at a time and never hold an index lock over I/O.
+#[derive(Debug)]
+pub struct ShardedSegmentIndex {
+    shards: Vec<parking_lot::Mutex<SegmentIndex>>,
+    group_id: u64,
+}
+
+impl ShardedSegmentIndex {
+    /// Create one independent shard per WAL pipeline.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `pipeline_count` is zero.
+    #[must_use]
+    pub fn new(pipeline_count: usize, group_id: u64) -> Self {
+        assert!(pipeline_count > 0, "WAL requires at least one pipeline");
+        Self {
+            shards: (0..pipeline_count)
+                .map(|_| parking_lot::Mutex::new(SegmentIndex::new()))
+                .collect(),
+            group_id,
+        }
+    }
+
+    fn shard_for_slot(&self, slot: SlotIndex) -> usize {
+        if self.shards.len() == 1 {
+            return 0;
+        }
+        let hash = slot.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.group_id;
+        usize::try_from(hash % self.shards.len() as u64).expect("pipeline count exceeds usize")
+    }
+
+    pub fn insert(&self, pipeline_idx: usize, slot: SlotIndex, loc: SlotLocation) {
+        debug_assert_eq!(pipeline_idx, loc.disk_idx);
+        self.shards[pipeline_idx].lock().insert(slot, loc);
+    }
+
+    #[must_use]
+    pub fn locate(&self, slot: SlotIndex) -> Option<SlotLocation> {
+        self.shards[self.shard_for_slot(slot)]
+            .lock()
+            .locate(slot)
+            .copied()
+    }
+
+    pub fn register_segment(&self, pipeline_idx: usize, meta: SegmentMeta) {
+        debug_assert_eq!(pipeline_idx, meta.disk_idx);
+        self.shards[pipeline_idx].lock().register_segment(meta);
+    }
+
+    pub fn remove_segment(&self, pipeline_idx: usize, segment_id: u64) {
+        self.shards[pipeline_idx].lock().remove_segment(segment_id);
+    }
+
+    #[must_use]
+    pub fn segments_snapshot(&self) -> Vec<SegmentMeta> {
+        self.shards
+            .iter()
+            .flat_map(|shard| shard.lock().segments().cloned().collect::<Vec<_>>())
+            .collect()
+    }
+
+    #[must_use]
+    pub fn slot_count(&self) -> usize {
+        self.shards.iter().map(|shard| shard.lock().slot_count()).sum()
+    }
+
+    /// Return a point-in-time merged view, acquiring one shard at a time.
+    #[must_use]
+    pub fn snapshot(&self) -> SegmentIndex {
+        let mut snapshot = SegmentIndex::new();
+        for shard in &self.shards {
+            let shard = shard.lock();
+            snapshot
+                .map
+                .extend(shard.map.iter().map(|(slot, loc)| (*slot, *loc)));
+            snapshot
+                .segments
+                .extend(shard.segments.iter().map(|(id, meta)| (*id, meta.clone())));
+        }
+        snapshot
+    }
+
+    /// Compatibility alias for callers that previously held the global index.
+    #[must_use]
+    pub fn lock(&self) -> SegmentIndex {
+        self.snapshot()
     }
 }

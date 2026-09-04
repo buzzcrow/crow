@@ -7,6 +7,7 @@ use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use dashmap::DashMap;
+#[cfg(feature = "test-util")]
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 

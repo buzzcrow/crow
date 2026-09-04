@@ -97,33 +97,32 @@ pub async fn run_gc_with_watermark(wal: &WalEngine, gc_slot: u64) -> io::Result<
     let disk_paths = wal.disk_group_paths();
 
     // Collect segments eligible for GC.
-    let eligible: Vec<(u64, usize, std::path::PathBuf)> = {
-        let index = wal.index().lock();
-        index
-            .segments()
-            .filter(|meta| meta.max_slot > 0 && meta.max_slot < gc_slot)
-            .map(|meta| {
-                let dir = &disk_paths[meta.disk_idx];
-                let filename = format!("seg-{:07}.ck", meta.segment_id);
-                let path = dir.join(filename);
-                (meta.segment_id, meta.disk_idx, path)
-            })
-            .collect()
-    };
+    let eligible: Vec<(u64, usize, std::path::PathBuf)> = wal
+        .index()
+        .segments_snapshot()
+        .iter()
+        .filter(|meta| meta.max_slot > 0 && meta.max_slot < gc_slot)
+        .map(|meta| {
+            let dir = &disk_paths[meta.disk_idx];
+            let filename = format!("seg-{:07}.ck", meta.segment_id);
+            let path = dir.join(filename);
+            (meta.segment_id, meta.disk_idx, path)
+        })
+        .collect();
 
     // Check min_retention.
     // For V1, skip retention check (it requires file mtime which SimDisk doesn't have).
 
-    for (seg_id, _disk_idx, path) in &eligible {
+    for (seg_id, disk_idx, path) in &eligible {
         match backend.unlink(path).await {
             Ok(()) => {
-                wal.index().lock().remove_segment(*seg_id);
+                wal.index().remove_segment(*disk_idx, *seg_id);
                 unlinked += 1;
                 debug!(g = wal.group_id(), segment_id = seg_id, "gc: unlinked segment");
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 // Already gone — clean up index.
-                wal.index().lock().remove_segment(*seg_id);
+                wal.index().remove_segment(*disk_idx, *seg_id);
             }
             Err(e) => {
                 warn!(
