@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
@@ -83,17 +83,21 @@ pub struct PxLearner {
     last_chosen_slot: AtomicU64,
     /// Term of the entry at `last_chosen_slot`.
     last_chosen_term: AtomicU64,
+    /// Sequence lock protecting the slot/term high-water pair.
+    last_chosen_seq: AtomicU64,
     /// Out-of-order chosen slots awaiting a gap-fill from a lower slot. Maps
     /// slot → term so the frontier advance step can also bump
     /// `last_chosen_term` if it crosses an out-of-order slot.
-    out_of_order: Mutex<BTreeMap<SlotIndex, PxTerm>>,
+    out_of_order: DashMap<SlotIndex, PxTerm>,
+    chosen_drain_owner: AtomicBool,
     /// Out-of-order **applied** slots awaiting a gap-fill from a lower slot.
     /// R17's `spawn_learn_chosen` defers the engine apply, and spawned
     /// applies can complete out of order, so `contiguous_applied` needs the
     /// same drain pattern `out_of_order` gives `contiguous_chosen`. Empty in
     /// steady state on the leader (propose slots are sequential); populated
     /// only under spawn reordering.
-    applied_out_of_order: Mutex<BTreeSet<SlotIndex>>,
+    applied_out_of_order: DashMap<SlotIndex, ()>,
+    applied_drain_owner: AtomicBool,
     /// Per-`client_id` idempotency cache. Updated on every `learn` that
     /// carries a `(client_id, seq)`; consulted by the proposer to short-
     /// circuit a retried request to its prior commit slot without re-running
@@ -150,8 +154,11 @@ impl Default for PxLearner {
             contiguous_applied: AtomicU64::new(0),
             last_chosen_slot: AtomicU64::new(0),
             last_chosen_term: AtomicU64::new(0),
-            out_of_order: Mutex::new(BTreeMap::new()),
-            applied_out_of_order: Mutex::new(BTreeSet::new()),
+            last_chosen_seq: AtomicU64::new(0),
+            out_of_order: DashMap::new(),
+            chosen_drain_owner: AtomicBool::new(false),
+            applied_out_of_order: DashMap::new(),
+            applied_drain_owner: AtomicBool::new(false),
             dedup: DashMap::new(),
             apply_notify: Notify::new(),
             #[cfg(feature = "test-util")]
@@ -179,8 +186,11 @@ impl PxLearner {
             contiguous_applied: AtomicU64::new(0),
             last_chosen_slot: AtomicU64::new(0),
             last_chosen_term: AtomicU64::new(0),
-            out_of_order: Mutex::new(BTreeMap::new()),
-            applied_out_of_order: Mutex::new(BTreeSet::new()),
+            last_chosen_seq: AtomicU64::new(0),
+            out_of_order: DashMap::new(),
+            chosen_drain_owner: AtomicBool::new(false),
+            applied_out_of_order: DashMap::new(),
+            applied_drain_owner: AtomicBool::new(false),
             dedup: DashMap::new(),
             apply_notify: Notify::new(),
             #[cfg(feature = "test-util")]
@@ -336,7 +346,7 @@ impl PxLearner {
     /// Highest slot ever seen as chosen (gaps allowed).
     #[must_use]
     pub fn last_chosen_slot(&self) -> SlotIndex {
-        self.last_chosen_slot.load(Ordering::Acquire)
+        self.last_chosen_pair().0
     }
 
     /// R65: check whether a slot is chosen (safe to apply). A slot is
@@ -348,13 +358,52 @@ impl PxLearner {
         if slot <= self.contiguous_chosen.load(Ordering::Acquire) {
             return true;
         }
-        self.out_of_order.lock().contains_key(&slot)
+        self.out_of_order.contains_key(&slot)
     }
 
     /// Term of the entry at [`Self::last_chosen_slot`].
     #[must_use]
     pub fn last_chosen_term(&self) -> PxTerm {
-        self.last_chosen_term.load(Ordering::Acquire)
+        self.last_chosen_pair().1
+    }
+
+    fn last_chosen_pair(&self) -> (SlotIndex, PxTerm) {
+        loop {
+            let before = self.last_chosen_seq.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let slot = self.last_chosen_slot.load(Ordering::Relaxed);
+            let term = self.last_chosen_term.load(Ordering::Relaxed);
+            if self.last_chosen_seq.load(Ordering::Acquire) == before {
+                return (slot, term);
+            }
+        }
+    }
+
+    fn update_last_chosen(&self, slot: SlotIndex, term: PxTerm) -> bool {
+        loop {
+            let seq = self.last_chosen_seq.load(Ordering::Acquire);
+            if seq & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            if self
+                .last_chosen_seq
+                .compare_exchange_weak(seq, seq + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_err()
+            {
+                continue;
+            }
+            let advanced = slot > self.last_chosen_slot.load(Ordering::Relaxed);
+            if advanced {
+                self.last_chosen_term.store(term, Ordering::Relaxed);
+                self.last_chosen_slot.store(slot, Ordering::Relaxed);
+            }
+            self.last_chosen_seq.store(seq + 2, Ordering::Release);
+            return advanced;
+        }
     }
 
     /// Receive a peer's notification that `(slot, term)` is chosen.
@@ -367,23 +416,7 @@ impl PxLearner {
     /// Returns `true` if the high-water mark advanced, `false` if the
     /// notice was already at or behind the current `last_chosen_slot`.
     pub fn note_chosen(&self, slot: SlotIndex, term: PxTerm) -> bool {
-        let mut prev = self.last_chosen_slot.load(Ordering::Relaxed);
-        loop {
-            if slot <= prev {
-                return false;
-            }
-            match self
-                .last_chosen_slot
-                .compare_exchange_weak(prev, slot, Ordering::AcqRel, Ordering::Relaxed)
-            {
-                Ok(_) => {
-                    let _guard = self.out_of_order.lock();
-                    self.last_chosen_term.store(term, Ordering::Release);
-                    return true;
-                }
-                Err(actual) => prev = actual,
-            }
-        }
+        self.update_last_chosen(slot, term)
     }
 
     /// Advance the **chosen** frontier for a newly learned `(slot, term)`:
@@ -396,49 +429,36 @@ impl PxLearner {
     /// Idempotent: re-applying an already-learned slot is a no-op.
     pub(crate) fn update_chosen_frontier(&self, slot: SlotIndex, term: PxTerm) {
         // `last_chosen_slot` is the max ever seen (gaps allowed).
-        let mut prev = self.last_chosen_slot.load(Ordering::Relaxed);
-        loop {
-            if slot <= prev {
-                break;
-            }
-            match self
-                .last_chosen_slot
-                .compare_exchange_weak(prev, slot, Ordering::AcqRel, Ordering::Relaxed)
-            {
-                Ok(_) => {
-                    // Race-free under `&self`: lock the out-of-order map for the
-                    // term write so we don't race with a concurrent advance.
-                    let _guard = self.out_of_order.lock();
-                    self.last_chosen_term.store(term, Ordering::Release);
-                    break;
-                }
-                Err(actual) => prev = actual,
-            }
+        self.update_last_chosen(slot, term);
+        if slot > self.contiguous_chosen.load(Ordering::Acquire) {
+            self.out_of_order.insert(slot, term);
+            self.drain_chosen_frontier();
         }
+    }
 
-        // Advance the contiguous-chosen watermark.
-        let mut map = self.out_of_order.lock();
-        let mut cc = self.contiguous_chosen.load(Ordering::Acquire);
-        match slot.cmp(&(cc + 1)) {
-            std::cmp::Ordering::Less => {
-                // Already chosen (slot <= cc). No advance.
-            }
-            std::cmp::Ordering::Equal => {
-                cc = slot;
-                // Drain consecutive out-of-order slots.
-                while let Some((&next_slot, &_next_term)) = map.iter().next() {
-                    if next_slot == cc + 1 {
-                        cc = next_slot;
-                        map.remove(&next_slot);
-                    } else {
-                        break;
-                    }
+    fn drain_chosen_frontier(&self) {
+        if self
+            .chosen_drain_owner
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        loop {
+            let next = self.contiguous_chosen.load(Ordering::Relaxed) + 1;
+            if self.out_of_order.remove(&next).is_none() {
+                self.chosen_drain_owner.store(false, Ordering::Release);
+                if !self.out_of_order.contains_key(&next)
+                    || self
+                        .chosen_drain_owner
+                        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                        .is_err()
+                {
+                    return;
                 }
-                self.contiguous_chosen.store(cc, Ordering::Release);
+                continue;
             }
-            std::cmp::Ordering::Greater => {
-                map.insert(slot, term);
-            }
+            self.contiguous_chosen.store(next, Ordering::Release);
         }
     }
 
@@ -452,34 +472,40 @@ impl PxLearner {
     ///
     /// Idempotent: re-advancing an already-applied slot is a no-op.
     pub(crate) fn advance_applied_frontier(&self, slot: SlotIndex) {
-        let mut map = self.applied_out_of_order.lock();
-        let mut ca = self.contiguous_applied.load(Ordering::Acquire);
-        match slot.cmp(&(ca + 1)) {
-            std::cmp::Ordering::Less => {
-                // Already applied (slot <= ca). No advance.
-            }
-            std::cmp::Ordering::Equal => {
-                ca = slot;
-                // Drain consecutive out-of-order applied slots.
-                while let Some(&next_slot) = map.iter().next() {
-                    if next_slot == ca + 1 {
-                        ca = next_slot;
-                        map.remove(&next_slot);
-                    } else {
-                        break;
+        if slot > self.contiguous_applied.load(Ordering::Acquire) {
+            self.applied_out_of_order.insert(slot, ());
+            self.drain_applied_frontier();
+        }
+    }
+
+    fn drain_applied_frontier(&self) {
+        if self
+            .applied_drain_owner
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        let mut advanced = false;
+        loop {
+            let next = self.contiguous_applied.load(Ordering::Relaxed) + 1;
+            if self.applied_out_of_order.remove(&next).is_none() {
+                self.applied_drain_owner.store(false, Ordering::Release);
+                if !self.applied_out_of_order.contains_key(&next)
+                    || self
+                        .applied_drain_owner
+                        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                        .is_err()
+                {
+                    if advanced {
+                        self.apply_notify.notify_waiters();
                     }
+                    return;
                 }
-                self.contiguous_applied.store(ca, Ordering::Release);
-                // R35: wake any Linearizable read parked in `await_applied`
-                // on the prior frontier. `notify_waiters` (not
-                // `notify_one`) so every concurrent fenced read re-checks
-                // together; woken readers that are still behind loop and
-                // re-park. No-op when no reader is waiting.
-                self.apply_notify.notify_waiters();
+                continue;
             }
-            std::cmp::Ordering::Greater => {
-                map.insert(slot);
-            }
+            self.contiguous_applied.store(next, Ordering::Release);
+            advanced = true;
         }
     }
 

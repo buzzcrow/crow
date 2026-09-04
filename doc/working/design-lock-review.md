@@ -25,8 +25,8 @@ doc does not repeat them.
   backend thread while `log_msg.thread_id` identifies the originating thread.
 - `PxLearner::out_of_order` and `applied_out_of_order`: shard gap ownership by
   slot and serialize only the short contiguous-drain cursor. Publish the
-  `(last_chosen_slot, last_chosen_term)` pair through one atomic state so the
-  pair cannot tear.
+  `(last_chosen_slot, last_chosen_term)` pair through an atomic sequence guard
+  so the pair cannot tear.
 - `ClientMetrics::window_lat`: record into sharded histograms selected by a
   stable thread hash; flush drains shards one at a time. Keep
   `leader_changes` separately locked because it is event-rate, not request-rate.

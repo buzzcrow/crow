@@ -29,7 +29,7 @@ Implements [the lock design](design-lock-review.md) for
 
 ## Rust Hot Paths
 
-- [ ] **Learner frontier state**: atomic slot/term pair, sharded gap storage,
+- [x] **Learner frontier state**: atomic slot/term pair, sharded gap storage,
   and bounded drain owner. Files: `lib/crowdb-kv/src/paxos/learner.rs` and
   learner integration tests.
 - [ ] **WAL index shards**: partition updates by pipeline and snapshot shards

@@ -175,6 +175,30 @@ async fn learn_out_of_order_does_not_advance_contiguous_until_gap_filled() {
     assert_eq!(learner.contiguous_applied(), 3);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_gap_fill_drains_both_frontiers() {
+    use std::sync::Arc;
+
+    let learner = Arc::new(PxLearner::new());
+    let mut tasks = Vec::new();
+    for slot in (1..=128u64).rev() {
+        let learner = Arc::clone(&learner);
+        tasks.push(tokio::spawn(async move {
+            learner
+                .learn(write_entry(slot, &encode_put(b"k", &slot.to_le_bytes())), &[])
+                .await;
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    assert_eq!(learner.contiguous_chosen(), 128);
+    assert_eq!(learner.contiguous_applied(), 128);
+    assert_eq!(learner.last_chosen_slot(), 128);
+    assert_eq!(learner.last_chosen_term(), 1);
+}
+
 #[tokio::test]
 async fn learn_is_idempotent_for_repeated_slot() {
     let learner = PxLearner::new();
