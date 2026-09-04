@@ -300,7 +300,7 @@ impl WalEngine {
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL writer dropped ack"))??;
 
         trace!(
-            group_id = self.group_id,
+            g = self.group_id,
             slot = record.slot,
             pipeline_idx,
             "wal record appended and durably flushed"

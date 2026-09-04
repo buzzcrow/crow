@@ -481,7 +481,7 @@ async fn create_and_start_stores(
                 .unwrap_or(0)
         };
         let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
-        debug!(store_id, bind_addr = %addr, "creating PxKvStore");
+        debug!(s = store_id, bind_addr = %addr, "creating PxKvStore");
         let mut store = PxKvStore::new(store_id, addr);
         store.rpc_workers = registry.rpc_workers;
         if let Some(ref mr) = registry.metrics_registry {
@@ -516,7 +516,7 @@ async fn create_and_start_stores(
             {
                 Ok(group) => group,
                 Err(e) => {
-                    tracing::error!(store_id, group_id, error = %e, "failed to create WAL-backed group");
+                    tracing::error!(s = store_id, g = group_id, error = %e, "failed to create WAL-backed group");
                     continue;
                 }
             };
@@ -524,7 +524,7 @@ async fn create_and_start_stores(
         }
 
         if let Err(e) = store.start().await {
-            tracing::error!(store_id, port, error = %e, "failed to start store, skipping");
+            tracing::error!(s = store_id, port, error = %e, "failed to start store, skipping");
             continue;
         }
 
@@ -572,7 +572,7 @@ async fn graceful_shutdown(registry: Arc<KvStoreRegistry>) {
         if !report.is_clean() {
             total_errors += report.errors.len();
             for err in &report.errors {
-                tracing::error!(store_id, "{err}");
+                tracing::error!(s = store_id, "{err}");
             }
         }
     }

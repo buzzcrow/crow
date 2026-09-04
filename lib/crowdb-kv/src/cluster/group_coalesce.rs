@@ -7,6 +7,7 @@ use std::sync::Weak;
 
 use crate::cluster::group::{PendingBatch, ProposeResult, PxGroup};
 use crate::paxos::roles::DedupTag;
+use tracing::{info_span, Instrument};
 
 /// Coalescer watchdog interval in microseconds. The watchdog sleeps for
 /// this duration, then checks if there's been no activity for that
@@ -39,40 +40,49 @@ impl PxGroup {
             let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
                 return tokio::spawn(async {});
             };
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_micros(WATCHDOG_US)).await;
-                    let last = group
-                        .coalesce_last_activity_us
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    let now = Self::now_micros();
-                    if now.saturating_sub(last) < WATCHDOG_US {
-                        continue;
-                    }
-                    // No activity for WATCHDOG_US — atomically swap the
-                    // batch for a fresh empty one so no op can sneak in
-                    // and start a 1-op round during the swap.
-                    let batch = {
-                        let mut guard = group.coalescer.lock();
-                        let taken = guard.take();
-                        if taken.is_some() {
-                            *guard = Some(PendingBatch::default());
+            let g = group.group_id;
+            let replica = group.local_replica().id;
+            let span = group.log_store_id().map_or_else(
+                || info_span!("coalesce_watchdog", g, replica),
+                |s| info_span!("coalesce_watchdog", s, g, replica),
+            );
+            tokio::spawn(
+                async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_micros(WATCHDOG_US)).await;
+                        let last = group
+                            .coalesce_last_activity_us
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        let now = Self::now_micros();
+                        if now.saturating_sub(last) < WATCHDOG_US {
+                            continue;
                         }
-                        taken
-                    };
-                    let Some(batch) = batch else { continue };
-                    if batch.op_count > 0 {
-                        tracing::error!(
-                            group_id = group.group_id,
-                            op_count = batch.op_count,
-                            "coalescer: watchdog flushing stuck batch — ops delayed >1s"
-                        );
-                        group.coalesce_touch_activity();
-                        group.coalesce_spawn_round(batch);
+                        // No activity for WATCHDOG_US — atomically swap the
+                        // batch for a fresh empty one so no op can sneak in
+                        // and start a 1-op round during the swap.
+                        let batch = {
+                            let mut guard = group.coalescer.lock();
+                            let taken = guard.take();
+                            if taken.is_some() {
+                                *guard = Some(PendingBatch::default());
+                            }
+                            taken
+                        };
+                        let Some(batch) = batch else { continue };
+                        if batch.op_count > 0 {
+                            tracing::error!(
+                                g = group.group_id,
+                                op_count = batch.op_count,
+                                "coalescer: watchdog flushing stuck batch — ops delayed >1s"
+                            );
+                            group.coalesce_touch_activity();
+                            group.coalesce_spawn_round(batch);
+                        }
+                        // Empty batch — just drop it (go idle).
                     }
-                    // Empty batch — just drop it (go idle).
                 }
-            })
+                .instrument(span),
+            )
         });
     }
 
@@ -90,15 +100,18 @@ impl PxGroup {
         let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
             return;
         };
-        tokio::spawn(async move {
-            #[cfg(feature = "test-util")]
-            group.coalesce_await_round_gate().await;
-            let result = group.propose_inner(payload, &tags).await;
-            for waiter in waiters {
-                let _ = waiter.send(result.clone());
+        tokio::spawn(
+            async move {
+                #[cfg(feature = "test-util")]
+                group.coalesce_await_round_gate().await;
+                let result = group.propose_inner(payload, &tags).await;
+                for waiter in waiters {
+                    let _ = waiter.send(result.clone());
+                }
+                group.coalesce_drain_after_round();
             }
-            group.coalesce_drain_after_round();
-        });
+            .instrument(tracing::Span::current()),
+        );
     }
 
     /// Enqueue one single-key op into the coalescer.
@@ -174,15 +187,18 @@ impl PxGroup {
         let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
             return ProposeResult::Err("group dropped".to_string());
         };
-        tokio::spawn(async move {
-            #[cfg(feature = "test-util")]
-            group.coalesce_await_round_gate().await;
-            let result = group.propose_inner(payload, &round_tags).await;
-            for waiter in round_waiters {
-                let _ = waiter.send(result.clone());
+        tokio::spawn(
+            async move {
+                #[cfg(feature = "test-util")]
+                group.coalesce_await_round_gate().await;
+                let result = group.propose_inner(payload, &round_tags).await;
+                for waiter in round_waiters {
+                    let _ = waiter.send(result.clone());
+                }
+                group.coalesce_drain_after_round();
             }
-            group.coalesce_drain_after_round();
-        });
+            .instrument(tracing::Span::current()),
+        );
 
         match rx.await {
             Ok(result) => result,

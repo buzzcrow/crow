@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, info_span, Instrument};
 
 use crate::cluster::group_config::GroupConfigStore;
 use crate::cluster::group_election::{LeaderElection, PendingLeaderHandoff, ReadBarrierOutcome};
@@ -83,6 +83,7 @@ pub(crate) struct PendingBatch {
 
 pub struct PxGroup {
     pub group_id: PxGroupId,
+    log_store_id: AtomicU64,
     pub(crate) cached_quorum: usize,
     pub(crate) local_replica: PxLocalReplica,
     pub(crate) remote_replicas: Vec<RemoteReplicaKind>,
@@ -332,8 +333,10 @@ impl PxGroup {
         // O6: capture replica_id before the move into the struct for the
         // per-replica snapshot jitter below.
         let replica_id = local_replica.id;
+        local_replica.log_group_id.store(group_id, Ordering::Release);
         let mut group = Self {
             group_id,
+            log_store_id: AtomicU64::new(0),
             cached_quorum: 0,
             local_replica,
             remote_replicas: Vec::new(),
@@ -536,9 +539,13 @@ impl PxGroup {
         let weak = Arc::downgrade(self);
         let cancel = self.tenure_cancel.clone();
         let group_id = self.group_id;
-        let handle = tokio::spawn(async move {
-            run_fetchgap_driver(weak, group_id, cancel).await;
-        });
+        let replica = self.local_replica.id;
+        let task = async move { run_fetchgap_driver(weak, group_id, cancel).await };
+        let span = self.log_store_id().map_or_else(
+            || info_span!("fetchgap_driver", g = group_id, replica),
+            |s| info_span!("fetchgap_driver", s, g = group_id, replica),
+        );
+        let handle = tokio::spawn(task.instrument(span));
         *guard = Some(handle);
     }
 
@@ -555,6 +562,18 @@ impl PxGroup {
 
     pub fn group_id(&self) -> PxGroupId {
         self.group_id
+    }
+
+    pub(crate) fn set_log_store_id(&self, store_id: u64) {
+        self.log_store_id.store(store_id, Ordering::Release);
+        self.local_replica.set_log_context(store_id, self.group_id);
+    }
+
+    pub(crate) fn log_store_id(&self) -> Option<u64> {
+        match self.log_store_id.load(Ordering::Acquire) {
+            0 => None,
+            store_id => Some(store_id),
+        }
     }
 
     pub fn local_replica(&self) -> &PxLocalReplica {
@@ -732,7 +751,7 @@ impl PxGroup {
             AcceptAttempt::Chosen => {
                 replica.learn_chosen(&entry, &[]).await;
                 self.fan_out_chosen_notice(&entry, group_id);
-                debug!(group_id, slot = gap_slot, "background repair filled gap");
+                debug!(slot = gap_slot, "background repair filled gap");
                 RepairOutcome::Filled { slot: gap_slot }
             }
             AcceptAttempt::Retry { error, .. } | AcceptAttempt::Fail { error } => {
@@ -790,7 +809,7 @@ impl PxGroup {
             };
             let remote_id = remote.node_id;
             if let Err(err) = remote.send_chosen_notice(slot, term, leader_id, group_id, ballot_round) {
-                debug!(group_id, slot, term, remote_id, endpoint = %remote.endpoint, error = %err, "fan_out_chosen_notice: peer notice failed (best-effort)");
+                debug!(slot, term, peer = remote_id, endpoint = %remote.endpoint, error = %err, "fan_out_chosen_notice: peer notice failed (best-effort)");
             }
         }
     }
@@ -805,19 +824,16 @@ impl PxGroup {
     pub(crate) fn handle_fetch_gap(&self, slot: SlotIndex) -> Option<crate::rpc::FetchGapResponse> {
         let replica = &self.local_replica;
         if !replica.is_leader() {
-            debug!(
-                group_id = self.group_id,
-                slot, "handle_fetch_gap: not leader, ignoring"
-            );
+            debug!(slot, role = ?replica.role(), leader = ?replica.believed_leader_id(), "handle_fetch_gap: not leader, ignoring");
             return None;
         }
         let entry = replica.acceptor.accepted_at(slot)?;
         let group_id = self.group_id;
         debug!(
-            group_id,
             slot,
             round = entry.ballot.round,
-            leader_id = entry.ballot.leader_id,
+            leader = entry.ballot.leader_id,
+            role = "leader",
             term = entry.term,
             payload_len = entry.payload.len(),
             "handle_fetch_gap: replying with accepted value"

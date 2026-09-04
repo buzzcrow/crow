@@ -9,7 +9,7 @@ use std::sync::{Arc, Weak};
 
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, warn, Instrument};
 
 use crate::cluster::group::{PxGroup, RemoteFoldCtx, RemoteReplicaKind, ReplyFold};
 use crate::cluster::local_replica::PxLocalReplica;
@@ -50,6 +50,7 @@ enum TaggedPrepareReply {
 }
 
 impl PxGroup {
+    #[tracing::instrument(level = "debug", name = "prepare_phase", skip_all, fields(s = self.log_store_id().unwrap_or(0), g = self.group_id, replica = self.local_replica().id, slot))]
     pub(crate) async fn run_prepare_phase(
         &self,
         replica: &PxLocalReplica,
@@ -162,7 +163,7 @@ impl PxGroup {
                             error!(
                                 group_id,
                                 slot,
-                                replica_id = replica.id,
+                                peer = replica.id,
                                 error = %error,
                                 "local prepare handler failed"
                             );
@@ -187,9 +188,8 @@ impl PxGroup {
                             Ok(reply) => fold.fold_prepare_remote(voting, &ctx, reply),
                             Err(error) => {
                                 error!(
-                                    group_id,
                                     slot,
-                                    remote_id,
+                                    peer = remote_id,
                                     endpoint = %endpoint,
                                     error = %error,
                                     "prepare rpc failed"
@@ -205,17 +205,20 @@ impl PxGroup {
                 if fold.accepted >= quorum && fold.local_folded && fold.highest_seen_term.is_none() {
                     let cancel = group.tenure_cancel.clone();
                     let group_drain = group.clone();
-                    tokio::spawn(async move {
-                        loop {
-                            tokio::select! {
-                                biased;
-                                () = cancel.cancelled() => return,
-                                Some(tagged) = futs.next() =>
-                                    prepare_drain_side_effect(&group_drain, slot, tagged),
-                                else => return,
+                    tokio::spawn(
+                        async move {
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    () = cancel.cancelled() => return,
+                                    Some(tagged) = futs.next() =>
+                                        prepare_drain_side_effect(&group_drain, slot, tagged),
+                                    else => return,
+                                }
                             }
                         }
-                    });
+                        .instrument(tracing::Span::current()),
+                    );
                     break;
                 }
             }
@@ -244,7 +247,7 @@ impl PxGroup {
                     error!(
                         group_id,
                         slot,
-                        replica_id = replica.id,
+                        peer = replica.id,
                         error = %error,
                         "local prepare handler failed"
                     );
@@ -272,9 +275,8 @@ impl PxGroup {
                     Ok(reply) => fold.fold_prepare_remote(remote.voting, &ctx, reply),
                     Err(error) => {
                         error!(
-                            group_id,
                             slot,
-                            remote_id = remote.node_id,
+                            peer = remote.node_id,
                             endpoint = remote.endpoint,
                             error = %error,
                             "prepare rpc failed"

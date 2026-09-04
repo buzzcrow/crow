@@ -208,7 +208,7 @@ impl KvStore for PxKvStore {
         if count_only {
             let count = scanned.len() as u64;
             debug!(
-                store_id = self.store_id,
+                s = self.store_id,
                 group_id,
                 prefix_len = prefix.len(),
                 limit,
@@ -241,7 +241,7 @@ impl KvStore for PxKvStore {
         }
 
         debug!(
-            store_id = self.store_id,
+            s = self.store_id,
             group_id,
             prefix_len = prefix.len(),
             limit,
@@ -334,7 +334,7 @@ impl KvStore for PxKvStore {
         self.reap_expired_snapshots(&group);
         group.snapshots.insert(handle_id, handle);
         debug!(
-            store_id = self.store_id,
+            s = self.store_id,
             group_id, handle_id, at_slot, "kv_create_snapshot: pinned snapshot"
         );
         crate::rpc::CreateSnapshotResponse {
@@ -463,7 +463,7 @@ impl KvStore for PxKvStore {
         };
         if group.snapshots.remove(&snapshot_handle).is_some() {
             debug!(
-                store_id = self.store_id,
+                s = self.store_id,
                 group_id, snapshot_handle, "kv_release_snapshot: released"
             );
             crate::rpc::ReleaseSnapshotResponse {
@@ -603,7 +603,7 @@ impl KvStore for PxKvStore {
         }
 
         debug!(
-            store_id = self.store_id,
+            s = self.store_id,
             group_id,
             min_slot,
             max_slot,

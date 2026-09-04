@@ -29,6 +29,7 @@ impl PxGroup {
     /// receives `ProposeResult::Chosen { slot }` for the shared slot.
     /// When coalescing is disabled (`coalesce_max_keys = 0`), this is the
     /// legacy one-proposal-per-key path.
+    #[tracing::instrument(level = "debug", name = "propose", skip_all, fields(s = self.log_store_id().unwrap_or(0), g = self.group_id, replica = self.local_replica().id))]
     pub async fn propose(&self, payload: Vec<u8>, client_id: Option<u64>, seq: Option<u64>) -> ProposeResult {
         let replica = &self.local_replica;
 
@@ -63,7 +64,7 @@ impl PxGroup {
         if let (Some(cid), Some(s)) = (client_id, seq) {
             if let Some(cached_slot) = replica.learner.dedup_lookup(cid, s) {
                 debug!(
-                    group_id = self.group_id,
+                    g = self.group_id,
                     client_id = cid,
                     seq = s,
                     slot = cached_slot,
@@ -129,7 +130,7 @@ impl PxGroup {
         // permit is freed (Queue).
         let Some(_window_permit) = self.inflight.acquire_permit().await else {
             warn!(
-                group_id = self.group_id,
+                g = self.group_id,
                 window = self.inflight.total_permits(),
                 "inflight window full; rejecting proposal as Busy"
             );
@@ -199,7 +200,7 @@ impl PxGroup {
                             continue;
                         }
                         PrepareAttempt::Fail { error } => {
-                            error!(group_id, slot, attempt, error = error.keyword(), "prepare failed");
+                            error!(slot, attempt, error = error.keyword(), "prepare failed");
                             if let PxPaxosError::TermStale { current_term } = &error {
                                 warn!(
                                     group_id,
@@ -285,7 +286,7 @@ impl PxGroup {
                         sleep(Self::retry_backoff(attempt)).await;
                     }
                     AcceptAttempt::Fail { error } => {
-                        error!(group_id, slot, attempt, error = error.keyword(), "accept failed");
+                        error!(slot, attempt, error = error.keyword(), "accept failed");
                         if let PxPaxosError::TermStale { current_term } = &error {
                             warn!(
                                 group_id,
@@ -317,15 +318,11 @@ impl PxGroup {
                 }
             }
 
-            warn!(
-                group_id,
-                slot, last_error, "slot proposal failed; retrying on next slot"
-            );
+            warn!(slot, last_error, "slot proposal failed; retrying on next slot");
             slot = self.next_slot.fetch_add(1, Ordering::Relaxed);
         }
 
         error!(
-            group_id,
             last_error,
             max_paxos_retries = PaxosConfig::DEFAULT.max_paxos_retries,
             max_slot_retries = PaxosConfig::DEFAULT.max_slot_retries,

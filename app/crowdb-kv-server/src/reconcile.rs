@@ -153,8 +153,8 @@ fn execute_reconcile(plan: &[ReconcileAction], registry: &KvStoreRegistry) {
                     store.add_group(new_group);
                     seeded += 1;
                     info!(
-                        store_id = action.store_id,
-                        group_id = action.group_id,
+                        s = action.store_id,
+                        g = action.group_id,
                         peer_count = action.seed_remotes.len(),
                         "reconcile: seeded remotes from group 0 (node-config.json was empty)"
                     );
@@ -164,9 +164,9 @@ fn execute_reconcile(plan: &[ReconcileAction], registry: &KvStoreRegistry) {
         for (rid, ep) in &action.mismatches {
             mismatches += 1;
             warn!(
-                store_id = action.store_id,
-                group_id = action.group_id,
-                replica_id = rid,
+                s = action.store_id,
+                g = action.group_id,
+                replica = rid,
                 endpoint = %ep,
                 "reconcile: group 0 has peer not wired locally"
             );

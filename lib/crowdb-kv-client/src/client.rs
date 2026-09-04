@@ -708,8 +708,12 @@ impl CrowdbKvClient {
                     let elapsed_ms = t0.elapsed().as_millis();
                     if elapsed_ms > 500 {
                         tracing::warn!(
-                            "kv get: slow response store={store_id} group={group_id} endpoint={endpoint} attempt={attempts} in {}ms",
-                            elapsed_ms
+                            s = store_id,
+                            g = group_id,
+                            replica = %endpoint,
+                            attempt = attempts,
+                            elapsed_ms,
+                            "kv get: slow response"
                         );
                     }
                     self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
@@ -758,8 +762,13 @@ impl CrowdbKvClient {
                 }
                 Err(msg) => {
                     tracing::warn!(
-                        "kv get: transport error store={store_id} group={group_id} endpoint={endpoint} attempt={attempts} err={msg} after {}ms",
-                        t0.elapsed().as_millis()
+                        s = store_id,
+                        g = group_id,
+                        replica = %endpoint,
+                        attempt = attempts,
+                        error = %msg,
+                        elapsed_ms = t0.elapsed().as_millis(),
+                        "kv get: transport error"
                     );
                     self.metrics.record_get_error();
                     self.metrics.record_transport_error();

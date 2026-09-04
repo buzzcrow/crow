@@ -111,7 +111,7 @@ pub(super) async fn add_store(
         .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("invalid address: {e}")))?;
 
     debug!(
-        store_id = req.store_id,
+        s = req.store_id,
         bind_addr = %addr,
         "creating PxKvStore via management API"
     );
@@ -137,7 +137,7 @@ pub(super) async fn add_store(
     store.wire_rpc_transport();
 
     info!(
-        store_id = req.store_id,
+        s = req.store_id,
         listen_addr = ?store.listen_addr(),
         "PxKvStore added and started via management API"
     );
@@ -166,7 +166,7 @@ pub(super) async fn remove_store(
     State(state): State<RegistryArc>,
     Path(sid): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    info!(store_id = sid, "removing PxKvStore via management API");
+    info!(s = sid, "removing PxKvStore via management API");
     let store = state
         .remove_store(sid)
         .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
@@ -177,7 +177,7 @@ pub(super) async fn remove_store(
         .await;
     if !report.is_clean() {
         for err in &report.errors {
-            tracing::error!(store_id = sid, "{err}");
+            tracing::error!(s = sid, "{err}");
         }
     }
 
@@ -185,7 +185,7 @@ pub(super) async fn remove_store(
     let engine_store_dir = state.config.data_root.join(format!("store{sid}"));
     if let Err(e) = tokio::fs::remove_dir_all(&engine_store_dir).await {
         if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(store_id = sid, error = %e, "failed to delete engine store dir; continuing");
+            tracing::warn!(s = sid, error = %e, "failed to delete engine store dir; continuing");
         }
     }
 
@@ -193,18 +193,18 @@ pub(super) async fn remove_store(
     let wal_store_dir = crate::startup::store_wal_root(&state.config.wal_root, sid);
     if let Err(e) = tokio::fs::remove_dir_all(&wal_store_dir).await {
         if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(store_id = sid, error = %e, "failed to delete WAL store dir; continuing");
+            tracing::warn!(s = sid, error = %e, "failed to delete WAL store dir; continuing");
         }
     }
 
     // Update node-config.json so the store does not resurrect on restart.
     let node_config_store = crowdb_kv::cluster::node_config::NodeConfigStore::new(&state.config.config_root);
     if let Err(e) = node_config_store.remove_store(sid).await {
-        tracing::warn!(store_id = sid, error = %e, "failed to update node_config; continuing");
+        tracing::warn!(s = sid, error = %e, "failed to update node_config; continuing");
     }
 
     info!(
-        store_id = sid,
+        s = sid,
         error_count = report.errors.len(),
         "PxKvStore removed via management API (dirs deleted + node_config updated)"
     );

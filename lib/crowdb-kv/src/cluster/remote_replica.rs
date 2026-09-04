@@ -448,19 +448,19 @@ impl PxRemoteReplica {
     /// Cascade shutdown: stop the legacy `PxLearnerStream` background task
     /// (if it was ever initialized). The crowdb-rpc transport is shared and
     /// owned by the store, so it is not torn down here. Idempotent.
-    #[tracing::instrument(level = "debug", skip_all, fields(replica_r_id = self.node_id))]
+    #[tracing::instrument(level = "debug", skip_all, fields(peer = self.node_id))]
     #[allow(clippy::unused_async)] // async kept for cascade uniformity
     pub(crate) async fn shutdown(&self, _per_layer_timeout: Duration) -> OperationReport {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             debug!(
-                replica_r_id = self.node_id,
+                peer = self.node_id,
                 "PxRemoteReplica::shutdown is a no-op (already shut down)"
             );
             return OperationReport::new();
         }
 
         info!(
-            replica_r_id = self.node_id,
+            peer = self.node_id,
             endpoint = %self.endpoint,
             "PxRemoteReplica shutdown (transport ref dropped on drop)"
         );

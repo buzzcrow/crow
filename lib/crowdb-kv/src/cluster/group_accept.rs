@@ -10,7 +10,7 @@ use std::sync::{Arc, Weak};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
-use tracing::{error, trace, warn};
+use tracing::{error, trace, warn, Instrument};
 
 use crate::cluster::group::{PxGroup, RemoteFoldCtx, RemoteReplicaKind, ReplyFold};
 use crate::cluster::local_replica::PxLocalReplica;
@@ -45,6 +45,7 @@ enum TaggedAcceptReply {
 }
 
 impl PxGroup {
+    #[tracing::instrument(level = "debug", name = "accept_phase", skip_all, fields(s = self.log_store_id().unwrap_or(0), g = self.group_id, replica = self.local_replica().id, slot = entry.slot))]
     pub(crate) async fn run_accept_phase(
         &self,
         replica: &PxLocalReplica,
@@ -121,7 +122,7 @@ impl PxGroup {
                                 Ok(reply) => fold.fold_accept_remote(voting, &ctx, &reply),
                                 Err(error) => {
                                     error!(
-                                        group_id, slot, remote_id, endpoint = %endpoint,
+                                        slot, peer = remote_id, endpoint = %endpoint,
                                         error = %error, "accept rpc failed"
                                     );
                                 }
@@ -132,17 +133,20 @@ impl PxGroup {
                     if local_accepted && fold.accepted >= quorum {
                         let cancel = group.tenure_cancel.clone();
                         let group_drain = group.clone();
-                        tokio::spawn(async move {
-                            loop {
-                                tokio::select! {
-                                    biased;
-                                    () = cancel.cancelled() => return,
-                                    Some(tagged) = futs.next() =>
-                                        accept_drain_side_effect(&group_drain, slot, tagged),
-                                    else => return,
+                        tokio::spawn(
+                            async move {
+                                loop {
+                                    tokio::select! {
+                                        biased;
+                                        () = cancel.cancelled() => return,
+                                        Some(tagged) = futs.next() =>
+                                            accept_drain_side_effect(&group_drain, slot, tagged),
+                                        else => return,
+                                    }
                                 }
                             }
-                        });
+                            .instrument(tracing::Span::current()),
+                        );
                         if let Some(h) = self.write_handles.get() {
                             h.accept_quorum_rpc.observe(
                                 quorum_rpc_start
@@ -184,7 +188,7 @@ impl PxGroup {
                             Ok(reply) => fold.fold_accept_local(replica.voting(), &reply),
                             Err(error) => {
                                 error!(
-                                    group_id, slot, replica_id = replica.id,
+                                    group_id, slot, peer = replica.id,
                                     error = %error, "local accept handler failed"
                                 );
                                 fold.local_folded = true;
@@ -208,7 +212,7 @@ impl PxGroup {
                                 Ok(reply) => fold.fold_accept_remote(voting, &ctx, &reply),
                                 Err(error) => {
                                     error!(
-                                        group_id, slot, remote_id, endpoint = %endpoint,
+                                        slot, peer = remote_id, endpoint = %endpoint,
                                         error = %error, "accept rpc failed"
                                     );
                                 }
@@ -219,17 +223,20 @@ impl PxGroup {
                     if fold.accepted >= quorum && fold.local_folded {
                         let cancel = group.tenure_cancel.clone();
                         let group_drain = group.clone();
-                        tokio::spawn(async move {
-                            loop {
-                                tokio::select! {
-                                    biased;
-                                    () = cancel.cancelled() => return,
-                                    Some(tagged) = futs.next() =>
-                                        accept_drain_side_effect(&group_drain, slot, tagged),
-                                    else => return,
+                        tokio::spawn(
+                            async move {
+                                loop {
+                                    tokio::select! {
+                                        biased;
+                                        () = cancel.cancelled() => return,
+                                        Some(tagged) = futs.next() =>
+                                            accept_drain_side_effect(&group_drain, slot, tagged),
+                                        else => return,
+                                    }
                                 }
                             }
-                        });
+                            .instrument(tracing::Span::current()),
+                        );
                         if let Some(h) = self.write_handles.get() {
                             h.accept_quorum_rpc.observe(
                                 quorum_rpc_start
@@ -284,7 +291,7 @@ impl PxGroup {
                         Ok(reply) => fold.fold_accept_remote(remote.voting, &ctx, &reply),
                         Err(error) => {
                             error!(
-                                group_id, slot = entry.slot, remote_id = remote.node_id,
+                                slot = entry.slot, peer = remote.node_id,
                                 endpoint = remote.endpoint, error = %error, "accept rpc failed"
                             );
                         }
@@ -305,7 +312,7 @@ impl PxGroup {
                     Ok(reply) => fold.fold_accept_local(replica.voting(), &reply),
                     Err(error) => {
                         error!(
-                            group_id, slot = entry.slot, replica_id = replica.id,
+                            group_id, slot = entry.slot, peer = replica.id,
                             error = %error, "local accept handler failed"
                         );
                         fold.local_folded = true;
@@ -332,7 +339,7 @@ impl PxGroup {
                         Ok(reply) => fold.fold_accept_remote(remote.voting, &ctx, &reply),
                         Err(error) => {
                             error!(
-                                group_id, slot = entry.slot, remote_id = remote.node_id,
+                                slot = entry.slot, peer = remote.node_id,
                                 endpoint = remote.endpoint, error = %error, "accept rpc failed"
                             );
                         }

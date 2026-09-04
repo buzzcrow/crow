@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crowdb_kv_client::{ClientConfig, CrowdbKvClient, ServiceRegistryClient};
 use crowdb_protocol::common::HostedGroup;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{info, info_span, warn, Instrument};
 
 use crate::store_registry::KvStoreRegistry;
 
@@ -99,7 +99,7 @@ impl KeepAliveLoop {
                     }
                 }
             }
-        });
+        }.instrument(info_span!("keepalive", instance_id)));
         Self {
             handle: Some(handle),
             stop_tx: Some(stop_tx),

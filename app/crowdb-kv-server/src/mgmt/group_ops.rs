@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::{debug, info, info_span, Instrument};
 use utoipa::ToSchema;
 
 use crowdb_kv::cluster::group_election::LeaderElection;
@@ -118,52 +118,53 @@ fn spawn_leader_wait(
         .operations
         .update_status(operation_id, OperationStatus::Running, None);
 
-    tokio::spawn(async move {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            if tokio::time::Instant::now() >= deadline {
-                state.operations.update_status(
-                    operation_id,
-                    OperationStatus::Failed,
-                    Some("timed out waiting for new leader".to_string()),
-                );
-                return;
+    tokio::spawn(
+        async move {
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                if tokio::time::Instant::now() >= deadline {
+                    state.operations.update_status(
+                        operation_id,
+                        OperationStatus::Failed,
+                        Some("timed out waiting for new leader".to_string()),
+                    );
+                    return;
+                }
+
+                let Some(store) = state.get_store(store_id) else {
+                    state.operations.update_status(
+                        operation_id,
+                        OperationStatus::Failed,
+                        Some("store disappeared during operation".to_string()),
+                    );
+                    return;
+                };
+                let Some(group) = store.get_group(group_id) else {
+                    state.operations.update_status(
+                        operation_id,
+                        OperationStatus::Failed,
+                        Some("group disappeared during operation".to_string()),
+                    );
+                    return;
+                };
+
+                if group.leader_id() != 0 {
+                    state
+                        .operations
+                        .update_status(operation_id, OperationStatus::Completed, None);
+                    info!(
+                        operation_id,
+                        leader = group.leader_id(),
+                        "async leader-wait operation completed"
+                    );
+                    return;
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
-
-            let Some(store) = state.get_store(store_id) else {
-                state.operations.update_status(
-                    operation_id,
-                    OperationStatus::Failed,
-                    Some("store disappeared during operation".to_string()),
-                );
-                return;
-            };
-            let Some(group) = store.get_group(group_id) else {
-                state.operations.update_status(
-                    operation_id,
-                    OperationStatus::Failed,
-                    Some("group disappeared during operation".to_string()),
-                );
-                return;
-            };
-
-            if group.leader_id() != 0 {
-                state
-                    .operations
-                    .update_status(operation_id, OperationStatus::Completed, None);
-                info!(
-                    store_id,
-                    group_id,
-                    operation_id,
-                    new_leader = group.leader_id(),
-                    "async leader-wait operation completed"
-                );
-                return;
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
-    });
+        .instrument(info_span!("leader_wait", s = store_id, g = group_id)),
+    );
 }
 
 #[utoipa::path(
@@ -229,9 +230,9 @@ pub(super) async fn add_group(
     }
 
     debug!(
-        store_id = sid,
-        group_id = req.group_id,
-        replica_id = req.replica_id,
+        s = sid,
+        g = req.group_id,
+        replica = req.replica_id,
         "creating PxGroup with local replica via management API"
     );
     let initial_role = match req.initial_role.unwrap_or(AddGroupInitialRole::Leader) {
@@ -280,8 +281,8 @@ pub(super) async fn add_group(
         // group already has the correct quorum. Start the election driver
         // now — the quorum=1 deferral does not apply.
         info!(
-            store_id = sid,
-            group_id = req.group_id,
+            s = sid,
+            g = req.group_id,
             quorum = group.quorum(),
             "starting election driver for group with persisted config remotes"
         );
@@ -299,9 +300,9 @@ pub(super) async fn add_group(
     }
 
     info!(
-        store_id = sid,
-        group_id = req.group_id,
-        replica_id = req.replica_id,
+        s = sid,
+        g = req.group_id,
+        replica = req.replica_id,
         start_election,
         "PxGroup added via management API"
     );
@@ -358,9 +359,9 @@ pub(super) async fn join_group_via_snapshot(
     }
 
     info!(
-        store_id = sid,
-        group_id = gid,
-        replica_id = req.replica_id,
+        s = sid,
+        g = gid,
+        replica = req.replica_id,
         peer_endpoint = %req.peer_endpoint,
         "joining PxGroup via snapshot pull"
     );
@@ -407,9 +408,9 @@ pub(super) async fn join_group_via_snapshot(
     store.add_group_without_election(group);
 
     info!(
-        store_id = sid,
-        group_id = gid,
-        replica_id = req.replica_id,
+        s = sid,
+        g = gid,
+        replica = req.replica_id,
         at_slot,
         "PxGroup joined via snapshot; remotes must be wired separately"
     );
@@ -437,11 +438,7 @@ pub(super) async fn remove_group(
         .get_store(sid)
         .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
 
-    info!(
-        store_id = sid,
-        group_id = gid,
-        "removing PxGroup via management API"
-    );
+    info!(s = sid, g = gid, "removing PxGroup via management API");
     if !store.remove_group(gid) {
         return Err(err_json(
             StatusCode::NOT_FOUND,
@@ -453,7 +450,7 @@ pub(super) async fn remove_group(
     let engine_dir = crate::startup::store_crowdb_tree_path(&state.config.data_root, sid, gid);
     if let Err(e) = tokio::fs::remove_dir_all(&engine_dir).await {
         if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(store_id = sid, group_id = gid, error = %e, "failed to delete engine dir; continuing");
+            tracing::warn!(s = sid, g = gid, error = %e, "failed to delete engine dir; continuing");
         }
     }
 
@@ -462,19 +459,19 @@ pub(super) async fn remove_group(
         crate::startup::store_wal_root(&state.config.wal_root, sid).join(format!("group{gid}"));
     if let Err(e) = tokio::fs::remove_dir_all(&wal_group_dir).await {
         if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(store_id = sid, group_id = gid, error = %e, "failed to delete WAL group dir; continuing");
+            tracing::warn!(s = sid, g = gid, error = %e, "failed to delete WAL group dir; continuing");
         }
     }
 
     // Update node-config.json so the group does not resurrect on restart.
     let node_config_store = crowdb_kv::cluster::node_config::NodeConfigStore::new(&state.config.config_root);
     if let Err(e) = node_config_store.remove_group(sid, gid).await {
-        tracing::warn!(store_id = sid, group_id = gid, error = %e, "failed to update node_config; continuing");
+        tracing::warn!(s = sid, g = gid, error = %e, "failed to update node_config; continuing");
     }
 
     info!(
-        store_id = sid,
-        group_id = gid,
+        s = sid,
+        g = gid,
         "PxGroup removed via management API (dirs deleted + node_config updated)"
     );
     Ok(StatusCode::OK)
@@ -512,8 +509,8 @@ pub(super) async fn step_down(
 
     let reply = group.step_down_if_leader(&body.reason);
     info!(
-        store_id = sid,
-        group_id = gid,
+        s = sid,
+        g = gid,
         accepted = reply.accepted,
         sync = sync.is_sync(),
         "step-down requested via management API"
@@ -693,11 +690,7 @@ pub(super) async fn flush_group(
     // `--flush-after-prepopulate` flag to produce a clean L1-only scan
     // baseline; also useful as an admin drain.
     group.local_replica().learner.engine().flush();
-    info!(
-        store_id = sid,
-        group_id = gid,
-        "engine flush requested via management API"
-    );
+    info!(s = sid, g = gid, "engine flush requested via management API");
     Ok(Json(FlushResult {
         store_id: sid,
         group_id: gid,
@@ -768,8 +761,8 @@ pub(super) async fn wipe_user_data(
         } else {
             // Replica not yet wired — nothing to wipe.
             info!(
-                store_id = sid,
-                group_id = gid,
+                s = sid,
+                g = gid,
                 "wipe-user-data: replica has no WAL wired — no-op"
             );
             return Ok(Json(WipeResult {
@@ -783,8 +776,8 @@ pub(super) async fn wipe_user_data(
         // the data is destroyed. `accepted: false` (not leader) is fine.
         let step = group.step_down_if_leader("wipe-user-data");
         info!(
-            store_id = sid,
-            group_id = gid,
+            s = sid,
+            g = gid,
             stepped_down = step.accepted,
             "wipe-user-data: step-down before wipe"
         );
@@ -864,8 +857,8 @@ pub(super) async fn wipe_user_data(
     malloc_trim_zero();
 
     info!(
-        store_id = sid,
-        group_id = gid,
+        s = sid,
+        g = gid,
         "wipe-user-data: group recreated, election driver restarted"
     );
     Ok(Json(WipeResult {
@@ -904,8 +897,8 @@ async fn wipe_wal_and_engine_dirs(
         }
     }
     info!(
-        store_id = sid,
-        group_id = gid,
+        s = sid,
+        g = gid,
         "wipe-user-data: deleted WAL + engine dirs, recreating group"
     );
     Ok(())

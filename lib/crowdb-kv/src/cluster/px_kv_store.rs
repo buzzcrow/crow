@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, info_span, Instrument};
 
 pub struct PxKvStore {
     pub store_id: u64,
@@ -150,8 +150,8 @@ impl PxKvStore {
         for handle_id in expired {
             group.snapshots.remove(&handle_id);
             debug!(
-                store_id = self.store_id,
-                group_id = group.group_id,
+                s = self.store_id,
+                g = group.group_id,
                 handle_id,
                 "reap_expired_snapshots: reaped expired snapshot handle"
             );
@@ -204,15 +204,11 @@ impl PxKvStore {
     pub async fn shutdown(&self, per_layer_timeout: Duration) -> OperationReport {
         // Idempotency gate: only the first caller proceeds.
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
-            debug!(
-                store_id = self.store_id,
-                "PxKvStore::shutdown is a no-op (already shut down)"
-            );
+            debug!("PxKvStore::shutdown is a no-op (already shut down)");
             return OperationReport::new();
         }
 
         info!(
-            store_id = self.store_id,
             group_count = self.groups.len(),
             timeout_ms = per_layer_timeout.as_millis() as u64,
             "PxKvStore shutdown starting"
@@ -229,12 +225,11 @@ impl PxKvStore {
         for entry in &self.groups {
             let group_id = *entry.key();
             let group = entry.value();
-            info!(store_id = self.store_id, group_id, "shutting down PxGroup");
+            info!(g = group_id, "shutting down PxGroup");
             let sub = group.shutdown(per_layer_timeout).await;
             if !sub.is_clean() {
                 debug!(
-                    store_id = self.store_id,
-                    group_id,
+                    g = group_id,
                     error_count = sub.errors.len(),
                     "PxGroup shutdown reported errors"
                 );
@@ -243,10 +238,9 @@ impl PxKvStore {
         }
 
         if report.is_clean() {
-            info!(store_id = self.store_id, "PxKvStore shutdown complete");
+            info!("PxKvStore shutdown complete");
         } else {
             info!(
-                store_id = self.store_id,
                 error_count = report.errors.len(),
                 "PxKvStore shutdown complete with errors (see critical: logs above)"
             );
@@ -340,13 +334,14 @@ impl PxKvStore {
             .map_or_else(|| self.listen_addr.to_string(), |a| a.to_string());
         group.local_replica().set_endpoint(endpoint);
         info!(
-            store_id = self.store_id,
+            s = self.store_id,
             group_id,
             replicas = group.remote_replica_count(),
             spawn_driver,
             "added group to kv store"
         );
         let arc = Arc::new(group);
+        arc.set_log_store_id(self.store_id);
         arc.set_self_weak();
         // Wire metrics registry into local + remote replicas when available.
         if let Some(ref registry) = self.metrics_registry {
@@ -367,19 +362,22 @@ impl PxKvStore {
         // tokio runtime is active (structural / non-async unit tests), or when
         // the caller deferred the driver (`spawn_driver == false`).
         if spawn_driver && tokio::runtime::Handle::try_current().is_ok() {
+            let span = info_span!(
+                "group_start",
+                s = self.store_id,
+                g = group_id,
+                replica = arc.local_replica().id
+            );
             let arc_for_spawn = arc.clone();
-            tokio::spawn(async move {
-                arc_for_spawn.start_election_loop().await;
-            });
+            tokio::spawn(async move { arc_for_spawn.start_election_loop().await }.instrument(span.clone()));
             let arc_for_maintenance = arc.clone();
-            tokio::spawn(async move {
-                arc_for_maintenance.start_engine_maintenance_loop().await;
-            });
+            tokio::spawn(
+                async move { arc_for_maintenance.start_engine_maintenance_loop().await }
+                    .instrument(span.clone()),
+            );
             // R65: follower-side FetchGap catch-up driver.
             let arc_for_fetchgap = arc.clone();
-            tokio::spawn(async move {
-                arc_for_fetchgap.start_fetchgap_driver().await;
-            });
+            tokio::spawn(async move { arc_for_fetchgap.start_fetchgap_driver().await }.instrument(span));
         }
         // Atomically replace any prior group entry with the new arc and
         // cancel the prior group's driver synchronously. Without the

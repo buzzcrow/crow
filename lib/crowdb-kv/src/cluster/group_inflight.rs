@@ -213,7 +213,7 @@ impl ReplyFold {
             }
             PxPrepareReply::EpochMismatch { responder_epoch } => {
                 warn!(
-                    group_id = ctx.group_id,
+                    g = ctx.group_id,
                     slot = ctx.slot,
                     remote_id = ctx.remote_id,
                     proposer_epoch = ctx.proposer_epoch,
@@ -266,7 +266,7 @@ impl ReplyFold {
             }
             PxAcceptReply::EpochMismatch { responder_epoch } => {
                 warn!(
-                    group_id = ctx.group_id,
+                    g = ctx.group_id,
                     slot = ctx.slot,
                     remote_id = ctx.remote_id,
                     proposer_epoch = ctx.proposer_epoch,

@@ -75,7 +75,7 @@ impl PxLocalReplica {
         let reply = self.acceptor.accept(entry).await;
         if matches!(reply, PxAcceptReply::Accepted { .. }) {
             debug!(
-                replica_l_id = self.id,
+                replica = self.id,
                 slot = entry.slot,
                 round = entry.ballot.round,
                 leader_id = entry.ballot.leader_id,

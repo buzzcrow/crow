@@ -56,13 +56,20 @@ impl PxLocalReplica {
         // Deferred: engine apply + applied frontier (the FFI/memtable insert
         // moved off the write critical path; the apply fence gates reads).
         // Gap 2: only advance `contiguous_applied` if the apply succeeded.
+        let span = info_span!(
+            "learn_chosen",
+            s = self.log_store_id.load(Ordering::Acquire),
+            g = self.log_group_id.load(Ordering::Acquire),
+            replica = self.id,
+            slot
+        );
         tokio::spawn(
             async move {
                 if learner.apply_entry(entry.slot, &entry.payload).await.is_ok() {
                     learner.advance_applied_frontier(entry.slot);
                 }
             }
-            .instrument(info_span!("learn_chosen", replica = self.id, slot)),
+            .instrument(span),
         );
     }
 
@@ -101,6 +108,12 @@ impl PxLocalReplica {
         let gap_slots = Arc::clone(&self.gap_slots);
         let apply_loop_skip = self.replication_handles.get().map(|h| h.apply_loop_skip.clone());
         let cancel = self.apply_loop_cancel.clone();
+        let span = info_span!(
+            "replica_apply",
+            s = self.log_store_id.load(Ordering::Acquire),
+            g = self.log_group_id.load(Ordering::Acquire),
+            replica = self.id
+        );
         let handle = tokio::spawn(
             async move {
                 apply_loop_task(
@@ -114,7 +127,7 @@ impl PxLocalReplica {
                 )
                 .await;
             }
-            .instrument(info_span!("replica_apply", replica = self.id)),
+            .instrument(span),
         );
         *self.apply_loop_handle.lock() = Some(handle);
     }
@@ -218,7 +231,7 @@ impl PxLocalReplica {
     pub fn note_chosen(&self, slot: SlotIndex, term: PxTerm) -> bool {
         let advanced = self.learner.note_chosen(slot, term);
         trace!(
-            replica_l_id = self.id,
+            replica = self.id,
             slot,
             term,
             advanced,

@@ -51,7 +51,7 @@ use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument, Span};
 
 use super::group::PxGroup;
 use super::group_election::LeaderElection;
@@ -84,10 +84,11 @@ pub(crate) async fn start(group: &Arc<PxGroup>) {
 #[must_use]
 pub(crate) fn spawn(group: Weak<PxGroup>, tick: Duration, cancel: CancellationToken) -> JoinHandle<()> {
     let span = group.upgrade().map_or_else(tracing::Span::none, |group| {
-        info_span!(
-            "group_maintenance",
-            g = group.group_id(),
-            replica = group.local_replica().id
+        let g = group.group_id();
+        let replica = group.local_replica().id;
+        group.log_store_id().map_or_else(
+            || info_span!("group_maintenance", g, replica),
+            |s| info_span!("group_maintenance", s, g, replica),
         )
     });
     tokio::spawn(maintenance_loop(group, tick, cancel).instrument(span))
@@ -131,8 +132,6 @@ async fn persist_snapshot_blocking(
     time_elapsed: Duration,
 ) -> u64 {
     debug!(
-        group_id = group.group_id(),
-        replica_id = group.local_replica().id,
         contiguous_slot = contiguous,
         slot_advance,
         time_elapsed_ms = u64::try_from(time_elapsed.as_millis()).unwrap_or(u64::MAX),
@@ -140,12 +139,11 @@ async fn persist_snapshot_blocking(
     );
     let snap_start = std::time::Instant::now();
     let engine_arc = group.local_replica().learner.engine_arc();
-    let group_id = group.group_id();
-    let at = tokio::task::spawn_blocking(move || engine_arc.persist_snapshot())
+    let span = Span::current();
+    let at = tokio::task::spawn_blocking(move || span.in_scope(|| engine_arc.persist_snapshot()))
         .await
         .unwrap_or_else(|e| {
             error!(
-                group_id,
                 error = %e,
                 "maintenance: persist_snapshot blocking task panicked; \
                  next step: inspect engine snapshot path for panic"
@@ -155,8 +153,6 @@ async fn persist_snapshot_blocking(
     let elapsed_ms = u64::try_from(snap_start.elapsed().as_millis()).unwrap_or(u64::MAX);
     if elapsed_ms > 100 {
         info!(
-            group_id = group.group_id(),
-            replica_id = group.local_replica().id,
             elapsed_ms,
             snapshot_slot = at,
             "maintenance: persist_snapshot completed on blocking thread"
@@ -172,16 +168,9 @@ async fn persist_snapshot_blocking(
             .last_snapshot_slot
             .store(at, std::sync::atomic::Ordering::Release);
         *group.last_snapshot_time.lock() = std::time::Instant::now();
-        debug!(
-            group_id = group.group_id(),
-            replica_id = group.local_replica().id,
-            snapshot_slot = at,
-            "maintenance: snapshot persisted"
-        );
+        debug!(snapshot_slot = at, "maintenance: snapshot persisted");
     } else {
         warn!(
-            group_id = group.group_id(),
-            replica_id = group.local_replica().id,
             "maintenance: persist_snapshot returned 0 — snapshot failed or nothing to persist; \
              watermarks not advanced"
         );
@@ -198,8 +187,6 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
     let engine = group.local_replica().learner.engine();
     if !engine.is_healthy() {
         error!(
-            group_id = group.group_id(),
-            replica_id = group.local_replica().id,
             "engine maintenance: KV engine reports unhealthy (durable I/O fault latched); \
              next step: this replica's local state may be missing durably-committed writes -- \
              investigate the underlying storage and consider removing this replica from the \
@@ -215,19 +202,16 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
     if do_flush {
         let flush_start = std::time::Instant::now();
         let engine_arc = group.local_replica().learner.engine_arc();
-        let group_id = group.group_id();
-        tokio::task::spawn_blocking(move || engine_arc.flush())
+        let span = Span::current();
+        tokio::task::spawn_blocking(move || span.in_scope(|| engine_arc.flush()))
             .await
             .unwrap_or_else(|e| {
                 error!(
-                    group_id,
                     error = %e,
                     "maintenance: flush blocking task panicked"
                 );
             });
         debug!(
-            group_id = group.group_id(),
-            replica_id = group.local_replica().id,
             elapsed_ms = u64::try_from(flush_start.elapsed().as_millis()).unwrap_or(u64::MAX),
             "maintenance: flush phase complete"
         );
@@ -266,8 +250,6 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
             "flush_count"
         };
         info!(
-            group_id = group.group_id(),
-            replica_id = group.local_replica().id,
             trigger,
             slot_advance,
             time_elapsed_ms = u64::try_from(time_elapsed.as_millis()).unwrap_or(u64::MAX),
@@ -306,16 +288,12 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
                     Ok(()) => {
                         *group.last_wal_flush_time.lock() = std::time::Instant::now();
                         debug!(
-                            group_id = group.group_id(),
-                            replica_id = group.local_replica().id,
                             elapsed_ms = u64::try_from(wal_start.elapsed().as_millis()).unwrap_or(u64::MAX),
                             "maintenance: WAL flush phase complete"
                         );
                     }
                     Err(e) => {
                         warn!(
-                            group_id = group.group_id(),
-                            replica_id = group.local_replica().id,
                             elapsed_ms = u64::try_from(wal_start.elapsed().as_millis()).unwrap_or(u64::MAX),
                             error = %e,
                             "maintenance: WAL flush_all failed"
@@ -343,17 +321,16 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
         if now_ms.saturating_sub(last_compact_ms) >= merge_gc_interval_ms {
             let compact_start = std::time::Instant::now();
             let engine_arc = group.local_replica().learner.engine_arc();
-            match tokio::task::spawn_blocking(move || engine_arc.compact_sparse_blocks()).await {
+            let span = Span::current();
+            match tokio::task::spawn_blocking(move || span.in_scope(|| engine_arc.compact_sparse_blocks()))
+                .await
+            {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    error!(
-                        group_id = group.group_id(),
-                        error, "maintenance: compact_sparse_blocks failed"
-                    );
+                    error!(error, "maintenance: compact_sparse_blocks failed");
                 }
                 Err(error) => {
                     error!(
-                        group_id = group.group_id(),
                         %error,
                         "maintenance: compact_sparse_blocks blocking task panicked"
                     );
@@ -364,8 +341,6 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
                 Ordering::Release,
             );
             debug!(
-                group_id = group.group_id(),
-                replica_id = group.local_replica().id,
                 elapsed_ms = u64::try_from(compact_start.elapsed().as_millis()).unwrap_or(u64::MAX),
                 "maintenance: block compaction phase complete"
             );
@@ -385,7 +360,6 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
     let gc_slot = wal.snapshot_slot().min(safe_slot);
     if let Err(e) = run_gc_with_watermark(wal, gc_slot).await {
         warn!(
-            group_id = group.group_id(),
             error = %e,
             "engine maintenance: wal gc pass failed"
         );

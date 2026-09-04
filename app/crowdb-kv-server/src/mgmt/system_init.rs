@@ -131,10 +131,7 @@ pub(super) async fn system_init(
         })?;
         store.wire_rpc_transport();
         state.add_store(SYSTEM_STORE_ID, store);
-        info!(
-            store_id = SYSTEM_STORE_ID,
-            "system store 0 created via /system/init"
-        );
+        info!(s = SYSTEM_STORE_ID, "system store 0 created via /system/init");
     }
 
     let store = state.get_store(SYSTEM_STORE_ID).ok_or_else(|| {
@@ -198,9 +195,9 @@ pub(super) async fn system_init(
     }
 
     info!(
-        store_id = SYSTEM_STORE_ID,
-        group_id = SYSTEM_GROUP_ID,
-        replica_id = req.replica_id,
+        s = SYSTEM_STORE_ID,
+        g = SYSTEM_GROUP_ID,
+        replica = req.replica_id,
         start_election = req.start_election,
         "system group 0 created via /system/init"
     );

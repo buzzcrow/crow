@@ -44,7 +44,7 @@ async fn maybe_apply_persisted_config(group: &mut PxGroup, config_root: &Path, s
                 Ok(None) => {}
                 Err(e) => {
                     tracing::warn!(
-                        group_id = group.group_id(),
+                        g = group.group_id(),
                         error = %e,
                         "failed to load persisted group config"
                     );
@@ -53,7 +53,7 @@ async fn maybe_apply_persisted_config(group: &mut PxGroup, config_root: &Path, s
         }
         Err(e) => {
             tracing::warn!(
-                group_id = group.group_id(),
+                g = group.group_id(),
                 error = %e,
                 "failed to load node-config.json"
             );

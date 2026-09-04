@@ -14,7 +14,7 @@ use std::time::Duration;
 use std::time::Instant as StdInstant;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, trace, Instrument};
 
 /// Current monotonic instant for lease bookkeeping. Uses
 /// `tokio::time::Instant::now()` so that `#[tokio::test(start_paused)]
@@ -23,6 +23,16 @@ use tracing::{debug, info};
 /// production (non-paused runtime) both are identical.
 fn lease_now() -> StdInstant {
     tokio::time::Instant::now().into_std()
+}
+
+fn spawn_cancel_bridge(parent: CancellationToken, child: CancellationToken) {
+    tokio::spawn(
+        async move {
+            parent.cancelled().await;
+            child.cancel();
+        }
+        .instrument(tracing::Span::current()),
+    );
 }
 
 use crate::cluster::group::{PendingReadBarrier, PxGroup};
@@ -40,8 +50,8 @@ impl PxGroup {
     pub(crate) fn finalize_leader(&self, term: u64, peer_floor: u64, peer_ceiling: u64) {
         let replica = self.local_replica();
         info!(
-            group_id = self.group_id,
-            replica_l_id = replica.id,
+            g = self.group_id,
+            replica = replica.id,
             term,
             peer_floor,
             peer_ceiling,
@@ -59,8 +69,8 @@ impl PxGroup {
         let next = ceiling.saturating_add(1);
         let prev_next_slot = self.next_slot.fetch_max(next, Ordering::AcqRel);
         info!(
-            group_id = self.group_id,
-            replica_l_id = replica.id,
+            g = self.group_id,
+            replica = replica.id,
             term,
             local_ceiling,
             next_slot_minus_one,
@@ -85,6 +95,7 @@ impl PxGroup {
     /// On quorum-OK: extends `lease_read_until` and bumps
     /// `last_quorum_heartbeat_at`. On any peer reply with
     /// `term > leader_term`: returns [`HeartbeatOutcome::SteppedDown`].
+    #[tracing::instrument(level = "debug", name = "heartbeat_round", skip_all, fields(s = self.log_store_id().unwrap_or(0), g = self.group_id, replica = self.local_replica().id, role = "leader"))]
     pub(crate) async fn run_heartbeat_round(
         self: &Arc<Self>,
         cfg: &PxElectionConfig,
@@ -121,14 +132,17 @@ impl PxGroup {
         for peer_id in voting_peers {
             let group_for_task = self.clone();
             let req = payload;
-            joinset.spawn(async move {
-                let result = if let Some(remote) = group_for_task.get_remote_replica(peer_id) {
-                    remote.send_heartbeat(req, group_for_task.group_id).await
-                } else {
-                    Err(PxReplicaError::Internal(format!("peer {peer_id} not present")))
-                };
-                (peer_id, result)
-            });
+            joinset.spawn(
+                async move {
+                    let result = if let Some(remote) = group_for_task.get_remote_replica(peer_id) {
+                        remote.send_heartbeat(req, group_for_task.group_id).await
+                    } else {
+                        Err(PxReplicaError::Internal(format!("peer {peer_id} not present")))
+                    };
+                    (peer_id, result)
+                }
+                .instrument(tracing::Span::current()),
+            );
         }
 
         while let Some(joined) = joinset.join_next().await {
@@ -173,13 +187,16 @@ impl PxGroup {
                             // the remaining tasks complete and deliver
                             // the heartbeat; their results are ignored
                             // (a higher-term self-heals next round).
-                            tokio::spawn(async move { while joinset.join_next().await.is_some() {} });
+                            tokio::spawn(
+                                async move { while joinset.join_next().await.is_some() {} }
+                                    .instrument(tracing::Span::current()),
+                            );
                             return HeartbeatOutcome::Continued { quorum_acked: true };
                         }
                     }
                 }
                 Err(err) => {
-                    debug!(group_id, peer_id, error = ?err, "heartbeat transport error");
+                    debug!(peer = peer_id, error = ?err, "heartbeat transport error");
                 }
             }
         }
@@ -201,10 +218,12 @@ impl PxGroup {
     ///   ack confirms no higher term displaced us, so every committed write is
     ///   reflected locally; a higher term steps us down; no quorum means we
     ///   cannot prove freshness and the read must be retried elsewhere.
+    #[tracing::instrument(level = "debug", name = "read_barrier", skip_all, fields(s = self.log_store_id().unwrap_or(0), g = self.group_id, replica = self.local_replica().id))]
     pub(crate) async fn linearizable_read_barrier(self: &Arc<Self>) -> ReadBarrierOutcome {
         let barrier_start = StdInstant::now();
         let replica = self.local_replica();
         if !replica.is_leader() {
+            trace!(role = ?replica.role(), leader = ?replica.believed_leader_id(), "read barrier rejected");
             return ReadBarrierOutcome::NotLeader;
         }
         // Capture the commit index before confirmation: every slot <= this is
@@ -212,6 +231,11 @@ impl PxGroup {
         let read_slot = replica.contiguous_chosen();
 
         if !self.leader_read_ready() {
+            trace!(
+                role = "leader",
+                leader = replica.id,
+                "read barrier waiting for leader recovery"
+            );
             return ReadBarrierOutcome::NoQuorum;
         }
 
@@ -220,6 +244,13 @@ impl PxGroup {
             if let Some(h) = self.read_handles() {
                 h.barrier.observe(barrier_start.elapsed().as_nanos() as u64);
             }
+            trace!(
+                role = "leader",
+                leader = replica.id,
+                decision = "lease",
+                read_slot,
+                "read barrier ready"
+            );
             return ReadBarrierOutcome::Ready { read_slot };
         }
 
@@ -280,6 +311,7 @@ impl PxGroup {
             HeartbeatOutcome::Continued { quorum_acked: true } => ReadBarrierOutcome::Ready { read_slot },
             HeartbeatOutcome::Continued { quorum_acked: false } => ReadBarrierOutcome::NoQuorum,
         };
+        trace!(role = ?replica.role(), leader = ?replica.believed_leader_id(), decision = "quorum", ?outcome, "read barrier completed");
 
         // Drain the batch and fan the outcome out to every waiter that
         // joined this round. Taking the slot clears "in flight" so the
@@ -348,14 +380,7 @@ impl PxGroup {
         // tenure-bound work. Always a child of the driver-lifetime
         // `cancel` so shutdown still wins.
         let tenure_cancel = CancellationToken::new();
-        {
-            let parent = cancel.clone();
-            let child = tenure_cancel.clone();
-            tokio::spawn(async move {
-                parent.cancelled().await;
-                child.cancel();
-            });
-        }
+        spawn_cancel_bridge(cancel.clone(), tenure_cancel.clone());
 
         // Consume the handoff stashed by finalize_leader and spawn bulk
         // Phase 1 on the per-tenure cancel token.
@@ -363,17 +388,20 @@ impl PxGroup {
             let group_for_task = self.clone();
             let cfg_for_task = *cfg;
             let cancel_for_task = tenure_cancel.clone();
-            tokio::spawn(async move {
-                group_for_task
-                    .run_bulk_phase1(
-                        handoff.term,
-                        handoff.peer_floor,
-                        handoff.peer_ceiling,
-                        cfg_for_task,
-                        cancel_for_task,
-                    )
-                    .await;
-            });
+            tokio::spawn(
+                async move {
+                    group_for_task
+                        .run_bulk_phase1(
+                            handoff.term,
+                            handoff.peer_floor,
+                            handoff.peer_ceiling,
+                            cfg_for_task,
+                            cancel_for_task,
+                        )
+                        .await;
+                }
+                .instrument(tracing::Span::current()),
+            );
         } else {
             self.leader_read_ready.store(true, Ordering::Release);
         }
@@ -385,7 +413,7 @@ impl PxGroup {
 
         info!(
             group_id,
-            replica_l_id = leader_id,
+            replica = leader_id,
             term = leader_term,
             heartbeat_interval_ms = cfg.heartbeat_interval_ms,
             lease_duration_ms = cfg.lease_duration_ms,
@@ -396,7 +424,7 @@ impl PxGroup {
             if replica.role() != PxLocalReplicaRole::Leader {
                 info!(
                     group_id,
-                    replica_l_id = leader_id,
+                    replica = leader_id,
                     "leader state exiting: role changed externally"
                 );
                 tenure_cancel.cancel();

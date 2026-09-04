@@ -58,7 +58,7 @@ impl PxGroup {
             {
                 Ok(_) => {
                     info!(
-                        group_id = self.group_id,
+                        g = self.group_id,
                         old_epoch = current,
                         new_epoch = epoch,
                         "membership epoch adopted from peer (converging upward)"
@@ -79,7 +79,7 @@ impl PxGroup {
     pub(crate) fn bump_membership_epoch(&self) {
         let new_epoch = self.membership_epoch.fetch_add(1, Ordering::AcqRel) + 1;
         info!(
-            group_id = self.group_id,
+            g = self.group_id,
             new_epoch, "membership epoch bumped (voting set changed)"
         );
     }
@@ -278,7 +278,7 @@ impl PxGroup {
 
         // Placeholder or out-of-range: insert a new Real entry.
         warn!(
-            group_id = self.group_id,
+            g = self.group_id,
             node_id, "update_member_endpoint: inserting new remote (was placeholder or out-of-range)"
         );
         while idx >= self.remote_replicas.len() {
@@ -312,7 +312,7 @@ impl PxGroup {
         self.set_remote_replicas(remotes);
         self.set_membership_epoch(config.membership_epoch);
         debug!(
-            group_id = self.group_id,
+            g = self.group_id,
             local_id,
             member_count = config.members.len(),
             membership_epoch = config.membership_epoch,
@@ -351,14 +351,14 @@ impl PxGroup {
         if let Some((store, sid, _gid)) = &self.node_config_store {
             if let Err(e) = store.save_group(*sid, &config, local_id).await {
                 error!(
-                    group_id = self.group_id,
+                    g = self.group_id,
                     term,
                     error = %e,
                     "persist group config to node-config.json failed"
                 );
             } else {
                 info!(
-                    group_id = self.group_id,
+                    g = self.group_id,
                     term,
                     replica_count = config.members.len(),
                     "persisted group config to node-config.json"
@@ -367,14 +367,14 @@ impl PxGroup {
         } else if let Some(store) = &self.config_store {
             if let Err(e) = store.save(&config).await {
                 error!(
-                    group_id = self.group_id,
+                    g = self.group_id,
                     term,
                     error = %e,
                     "persist group config failed"
                 );
             } else {
                 info!(
-                    group_id = self.group_id,
+                    g = self.group_id,
                     term,
                     replica_count = config.members.len(),
                     "persisted group config to file"
@@ -491,13 +491,13 @@ impl PxGroup {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(group_id = self.group_id, replica_l_id = self.local_replica.id)
+        fields(g = self.group_id, replica = self.local_replica.id)
     )]
     pub async fn shutdown(&self, per_layer_timeout: Duration) -> OperationReport {
         let mut report = OperationReport::new();
         info!(
-            group_id = self.group_id,
-            replica_l_id = self.local_replica.id,
+            g = self.group_id,
+            replica = self.local_replica.id,
             remote_count = self.valid_replica_count,
             "PxGroup shutdown starting"
         );
@@ -512,14 +512,14 @@ impl PxGroup {
                 Ok(Ok(())) => {}
                 Ok(Err(join_err)) => {
                     warn!(
-                        group_id = self.group_id,
+                        g = self.group_id,
                         error = %join_err,
                         "election driver task panicked during shutdown"
                     );
                 }
                 Err(_) => {
                     warn!(
-                        group_id = self.group_id,
+                        g = self.group_id,
                         timeout_ms = per_layer_timeout.as_millis() as u64,
                         "election driver task did not exit within per-layer timeout"
                     );
@@ -531,14 +531,14 @@ impl PxGroup {
                 Ok(Ok(())) => {}
                 Ok(Err(join_err)) => {
                     warn!(
-                        group_id = self.group_id,
+                        g = self.group_id,
                         error = %join_err,
                         "engine maintenance task panicked during shutdown"
                     );
                 }
                 Err(_) => {
                     warn!(
-                        group_id = self.group_id,
+                        g = self.group_id,
                         timeout_ms = per_layer_timeout.as_millis() as u64,
                         "engine maintenance task did not exit within per-layer timeout"
                     );
@@ -562,7 +562,7 @@ impl PxGroup {
         report.merge(sub);
 
         info!(
-            group_id = self.group_id,
+            g = self.group_id,
             error_count = report.errors.len(),
             "PxGroup shutdown complete"
         );
@@ -615,7 +615,7 @@ impl PxGroup {
         }
 
         info!(
-            group_id = self.group_id,
+            g = self.group_id,
             peer_endpoint,
             at_slot,
             term_at_slot = resp.term_at_slot,
@@ -635,7 +635,7 @@ impl PxGroup {
     /// Add a remote replica to the group.
     pub fn add_remote_replica(&mut self, remote: PxRemoteReplica) {
         info!(
-            group_id = self.group_id,
+            g = self.group_id,
             remote_id = remote.node_id,
             endpoint = remote.endpoint,
             "added remote replica to group"
@@ -677,7 +677,7 @@ impl PxGroup {
             _ => return false,
         };
         info!(
-            group_id = self.group_id,
+            g = self.group_id,
             remote_id = node_id,
             "removed remote replica from group"
         );

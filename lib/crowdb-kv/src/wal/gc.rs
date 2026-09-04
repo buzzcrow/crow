@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info, info_span, warn, Instrument};
 
 use super::wal_engine::WalEngine;
 
@@ -33,7 +33,8 @@ pub(crate) fn spawn_gc_worker(
     cancel: Arc<AtomicBool>,
     safe_slot: impl Fn() -> u64 + Send + Sync + 'static,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(gc_loop(wal, gc_tick, cancel, safe_slot))
+    let group_id = wal.group_id();
+    tokio::spawn(gc_loop(wal, gc_tick, cancel, safe_slot).instrument(info_span!("wal_gc", g = group_id)))
 }
 
 #[allow(dead_code)]
@@ -46,11 +47,11 @@ async fn gc_loop(
     loop {
         tokio::time::sleep(gc_tick).await;
         if cancel.load(Ordering::Acquire) {
-            info!(group_id = wal.group_id(), "gc worker shutting down");
+            info!("gc worker shutting down");
             return;
         }
         if let Err(e) = run_gc_pass(&wal, safe_slot()).await {
-            warn!(group_id = wal.group_id(), error = %e, "gc pass failed");
+            warn!(error = %e, "gc pass failed");
         }
     }
 }
@@ -118,11 +119,7 @@ pub async fn run_gc_with_watermark(wal: &WalEngine, gc_slot: u64) -> io::Result<
             Ok(()) => {
                 wal.index().lock().remove_segment(*seg_id);
                 unlinked += 1;
-                debug!(
-                    group_id = wal.group_id(),
-                    segment_id = seg_id,
-                    "gc: unlinked segment"
-                );
+                debug!(g = wal.group_id(), segment_id = seg_id, "gc: unlinked segment");
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 // Already gone — clean up index.
@@ -130,7 +127,7 @@ pub async fn run_gc_with_watermark(wal: &WalEngine, gc_slot: u64) -> io::Result<
             }
             Err(e) => {
                 warn!(
-                    group_id = wal.group_id(),
+                    g = wal.group_id(),
                     segment_id = seg_id,
                     error = %e,
                     "gc: failed to unlink segment"
@@ -140,7 +137,7 @@ pub async fn run_gc_with_watermark(wal: &WalEngine, gc_slot: u64) -> io::Result<
     }
 
     if unlinked > 0 {
-        debug!(group_id = wal.group_id(), unlinked, gc_slot, "gc pass complete");
+        debug!(g = wal.group_id(), unlinked, gc_slot, "gc pass complete");
     }
 
     Ok(unlinked)

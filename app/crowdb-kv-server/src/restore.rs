@@ -67,7 +67,7 @@ pub async fn scan_local_groups(wal_root: &Path) -> io::Result<Vec<LocalGroup>> {
             let group_name = group_entry.file_name();
             let group_name = group_name.to_string_lossy();
             let Some(group_id) = parse_group_dir(&group_name) else {
-                debug!(store_id, entry = %group_name, "scan: skip non-group entry");
+                debug!(s = store_id, entry = %group_name, "scan: skip non-group entry");
                 continue;
             };
             if !group_entry.file_type().await?.is_dir() {
@@ -126,7 +126,7 @@ pub async fn load_local_groups(
             .await
             .unwrap_or_else(|| registry.next_port().unwrap_or(0));
         let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
-        debug!(store_id, bind_addr = %addr, "restore: creating PxKvStore");
+        debug!(s = store_id, bind_addr = %addr, "restore: creating PxKvStore");
         let mut store = PxKvStore::new(store_id, addr);
         store.rpc_workers = registry.rpc_workers;
         if let Some(ref mr) = registry.metrics_registry {
@@ -147,9 +147,9 @@ pub async fn load_local_groups(
                 .await
                 .unwrap_or(replica_id);
             debug!(
-                store_id,
-                group_id,
-                replica_id = effective_replica_id,
+                s = store_id,
+                g = group_id,
+                replica = effective_replica_id,
                 "restore: creating group from disk"
             );
             let group = match create_group_with_wal(
@@ -178,7 +178,7 @@ pub async fn load_local_groups(
         }
 
         if let Err(e) = store.start().await {
-            warn!(store_id, port, error = %e, "restore: failed to start store; skipping");
+            warn!(s = store_id, port, error = %e, "restore: failed to start store; skipping");
             continue;
         }
 

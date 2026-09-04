@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, Instrument};
 
 use crate::cluster::group::PxGroup;
 use crate::cluster::group_election::{LeaderElection, PreVoteOutcome};
@@ -23,6 +23,7 @@ impl PxGroup {
     /// Drive one full election attempt: optional `PreVote` →
     /// `Candidate` `RequestVote` → `Leader` on win, otherwise stay
     /// `Follower` / `Candidate` until the next deadline.
+    #[tracing::instrument(level = "debug", name = "election_attempt", skip_all, fields(s = self.log_store_id().unwrap_or(0), g = self.group_id, replica = self.local_replica().id))]
     pub(crate) async fn run_election_attempt(
         self: &Arc<Self>,
         cfg: &PxElectionConfig,
@@ -58,6 +59,7 @@ impl PxGroup {
     /// Run a single `PreVote` round.
     ///
     /// Fans out `PreVote(proposed_term)` without bumping `current_term`.
+    #[tracing::instrument(level = "debug", name = "pre_vote", skip_all, fields(s = self.log_store_id().unwrap_or(0), g = self.group_id, replica = self.local_replica().id))]
     pub(crate) async fn run_prevote_round(self: &Arc<Self>, cancel: &CancellationToken) -> PreVoteOutcome {
         let group_id = self.group_id;
         let replica = self.local_replica();
@@ -103,14 +105,17 @@ impl PxGroup {
         for peer_id in voting_peers {
             let group_for_task = self.clone();
             let req = payload;
-            joinset.spawn(async move {
-                let result = if let Some(remote) = group_for_task.get_remote_replica(peer_id) {
-                    remote.send_pre_vote(req, group_for_task.group_id).await
-                } else {
-                    Err(PxReplicaError::Internal(format!("peer {peer_id} not present")))
-                };
-                (peer_id, result)
-            });
+            joinset.spawn(
+                async move {
+                    let result = if let Some(remote) = group_for_task.get_remote_replica(peer_id) {
+                        remote.send_pre_vote(req, group_for_task.group_id).await
+                    } else {
+                        Err(PxReplicaError::Internal(format!("peer {peer_id} not present")))
+                    };
+                    (peer_id, result)
+                }
+                .instrument(tracing::Span::current()),
+            );
         }
 
         loop {
@@ -139,7 +144,7 @@ impl PxGroup {
                     }
                 }
                 Err(err) => {
-                    debug!(group_id, candidate_id, proposed_term, peer_id, error = ?err, "PreVote transport error");
+                    debug!(candidate_id, proposed_term, peer = peer_id, error = ?err, "PreVote transport error");
                 }
             }
         }
@@ -159,6 +164,7 @@ impl PxGroup {
     /// 3. Otherwise → stay in `Candidate` and let the next election
     ///    deadline restart the election in `current_term + 1`.
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(level = "debug", name = "request_vote", skip_all, fields(s = self.log_store_id().unwrap_or(0), g = self.group_id, replica = self.local_replica().id))]
     pub(crate) async fn run_candidate_election(self: &Arc<Self>, cancel: &CancellationToken) {
         let group_id = self.group_id;
         let replica = self.local_replica();
@@ -209,14 +215,17 @@ impl PxGroup {
         for peer_id in voting_peers {
             let group_for_task = self.clone();
             let req = payload;
-            joinset.spawn(async move {
-                let result = if let Some(remote) = group_for_task.get_remote_replica(peer_id) {
-                    remote.send_request_vote(req, group_for_task.group_id).await
-                } else {
-                    Err(PxReplicaError::Internal(format!("peer {peer_id} not present")))
-                };
-                (peer_id, result)
-            });
+            joinset.spawn(
+                async move {
+                    let result = if let Some(remote) = group_for_task.get_remote_replica(peer_id) {
+                        remote.send_request_vote(req, group_for_task.group_id).await
+                    } else {
+                        Err(PxReplicaError::Internal(format!("peer {peer_id} not present")))
+                    };
+                    (peer_id, result)
+                }
+                .instrument(tracing::Span::current()),
+            );
         }
 
         loop {
@@ -232,7 +241,7 @@ impl PxGroup {
             let (peer_id, reply) = match joined {
                 Ok(pair) => pair,
                 Err(join_err) => {
-                    error!(group_id, error = %join_err, "RequestVote task panicked");
+                    error!(error = %join_err, "RequestVote task panicked");
                     continue;
                 }
             };

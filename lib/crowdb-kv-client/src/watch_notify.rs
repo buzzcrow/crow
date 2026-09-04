@@ -304,7 +304,9 @@ fn register_crowdb_rpc_handlers(
             let error = fb.error().unwrap_or("").to_string();
             if !hint.is_empty() {
                 tracing::info!(
-                    store_id, hint = %hint,
+                    s = store_id,
+                    g = fb.group_id(),
+                    leader = %hint,
                     "watch_notify(crowdb-rpc): not_leader_hint, reconnecting"
                 );
                 kv.topology.set_leader(store_id, fb.group_id(), hint);

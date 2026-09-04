@@ -97,7 +97,7 @@ pub async fn replay_group(
         let mut reader = match SegmentReader::open(backend, &path).await {
             Ok(r) => r,
             Err(e) => {
-                error!(group_id, segment_id = seg_id, error = %e, "replay: skipping unreadable segment");
+                error!(g = group_id, segment_id = seg_id, error = %e, "replay: skipping unreadable segment");
                 continue;
             }
         };
@@ -134,7 +134,7 @@ pub async fn replay_group(
                              next step: fail node out of group and rebuild from peers.",
                             path.display()
                         );
-                        error!(group_id, segment_id = seg_id, "{msg}");
+                        error!(g = group_id, segment_id = seg_id, "{msg}");
                         return Err(io::Error::new(io::ErrorKind::InvalidData, msg));
                     }
                     // Corruption in the last/unsealed segment → truncate.

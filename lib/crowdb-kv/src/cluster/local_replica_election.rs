@@ -20,7 +20,7 @@ impl PxLocalReplica {
     /// Resets `voted_for` on every term bump (Raft-style — one vote per
     /// term per peer). Expires leader lease state. Callers that want to
     /// reset the election deadline must do so on the election driver task.
-    #[tracing::instrument(level = "info", skip_all, fields(replica_l_id = self.id, new_term = new_term))]
+    #[tracing::instrument(level = "info", skip_all, fields(s = self.log_store_id.load(Ordering::Acquire), g = self.log_group_id.load(Ordering::Acquire), replica = self.id, new_term))]
     pub fn become_follower(&self, new_term: PxTerm) {
         self.with_election_state(|s| {
             if new_term > s.current_term {
@@ -37,11 +37,11 @@ impl PxLocalReplica {
         // Lease is no longer meaningful as a non-leader. Expire it so any
         // stale read fast-path attempt rejects.
         self.reset_lease_to(Instant::now());
-        info!(replica_l_id = self.id, current_term = new_term, "become_follower");
+        info!(current_term = new_term, role = "follower", "role transition");
     }
 
     /// Transition to `PreCandidate`. Does not bump term (per Raft `PreVote`).
-    #[tracing::instrument(level = "info", skip_all, fields(replica_l_id = self.id))]
+    #[tracing::instrument(level = "info", skip_all, fields(s = self.log_store_id.load(Ordering::Acquire), g = self.log_group_id.load(Ordering::Acquire), replica = self.id))]
     pub fn become_precandidate(&self) {
         self.with_election_state(|s| {
             s.role = PxLocalReplicaRole::PreCandidate;
@@ -49,16 +49,16 @@ impl PxLocalReplica {
         self.role_atomic
             .store(PxLocalReplicaRole::PreCandidate.as_u8(), Ordering::Release);
         info!(
-            replica_l_id = self.id,
             current_term = self.current_term_snapshot(),
-            "become_precandidate"
+            role = "pre_candidate",
+            "role transition"
         );
     }
 
     /// Transition to `Candidate`. Bumps term to `new_term`, votes for self.
     ///
     /// Caller is responsible for fanning out `RequestVote` to peers.
-    #[tracing::instrument(level = "info", skip_all, fields(replica_l_id = self.id, new_term = new_term))]
+    #[tracing::instrument(level = "info", skip_all, fields(s = self.log_store_id.load(Ordering::Acquire), g = self.log_group_id.load(Ordering::Acquire), replica = self.id, new_term))]
     pub fn become_candidate(&self, new_term: PxTerm) {
         let lease = Duration::from_millis(self.lease_duration_ms());
         let now = Instant::now();
@@ -79,17 +79,13 @@ impl PxLocalReplica {
         if let Some(h) = self.election_handles.get() {
             h.elections.inc();
         }
-        info!(
-            replica_l_id = self.id,
-            current_term = new_term,
-            "become_candidate"
-        );
+        info!(current_term = new_term, role = "candidate", "role transition");
     }
 
     /// Transition to `Leader`. Initializes lease state as already-expired so
     /// the first heartbeat round must extend it before the read fast-path
     /// becomes available.
-    #[tracing::instrument(level = "info", skip_all, fields(replica_l_id = self.id))]
+    #[tracing::instrument(level = "info", skip_all, fields(s = self.log_store_id.load(Ordering::Acquire), g = self.log_group_id.load(Ordering::Acquire), replica = self.id))]
     pub fn become_leader(&self) {
         self.with_election_state(|s| {
             s.role = PxLocalReplicaRole::Leader;
@@ -99,9 +95,10 @@ impl PxLocalReplica {
             .store(PxLocalReplicaRole::Leader.as_u8(), Ordering::Release);
         self.reset_lease_to(Instant::now());
         info!(
-            replica_l_id = self.id,
             current_term = self.current_term_snapshot(),
-            "become_leader"
+            leader = self.id,
+            role = "leader",
+            "role transition"
         );
     }
 
@@ -138,7 +135,7 @@ impl PxLocalReplica {
         drop(state);
         let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
         debug!(
-            replica_l_id = self.id,
+            replica = self.id,
             candidate_id = req.candidate_id,
             proposed_term = req.term,
             current_term = term,
@@ -199,7 +196,7 @@ impl PxLocalReplica {
         }
         let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
         debug!(
-            replica_l_id = self.id,
+            replica = self.id,
             candidate_id = req.candidate_id,
             req_term = req.term,
             current_term = term,
@@ -271,7 +268,7 @@ impl PxLocalReplica {
         // `PxGroup::group_snapshot_slot`.
         let durable_snapshot_slot = self.wal().map_or(0, |w| w.snapshot_slot());
         trace!(
-            replica_l_id = self.id,
+            replica = self.id,
             leader_id = req.leader_id,
             req_term = req.term,
             current_term = term,
@@ -302,7 +299,7 @@ impl PxLocalReplica {
             && req.term == snapshot.current_term;
         if accepted {
             info!(
-                replica_l_id = self.id,
+                replica = self.id,
                 req_term = req.term,
                 reason = %req.reason,
                 "on_step_down accepted (strict fence)"
@@ -318,7 +315,7 @@ impl PxLocalReplica {
             self.admin_step_down_signal.notify_waiters();
         } else {
             debug!(
-                replica_l_id = self.id,
+                replica = self.id,
                 req_term = req.term,
                 self_term = snapshot.current_term,
                 self_role = ?snapshot.role,

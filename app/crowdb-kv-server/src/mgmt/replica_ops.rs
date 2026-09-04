@@ -99,15 +99,15 @@ pub(super) async fn add_remote_replicas(
     }
 
     debug!(
-        store_id = sid,
-        group_id = gid,
+        s = sid,
+        g = gid,
         count = remotes.len(),
         "adding remote replicas via management API"
     );
     for r in &remotes {
         debug!(
-            store_id = sid,
-            group_id = gid,
+            s = sid,
+            g = gid,
             remote_id = r.replica_id,
             endpoint = %r.endpoint,
             voting = r.voting,
@@ -126,8 +126,8 @@ pub(super) async fn add_remote_replicas(
     }
 
     info!(
-        store_id = sid,
-        group_id = gid,
+        s = sid,
+        g = gid,
         count = remotes.len(),
         "remote replicas added via management API"
     );
@@ -181,8 +181,8 @@ pub(super) async fn remove_remote_replica(
     }
 
     info!(
-        store_id = sid,
-        group_id = gid,
+        s = sid,
+        g = gid,
         remote_id = rid,
         "removing remote replica via management API"
     );
@@ -218,8 +218,8 @@ pub(super) async fn remove_remote_replica(
     }
 
     info!(
-        store_id = sid,
-        group_id = gid,
+        s = sid,
+        g = gid,
         remote_id = rid,
         "remote replica removed via management API"
     );
@@ -275,24 +275,20 @@ pub(super) async fn batch_add_remote_replicas(
     }
 
     if new_remotes.is_empty() {
-        info!(
-            store_id = sid,
-            group_id = gid,
-            "batch add remotes: no new remotes to add"
-        );
+        info!(s = sid, g = gid, "batch add remotes: no new remotes to add");
         return Ok(StatusCode::OK);
     }
 
     debug!(
-        store_id = sid,
-        group_id = gid,
+        s = sid,
+        g = gid,
         count = new_remotes.len(),
         "batch adding remote replicas via management API"
     );
     for r in &new_remotes {
         debug!(
-            store_id = sid,
-            group_id = gid,
+            s = sid,
+            g = gid,
             remote_id = r.replica_id,
             endpoint = %r.endpoint,
             voting = r.voting,
@@ -311,8 +307,8 @@ pub(super) async fn batch_add_remote_replicas(
     }
 
     info!(
-        store_id = sid,
-        group_id = gid,
+        s = sid,
+        g = gid,
         count = new_remotes.len(),
         "batch remote replicas added via management API"
     );

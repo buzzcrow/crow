@@ -31,6 +31,7 @@
 //! (`KvClientRpcForwarder`) lives in `crowdb-kv` itself (not
 //! `crowdb-kv-client`) to avoid a crate cycle.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -38,7 +39,7 @@ use std::time::Instant;
 use dashmap::DashMap;
 use flatbuffers::FlatBufferBuilder;
 use tokio::runtime::Handle;
-use tracing::{debug, warn};
+use tracing::{debug, field, info_span, warn, Instrument, Span};
 
 use crowdb_protocol::fb::FBMsgType;
 use crowdb_protocol::fb_wrappers::kv_client::{
@@ -403,7 +404,7 @@ impl KvRpcService {
         let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
         let hist = self.latency.as_ref().map(|l| Arc::clone(&l.put));
-        self.rt.spawn(async move {
+        spawn_request(&self.rt, "put", store.store_id, async move {
             let start = Instant::now();
             let Ok(fb_req) = flatbuffers::root::<FBKvSetRequest>(req.control()) else {
                 submit_kv_error(
@@ -418,6 +419,7 @@ impl KvRpcService {
                 return;
             };
             let group_id = fb_req.group_id();
+            record_group_context(&store, group_id);
             let key = fb_req.key().map(|v| v.bytes()).unwrap_or_default();
             let value = fb_req.value().map(|v| v.bytes()).unwrap_or_default();
             let client_id = fb_req.client_id();
@@ -492,7 +494,7 @@ impl KvRpcService {
         };
 
         let fwd = Arc::clone(&self.forwarder);
-        self.rt.spawn(async move {
+        spawn_request(&self.rt, "get", store.store_id, async move {
             let start = Instant::now();
             let Ok(fb_req) = flatbuffers::root::<FBKvGetRequest>(req.control()) else {
                 // Should not happen — already validated above — but guard anyway.
@@ -508,6 +510,7 @@ impl KvRpcService {
                 return;
             };
             let group_id = fb_req.group_id();
+            record_group_context(&store, group_id);
             let key = fb_req.key().map(|v| v.bytes()).unwrap_or_default();
             let read_mode = fb_req.read_mode();
             let min_slot = fb_req.min_slot();
@@ -517,7 +520,7 @@ impl KvRpcService {
             if let Some((_, endpoint)) = forward_info {
                 match fwd.forward_get(&endpoint, &fb_req).await {
                     Ok(leader_ctrl) => {
-                        debug!(group_id, request_id, leader = %endpoint, "kv get forwarded to leader");
+                        debug!(request_id, leader = %endpoint, "kv get forwarded to leader");
                         submit_fb_response(
                             &server_clone,
                             conn_handle_usize as *mut std::ffi::c_void,
@@ -531,12 +534,19 @@ impl KvRpcService {
                         return;
                     }
                     Err(e) => {
-                        warn!(group_id, request_id, leader = %endpoint, error = %e, "kv get forward failed; serving stale local with hint");
+                        warn!(request_id, leader = %endpoint, error = %e, "kv get forward failed; serving stale local with hint");
                     }
                 }
                 // Forward failed: serve stale local + hint.
                 let resp = store
-                    .kv_get(group_id, key, ReadMode::Linearizable as i32, min_slot, request_id, request_create_ms)
+                    .kv_get(
+                        group_id,
+                        key,
+                        ReadMode::Linearizable as i32,
+                        min_slot,
+                        request_id,
+                        request_create_ms,
+                    )
                     .await;
                 let mut ctrl = build_kv_response(req_id, create_nano, &resp);
                 patch_not_leader_hint(&mut ctrl, &endpoint);
@@ -596,7 +606,7 @@ impl KvRpcService {
         let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
         let hist = self.latency.as_ref().map(|l| Arc::clone(&l.delete));
-        self.rt.spawn(async move {
+        spawn_request(&self.rt, "delete", store.store_id, async move {
             let start = Instant::now();
             let Ok(fb_req) = flatbuffers::root::<FBKvDeleteRequest>(req.control()) else {
                 submit_kv_error(
@@ -611,6 +621,7 @@ impl KvRpcService {
                 return;
             };
             let group_id = fb_req.group_id();
+            record_group_context(&store, group_id);
             let key = fb_req.key().map(|v| v.bytes()).unwrap_or_default();
             let client_id = fb_req.client_id();
             let seq = fb_req.seq();
@@ -645,7 +656,7 @@ impl KvRpcService {
         let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
         let hist = self.latency.as_ref().map(|l| Arc::clone(&l.batch_write));
-        self.rt.spawn(async move {
+        spawn_request(&self.rt, "batch_write", store.store_id, async move {
             let start = Instant::now();
             let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBKvBatchWriteRequest>(req.control()) else {
                 submit_kv_error(
@@ -660,6 +671,7 @@ impl KvRpcService {
                 return;
             };
             let group_id = fb_req.group_id();
+            record_group_context(&store, group_id);
             let items: Vec<KvBatchItem> = fb_req
                 .items()
                 .map(|v| {
@@ -740,7 +752,7 @@ impl KvRpcService {
         };
 
         let fwd = Arc::clone(&self.forwarder);
-        self.rt.spawn(async move {
+        spawn_request(&self.rt, "scan", store.store_id, async move {
             let start = Instant::now();
             let Ok(fb_req) = flatbuffers::root::<FBKvScanRequest>(req.control()) else {
                 submit_scan_error(
@@ -755,6 +767,7 @@ impl KvRpcService {
                 return;
             };
             let group_id = fb_req.group_id();
+            record_group_context(&store, group_id);
             let prefix = fb_req.prefix().map(|v| v.bytes()).unwrap_or_default();
             let start_after = fb_req.start_after().map(|v| v.bytes()).unwrap_or_default();
             let end_key = fb_req.end_key().map(|v| v.bytes()).unwrap_or_default();
@@ -770,7 +783,7 @@ impl KvRpcService {
             if let Some((_, endpoint)) = forward_info {
                 match fwd.forward_scan(&endpoint, &fb_req).await {
                     Ok(leader_ctrl) => {
-                        debug!(group_id, request_id, leader = %endpoint, "kv scan forwarded to leader");
+                        debug!(request_id, leader = %endpoint, "kv scan forwarded to leader");
                         submit_fb_response(
                             &server_clone,
                             conn_handle_usize as *mut std::ffi::c_void,
@@ -784,12 +797,25 @@ impl KvRpcService {
                         return;
                     }
                     Err(e) => {
-                        warn!(group_id, request_id, leader = %endpoint, error = %e, "kv scan forward failed; serving stale local with hint");
+                        warn!(request_id, leader = %endpoint, error = %e, "kv scan forward failed; serving stale local with hint");
                     }
                 }
                 let read_mode_i32 = ReadMode::Linearizable as i32;
                 let resp = store
-                    .kv_scan(group_id, prefix, start_after, end_key, limit, read_mode_i32, min_slot, keys_only, count_only, deadline_ms, request_id, request_create_ms)
+                    .kv_scan(
+                        group_id,
+                        prefix,
+                        start_after,
+                        end_key,
+                        limit,
+                        read_mode_i32,
+                        min_slot,
+                        keys_only,
+                        count_only,
+                        deadline_ms,
+                        request_id,
+                        request_create_ms,
+                    )
                     .await;
                 let mut ctrl = build_scan_response(req_id, create_nano, &resp);
                 patch_scan_not_leader_hint(&mut ctrl, &endpoint);
@@ -885,7 +911,7 @@ impl KvRpcService {
         };
 
         let fwd = Arc::clone(&self.forwarder);
-        self.rt.spawn(async move {
+        spawn_request(&self.rt, "journal_scan", store.store_id, async move {
             let Ok(fb_req) = flatbuffers::root::<FBKvJournalScanRequest>(req.control()) else {
                 submit_journal_scan_error(
                     &server_clone,
@@ -899,6 +925,7 @@ impl KvRpcService {
                 return;
             };
             let group_id = fb_req.group_id();
+            record_group_context(&store, group_id);
             let min_slot = fb_req.min_slot();
             let max_slot = fb_req.max_slot();
             let key_prefix = fb_req.key_prefix().map(|v| v.bytes()).unwrap_or_default();
@@ -910,7 +937,7 @@ impl KvRpcService {
             if let Some((_, endpoint)) = forward_info {
                 match fwd.forward_journal_scan(&endpoint, &fb_req).await {
                     Ok(leader_ctrl) => {
-                        debug!(group_id, request_id, leader = %endpoint, "kv journal_scan forwarded to leader");
+                        debug!(request_id, leader = %endpoint, "kv journal_scan forwarded to leader");
                         submit_fb_response(
                             &server_clone,
                             conn_handle_usize as *mut std::ffi::c_void,
@@ -921,12 +948,21 @@ impl KvRpcService {
                         return;
                     }
                     Err(e) => {
-                        warn!(group_id, request_id, leader = %endpoint, error = %e, "kv journal_scan forward failed; serving stale local with hint");
+                        warn!(request_id, leader = %endpoint, error = %e, "kv journal_scan forward failed; serving stale local with hint");
                     }
                 }
                 let read_mode_i32 = ReadMode::Linearizable as i32;
                 let resp = store
-                    .kv_journal_scan(group_id, min_slot, max_slot, key_prefix, limit, read_mode_i32, request_id, request_create_ms)
+                    .kv_journal_scan(
+                        group_id,
+                        min_slot,
+                        max_slot,
+                        key_prefix,
+                        limit,
+                        read_mode_i32,
+                        request_id,
+                        request_create_ms,
+                    )
                     .await;
                 let mut ctrl = build_journal_scan_response(req_id, create_nano, &resp);
                 patch_journal_scan_not_leader_hint(&mut ctrl, &endpoint);
@@ -981,7 +1017,7 @@ impl KvRpcService {
 
         let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
-        self.rt.spawn(async move {
+        spawn_request(&self.rt, "create_snapshot", store.store_id, async move {
             let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBCreateSnapshotRequest>(req.control()) else {
                 submit_create_snapshot_error(
                     &server,
@@ -995,6 +1031,7 @@ impl KvRpcService {
                 return;
             };
             let group_id = fb_req.group_id();
+            record_group_context(&store, group_id);
             let read_mode = fb_req.read_mode();
             let min_slot = fb_req.min_slot();
             let read_mode_i32 = if read_mode == FBReadMode::Linearizable {
@@ -1025,7 +1062,7 @@ impl KvRpcService {
 
         let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
-        self.rt.spawn(async move {
+        spawn_request(&self.rt, "list_snapshots", store.store_id, async move {
             let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBListSnapshotsRequest>(req.control()) else {
                 submit_list_snapshots_error(
                     &server,
@@ -1039,6 +1076,7 @@ impl KvRpcService {
                 return;
             };
             let group_id = fb_req.group_id();
+            record_group_context(&store, group_id);
             let resp = store.kv_list_snapshots(group_id).await;
             let ctrl = build_list_snapshots_response(req_id, create_nano, &resp);
             submit_fb_response(
@@ -1062,7 +1100,7 @@ impl KvRpcService {
 
         let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
-        self.rt.spawn(async move {
+        spawn_request(&self.rt, "snapshot_scan", store.store_id, async move {
             let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBSnapshotScanRequest>(req.control()) else {
                 submit_snapshot_scan_error(
                     &server,
@@ -1076,6 +1114,7 @@ impl KvRpcService {
                 return;
             };
             let group_id = fb_req.group_id();
+            record_group_context(&store, group_id);
             let snapshot_handle = fb_req.snapshot_handle();
             let prefix = fb_req.prefix().map(|v| v.bytes()).unwrap_or_default();
             let start_after = fb_req.start_after().map(|v| v.bytes()).unwrap_or_default();
@@ -1105,7 +1144,7 @@ impl KvRpcService {
 
         let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
-        self.rt.spawn(async move {
+        spawn_request(&self.rt, "release_snapshot", store.store_id, async move {
             let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBReleaseSnapshotRequest>(req.control()) else {
                 submit_release_snapshot_error(
                     &server,
@@ -1119,6 +1158,7 @@ impl KvRpcService {
                 return;
             };
             let group_id = fb_req.group_id();
+            record_group_context(&store, group_id);
             let snapshot_handle = fb_req.snapshot_handle();
             let resp = store.kv_release_snapshot(group_id, snapshot_handle).await;
             let ctrl = build_release_snapshot_response(req_id, create_nano, &resp);
@@ -1137,15 +1177,15 @@ impl KvRpcService {
 
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
     fn handle_watch_subscribe(&self, req: crowdb_rpc_ffi::ServerRequest, _server: &Arc<RpcServer>) {
+        let span = request_span("watch_subscribe", self.store.store_id);
+        let _entered = span.enter();
         let conn_handle_usize = req.conn_handle as usize;
         let Ok(fb_req) = flatbuffers::root::<FBWatchSubscribe>(req.control()) else {
-            debug!(
-                store_id = self.store.store_id,
-                "watch subscribe: invalid flatbuffer"
-            );
+            debug!("watch subscribe: invalid flatbuffer");
             return;
         };
         let group_id = fb_req.group_id();
+        record_group_context(&self.store, group_id);
         let prefix = fb_req.prefix().map_or(&[][..], |v| v.bytes()).to_vec();
 
         let Some(group) = self.store.get_group(group_id) else {
@@ -1173,7 +1213,6 @@ impl KvRpcService {
         let registry = group.watch_registry.clone();
         let watcher_id = registry.subscribe_crowdb_rpc(&prefix, target);
         debug!(
-            store_id = self.store.store_id,
             group_id,
             watcher_id,
             prefix_len = prefix.len(),
@@ -1186,26 +1225,22 @@ impl KvRpcService {
 
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
     fn handle_watch_unsubscribe(&self, req: crowdb_rpc_ffi::ServerRequest, _server: &Arc<RpcServer>) {
+        let span = request_span("watch_unsubscribe", self.store.store_id);
+        let _entered = span.enter();
         let Ok(fb_req) = flatbuffers::root::<FBWatchUnsubscribe>(req.control()) else {
-            debug!(
-                store_id = self.store.store_id,
-                "watch unsubscribe: invalid flatbuffer"
-            );
+            debug!("watch unsubscribe: invalid flatbuffer");
             return;
         };
         let group_id = fb_req.group_id();
+        record_group_context(&self.store, group_id);
         let prefix = fb_req.prefix().map_or(&[][..], |v| v.bytes()).to_vec();
 
         let Some(group) = self.store.get_group(group_id) else {
-            debug!(
-                store_id = self.store.store_id,
-                group_id, "watch unsubscribe dropped (group not found)"
-            );
+            debug!("watch unsubscribe dropped (group not found)");
             return;
         };
         let _registry = group.watch_registry.clone();
         debug!(
-            store_id = self.store.store_id,
             group_id,
             prefix_len = prefix.len(),
             "watch unsubscribe received (crowdb-rpc: lazy cleanup via dead-connection detection)"
@@ -1950,4 +1985,28 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, i32), String> {
         .parse()
         .map_err(|_| format!("invalid port in endpoint: {endpoint}"))?;
     Ok((host.to_string(), port))
+}
+fn spawn_request<F>(rt: &Handle, operation: &'static str, store_id: u64, future: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    rt.spawn(future.instrument(request_span(operation, store_id)));
+}
+
+fn request_span(operation: &'static str, store_id: u64) -> Span {
+    info_span!(
+        "rpc_request",
+        operation,
+        s = store_id,
+        g = field::Empty,
+        replica = field::Empty
+    )
+}
+
+fn record_group_context(store: &PxKvStore, group_id: u64) {
+    let span = Span::current();
+    span.record("g", group_id);
+    if let Some(group) = store.get_group(group_id) {
+        span.record("replica", group.local_replica().id);
+    }
 }

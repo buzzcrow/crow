@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crowdb_kv_client::{
     BindingMonitor, ChunkdbRangeStrategy, ClientConfig, CrowdbKvClient, ServiceRegistryClient,
 };
-use tracing::info;
+use tracing::{info, info_span, Instrument};
 
 use crate::store_registry::KvStoreRegistry;
 
@@ -90,7 +90,11 @@ pub fn spawn_chunkdb_binding_monitor(
     };
 
     info!(interval_secs, "chunkdb binding monitor spawning");
-    tokio::spawn(monitor.run(stop_rx, is_leader));
+    tokio::spawn(
+        monitor
+            .run(stop_rx, is_leader)
+            .instrument(info_span!("binding_monitor", s = 0, g = 0)),
+    );
 
     BindingMonitorHandle { stop_tx }
 }

@@ -166,6 +166,9 @@ pub struct LeaseState {
 /// lease, election + heartbeat handlers.
 pub struct PxLocalReplica {
     pub id: u64,
+    /// Stable observability context, populated when the replica joins a group.
+    pub(super) log_store_id: AtomicU64,
+    pub(super) log_group_id: AtomicU64,
     /// This replica's listen address (set by the store when the group is
     /// added). Used when persisting group config so all nodes share the
     /// same member list.
@@ -380,6 +383,8 @@ impl PxLocalReplica {
     pub fn new(id: u64, role: PxLocalReplicaRole) -> Self {
         Self {
             id,
+            log_store_id: AtomicU64::new(0),
+            log_group_id: AtomicU64::new(0),
             endpoint: parking_lot::Mutex::new(None),
             acceptor: Arc::new(PxAcceptor::new()),
             learner: Arc::new(PxLearner::new()),
@@ -443,6 +448,8 @@ impl PxLocalReplica {
         let role = snapshot.role;
         Self {
             id: prior.id,
+            log_store_id: AtomicU64::new(prior.log_store_id.load(Ordering::Acquire)),
+            log_group_id: AtomicU64::new(prior.log_group_id.load(Ordering::Acquire)),
             endpoint: parking_lot::Mutex::new(prior.endpoint.lock().clone()),
             // Share the Paxos acceptor + learner with the prior replica.
             // The acceptor must persist across rebuild for safety (Paxos
@@ -474,6 +481,11 @@ impl PxLocalReplica {
             gap_slots: Arc::new(Mutex::new(BTreeSet::new())),
             fetchgap_inflight: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    pub(crate) fn set_log_context(&self, store_id: u64, group_id: u64) {
+        self.log_store_id.store(store_id, Ordering::Release);
+        self.log_group_id.store(group_id, Ordering::Release);
     }
 
     /// Attach a WAL manager for durable persistence (P2 W6).
@@ -595,12 +607,12 @@ impl PxLocalReplica {
     /// `engine.flush()` drains L0 memtable into L1 B+tree (in-memory);
     /// `persist_snapshot()` writes dirty L1 pages + superblock to the
     /// page store (disk). For `InMemKV` both are no-ops.
-    #[tracing::instrument(level = "debug", skip_all, fields(replica_l_id = self.id))]
+    #[tracing::instrument(level = "debug", skip_all, fields(s = self.log_store_id.load(Ordering::Acquire), g = self.log_group_id.load(Ordering::Acquire), replica = self.id))]
     #[allow(clippy::unused_async)] // async kept for cascade uniformity
     pub async fn shutdown(&self, _per_layer_timeout: Duration) -> OperationReport {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             debug!(
-                replica_l_id = self.id,
+                replica = self.id,
                 "PxLocalReplica::shutdown is a no-op (already shut down)"
             );
             return OperationReport::new();
@@ -614,12 +626,12 @@ impl PxLocalReplica {
         if let Some(wal) = &self.wal {
             if let Err(e) = wal.flush_all().await {
                 warn!(
-                    replica_l_id = self.id,
+                    replica = self.id,
                     error = %e,
                     "WAL flush_all failed during shutdown"
                 );
             } else {
-                debug!(replica_l_id = self.id, "WAL flush_all completed during shutdown");
+                debug!("WAL flush_all completed during shutdown");
             }
         }
         let engine = self.learner.engine();
@@ -627,18 +639,18 @@ impl PxLocalReplica {
         let snap_slot = engine.persist_snapshot();
         if snap_slot > 0 {
             info!(
-                replica_l_id = self.id,
+                replica = self.id,
                 snapshot_slot = snap_slot,
                 "PxLocalReplica shutdown: engine snapshot persisted"
             );
         } else {
             debug!(
-                replica_l_id = self.id,
+                replica = self.id,
                 "PxLocalReplica shutdown: no durable snapshot (non-durable engine or no data)"
             );
         }
         info!(
-            replica_l_id = self.id,
+            replica = self.id,
             "PxLocalReplica shutdown complete (acceptor/learner cleanup deferred to Drop)"
         );
         OperationReport::new()
