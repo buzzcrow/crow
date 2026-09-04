@@ -7,11 +7,18 @@
 //! `Mutex` because leader changes are rare events (not hot path).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
 use crowdb_common::metrics::PreciseHistogram;
+
+const LATENCY_SHARDS: usize = 64;
+static NEXT_LATENCY_SHARD: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    static LATENCY_SHARD: usize = NEXT_LATENCY_SHARD.fetch_add(1, Ordering::Relaxed) % LATENCY_SHARDS;
+}
 
 /// One recorded leader-change episode: from when the client first
 /// detected the old leader was wrong to when it confirmed a new leader.
@@ -139,9 +146,9 @@ impl Default for WindowLatency {
 }
 
 /// Metrics embedded in [`crate::CrowdbKvClient`]. Hot-path error counters
-/// are lock-free atomics; per-op latency histograms are `Mutex<Histogram>`;
+/// are lock-free atomics; per-op latency histograms are sharded by thread;
 /// leader-change tracking uses a `Mutex` (rare event, not hot path).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ClientMetrics {
     put_errors: AtomicU64,
     get_errors: AtomicU64,
@@ -158,38 +165,59 @@ pub struct ClientMetrics {
     read_endpoint_distributed: AtomicU64,
     read_endpoint_fallback: AtomicU64,
     leader_changes: Mutex<LeaderChangeTracker>,
-    window_lat: Mutex<WindowLatency>,
+    window_lat: [Mutex<WindowLatency>; LATENCY_SHARDS],
+}
+
+impl Default for ClientMetrics {
+    fn default() -> Self {
+        Self {
+            put_errors: AtomicU64::new(0),
+            get_errors: AtomicU64::new(0),
+            delete_errors: AtomicU64::new(0),
+            scan_errors: AtomicU64::new(0),
+            batch_write_errors: AtomicU64::new(0),
+            not_leader_hint_followed: AtomicU64::new(0),
+            leader_query: AtomicU64::new(0),
+            unknown_leader_wait: AtomicU64::new(0),
+            transport_error_retry: AtomicU64::new(0),
+            retries_exhausted: AtomicU64::new(0),
+            no_leader: AtomicU64::new(0),
+            topology_refresh: AtomicU64::new(0),
+            read_endpoint_distributed: AtomicU64::new(0),
+            read_endpoint_fallback: AtomicU64::new(0),
+            leader_changes: Mutex::new(LeaderChangeTracker::default()),
+            window_lat: std::array::from_fn(|_| Mutex::new(WindowLatency::default())),
+        }
+    }
 }
 
 impl ClientMetrics {
+    fn with_latency_shard(&self, record: impl FnOnce(&mut WindowLatency)) {
+        LATENCY_SHARD.with(|&shard| {
+            if let Ok(mut latency) = self.window_lat[shard].lock() {
+                record(&mut latency);
+            }
+        });
+    }
+
     pub(crate) fn record_put_latency(&self, lat_us: u64) {
-        if let Ok(mut g) = self.window_lat.lock() {
-            g.put.record(lat_us.max(1));
-        }
+        self.with_latency_shard(|latency| latency.put.record(lat_us.max(1)));
     }
 
     pub(crate) fn record_get_latency(&self, lat_us: u64) {
-        if let Ok(mut g) = self.window_lat.lock() {
-            g.get.record(lat_us.max(1));
-        }
+        self.with_latency_shard(|latency| latency.get.record(lat_us.max(1)));
     }
 
     pub(crate) fn record_delete_latency(&self, lat_us: u64) {
-        if let Ok(mut g) = self.window_lat.lock() {
-            g.delete.record(lat_us.max(1));
-        }
+        self.with_latency_shard(|latency| latency.delete.record(lat_us.max(1)));
     }
 
     pub(crate) fn record_scan_latency(&self, lat_us: u64) {
-        if let Ok(mut g) = self.window_lat.lock() {
-            g.scan.record(lat_us.max(1));
-        }
+        self.with_latency_shard(|latency| latency.scan.record(lat_us.max(1)));
     }
 
     pub(crate) fn record_batch_write_latency(&self, lat_us: u64) {
-        if let Ok(mut g) = self.window_lat.lock() {
-            g.batch_write.record(lat_us.max(1));
-        }
+        self.with_latency_shard(|latency| latency.batch_write.record(lat_us.max(1)));
     }
 
     pub(crate) fn record_put_error(&self) {
@@ -305,19 +333,23 @@ impl ClientMetrics {
     /// these into cumulative histograms for run-wide percentiles.
     #[must_use]
     pub fn drain_window(&self) -> WindowLatencySnapshot {
-        self.window_lat.lock().map_or_else(
-            |_| WindowLatencySnapshot::default(),
-            |mut g| {
-                let mk = || PreciseHistogram::new(3);
-                WindowLatencySnapshot {
-                    put: std::mem::replace(&mut g.put, mk()),
-                    get: std::mem::replace(&mut g.get, mk()),
-                    delete: std::mem::replace(&mut g.delete, mk()),
-                    scan: std::mem::replace(&mut g.scan, mk()),
-                    batch_write: std::mem::replace(&mut g.batch_write, mk()),
-                }
-            },
-        )
+        let mut snapshot = WindowLatencySnapshot::default();
+        for shard in &self.window_lat {
+            if let Ok(mut latency) = shard.lock() {
+                snapshot.put.add(&latency.put);
+                snapshot.get.add(&latency.get);
+                snapshot.delete.add(&latency.delete);
+                snapshot.scan.add(&latency.scan);
+                snapshot.batch_write.add(&latency.batch_write);
+                *latency = WindowLatency::default();
+            }
+        }
+        snapshot
+    }
+
+    #[cfg(feature = "test-util")]
+    pub fn record_latency_for_tests(&self, lat_us: u64) {
+        self.record_put_latency(lat_us);
     }
 
     /// Flush per-op-kind window latency histograms to `writer` in the

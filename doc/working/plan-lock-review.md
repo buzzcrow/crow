@@ -35,7 +35,7 @@ Implements [the lock design](design-lock-review.md) for
 - [ ] **WAL index shards**: partition updates by pipeline and snapshot shards
   for replay/GC. Files: `lib/crowdb-kv/src/wal/{wal_engine.rs,pipeline_writer.rs,index.rs}`
   and WAL tests.
-- [ ] **Client latency shards**: remove the request-wide histogram mutex while
+- [x] **Client latency shards**: remove the request-wide histogram mutex while
   preserving flush counts. Files: `lib/crowdb-kv-client/src/metrics.rs` and tests.
 - [ ] **Collector lock boundary**: snapshot references, collect unlocked, then
   register discoveries. Files: `app/crowdb-kv-server/src/engine_collector.rs`
