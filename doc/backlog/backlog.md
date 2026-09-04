@@ -11,10 +11,21 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R130** — Bump this line in the same commit when adding a new item.
+**Next R number: R131** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
+- **[R130](R130-diskdb-behavior-conformance.md)** — diskdb behavioral
+  conformance review — Area: diskdb / client — Review the completed
+  diskdb implementation against the diskdb design by feature, close
+  behavioral gaps, and reorganize tests around the same feature
+  boundaries. Give special attention to group-0 synchronization,
+  balanced owner assignment when a disk-group is created, immutable
+  ownership, restart/recovery, and status transitions. KV-group binding
+  and data migration remain exclusively in R102. Component-level E2E tests live in
+  `crowdb-diskdb-client`; `crowdb-cli bench diskdb` provisions a
+  three-node, four-disks-per-node cluster for allocate and 70/30 mixed
+  allocate/free workloads with space-accounting verification.
 - **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
   migration — Area: chunkdb / kv — Implement the full
   `Copying`/`Cutover`/`Complete` migration flow for transferring chunkdb
