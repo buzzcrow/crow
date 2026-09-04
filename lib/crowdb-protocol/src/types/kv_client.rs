@@ -346,12 +346,17 @@ pub struct KvScanRequest {
     /// with truncated = true when exceeded; the client pagination loop checks
     /// before each page and stops with timed_out = true.
     pub deadline_ms: u64,
+    /// Capture or retain a fixed contiguous-applied upper cutoff.
+    pub bounded: bool,
+    /// Zero captures the first page's cutoff; later pages retain it.
+    pub scan_cutoff: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct KvScanItem {
     pub key: Bytes,
     pub value: Bytes,
+    pub commit_slot: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -377,6 +382,8 @@ pub struct KvScanResponse {
     /// Deadline fired mid-scan: the result is partial (truncated = true, entries
     /// fetched before the deadline). Default false.
     pub timed_out: bool,
+    /// Fixed cutoff used by a bounded scan; zero for ordinary scans.
+    pub scan_cutoff: u64,
 }
 
 // ── Snapshot API (R59) ──────────────────────────────────────────

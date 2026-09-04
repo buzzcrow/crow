@@ -292,7 +292,8 @@ impl ZoneKey {
 
 /// Key for an allocated block range.
 /// Binary layout: `magic | 0x0006 | disk_id:16 bytes | zone_index:u32 BE |
-/// unit_offset:u64 BE`. Total 31 bytes. Binary-only (data-group key).
+/// unit_offset:u64 BE | allocation_ts:u64 BE`. Total 39 bytes. Binary-only
+/// (data-group key). Legacy 31-byte keys decode with `allocation_ts = 0`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BusyBlockKey {
     pub disk_id: DiskId,
@@ -357,6 +358,7 @@ pub struct FreeBlockKey {
     pub disk_id: DiskId,
     pub zone_index: u32,
     pub unit_offset: u64,
+    pub allocation_ts: u64,
 }
 
 impl BinaryKey for FreeBlockKey {
@@ -367,6 +369,7 @@ impl BinaryKey for FreeBlockKey {
         encode_disk_id(out, &self.disk_id);
         encode_u32(out, self.zone_index);
         encode_u64(out, self.unit_offset);
+        encode_u64(out, self.allocation_ts);
     }
 
     fn decode(buf: &[u8]) -> Result<Self, KeyError> {
@@ -374,11 +377,17 @@ impl BinaryKey for FreeBlockKey {
         let (disk_id, o) = decode_disk_id(fields, 0)?;
         let (zone_index, o) = decode_u32(fields, o)?;
         let (unit_offset, o) = decode_u64(fields, o)?;
+        let (allocation_ts, o) = if o == fields.len() {
+            (0, o)
+        } else {
+            decode_u64(fields, o)?
+        };
         check_exact(fields, o)?;
         Ok(Self {
             disk_id,
             zone_index,
             unit_offset,
+            allocation_ts,
         })
     }
 }

@@ -187,7 +187,7 @@ async fn scan_replica_records(
 ) -> Option<Vec<ReplicaRecord>> {
     let prefix = b"/kv/replica/";
     let resp = store0
-        .kv_scan(0, prefix, b"", b"", 0, 0, 0, false, false, 0, 0, 0)
+        .kv_scan(0, prefix, b"", b"", 0, 0, 0, false, false, 0, false, 0, 0, 0)
         .await;
     if !resp.ok {
         warn!(error = %resp.error, "reconcile: failed to scan /kv/replica/");

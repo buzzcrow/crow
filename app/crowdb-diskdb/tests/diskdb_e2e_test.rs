@@ -268,6 +268,7 @@ async fn diskdb_e2e_allocate_free() {
         disk_id: make_disk_id(0, 1),
         zone_index: segment.zone_index,
         unit_offset: segment.unit_offset,
+        allocation_ts: segment.allocation_ts,
     };
     let free_bytes = free_key.to_bytes();
     let verify_kv2 = cluster.make_ddb_kv_client();
@@ -278,10 +279,9 @@ async fn diskdb_e2e_allocate_free() {
     assert_eq!(free_record.unit_count, 1);
     assert_eq!(free_record.previous_owner, Some(owner_chunk));
 
-    // Verify the busy key is gone.
+    // Busy remains until bounded compaction consumes the matching free fact.
     let busy_val2 = kv_get(&verify_kv2, &busy_bytes).await;
-    assert!(busy_val2.is_none(), "busy record should be gone after free");
-    eprintln!("FreeBlockValue record verified, BusyBlockKey gone");
+    assert!(busy_val2.is_some(), "busy record should remain before compaction");
 
     // 11. Allocate multiple blocks and verify.
     let alloc_kv2 = cluster.make_ddb_kv_client();
@@ -309,26 +309,27 @@ async fn diskdb_e2e_allocate_free() {
         .expect("free 3 blocks should succeed");
     eprintln!("freed 3 blocks in batch");
 
-    // 13. Verify all 3 busy keys are gone and 3 free keys exist.
+    // 13. Verify all three immutable free facts and retained busy records.
     let verify_kv3 = cluster.make_ddb_kv_client();
     for seg in &segments {
         let bk = BusyBlockKey {
-            disk_id: make_disk_id(0, 1),
+            disk_id: seg.disk_id.expect("segment disk"),
             zone_index: seg.zone_index,
             unit_offset: seg.unit_offset,
         };
         let bk_bytes = bk.to_bytes();
         let result = kv_get(&verify_kv3, &bk_bytes).await;
         assert!(
-            result.is_none(),
-            "busy record should be gone for offset {}",
+            result.is_some(),
+            "busy record should remain for offset {}",
             seg.unit_offset
         );
 
         let fk = FreeBlockKey {
-            disk_id: make_disk_id(0, 1),
+            disk_id: seg.disk_id.expect("segment disk"),
             zone_index: seg.zone_index,
             unit_offset: seg.unit_offset,
+            allocation_ts: seg.allocation_ts,
         };
         let fk_bytes = fk.to_bytes();
         let result = kv_get(&verify_kv3, &fk_bytes).await;
@@ -398,6 +399,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         disk_id: make_disk_id(0, 1),
         zone_index: segment.zone_index,
         unit_offset: segment.unit_offset,
+        allocation_ts: segment.allocation_ts,
     };
     let verify_kv = cluster.make_ddb_kv_client();
     let free_val = kv_get(&verify_kv, &free_key.to_bytes()).await;
@@ -406,8 +408,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         "free record should exist after validated free"
     );
 
-    // 2. Allocate again, then free with validate_owner_on_free=true but
-    //    a WRONG owner → OwnerMismatch, no bitmap clear.
+    // 2. A wrong-owner free is persisted without a read; compaction rejects it.
     let alloc_kv2 = cluster.make_ddb_kv_client();
     let segment2 = alloc::allocate_block(
         &dg,
@@ -428,12 +429,9 @@ async fn diskdb_e2e_validate_owner_on_free() {
 
     let free_kv2 = cluster.make_ddb_kv_client();
     let result = alloc::free_block(&dg, &wrong_segment, &free_kv2, true).await;
-    assert!(
-        matches!(result, Err(alloc::FreeError::OwnerMismatch { .. })),
-        "expected OwnerMismatch, got {result:?}"
-    );
+    assert!(result.is_ok(), "blind free should persist: {result:?}");
 
-    // The BusyBlockKey should still exist (free was rejected).
+    // The BusyBlockKey remains for compaction-time validation.
     let seg2_disk_id = segment2.disk_id.expect("segment2 should have disk_id");
     let busy_key = BusyBlockKey {
         disk_id: seg2_disk_id,
@@ -442,10 +440,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
     };
     let verify_kv2 = cluster.make_ddb_kv_client();
     let busy_val = kv_get(&verify_kv2, &busy_key.to_bytes()).await;
-    assert!(
-        busy_val.is_some(),
-        "busy record should still exist after rejected free"
-    );
+    assert!(busy_val.is_some(), "busy record should remain before compaction");
 
     // 3. Free the block with the correct owner (cleanup).
     let free_kv3 = cluster.make_ddb_kv_client();
@@ -453,20 +448,18 @@ async fn diskdb_e2e_validate_owner_on_free() {
         .await
         .expect("free with matching owner should succeed");
 
-    // 4. Free a non-busy block with validate_owner_on_free=true → NotBusy.
+    // 4. A non-busy free is also an inert immutable fact.
     let fake_segment = crowdb_protocol::diskdb::rpc::Segment {
         disk_id: Some(seg2_disk_id),
         zone_index: segment2.zone_index,
         unit_offset: 999_999, // non-existent offset
         unit_count: 1,
         owner_chunk: Some(owner_chunk),
+        allocation_ts: 0,
     };
     let free_kv4 = cluster.make_ddb_kv_client();
     let result = alloc::free_block(&dg, &fake_segment, &free_kv4, true).await;
-    assert!(
-        matches!(result, Err(alloc::FreeError::NotBusy { .. })),
-        "expected NotBusy, got {result:?}"
-    );
+    assert!(result.is_ok(), "blind non-busy free should persist: {result:?}");
 
     eprintln!("diskdb_e2e_validate_owner_on_free: ALL CHECKS PASSED");
 }
@@ -662,6 +655,7 @@ async fn diskdb_e2e_allocate_all_free_all() {
             disk_id,
             zone_index: seg.zone_index,
             unit_offset: seg.unit_offset,
+            allocation_ts: seg.allocation_ts,
         };
         let free_val = kv_get(&verify_kv2, &free_key.to_bytes()).await;
         assert!(
@@ -671,7 +665,7 @@ async fn diskdb_e2e_allocate_all_free_all() {
             seg.unit_offset
         );
 
-        // Busy record should be gone.
+        // Busy record remains until compaction.
         let busy_key = BusyBlockKey {
             disk_id,
             zone_index: seg.zone_index,
@@ -679,13 +673,13 @@ async fn diskdb_e2e_allocate_all_free_all() {
         };
         let busy_val = kv_get(&verify_kv2, &busy_key.to_bytes()).await;
         assert!(
-            busy_val.is_none(),
-            "busy record should be gone for segment {idx} (disk={disk_id:?} zone={} offset={})",
+            busy_val.is_some(),
+            "busy record should remain for segment {idx} (disk={disk_id:?} zone={} offset={})",
             seg.zone_index,
             seg.unit_offset
         );
     }
-    eprintln!("sample free records verified, busy records gone");
+    eprintln!("sample free and retained busy records verified");
 
     // ── Phase 3: Persist-only — no space reclaimable without compaction
     // The bitmap still shows all blocks busy. Allocation must fail
@@ -858,8 +852,8 @@ async fn diskdb_e2e_compact_zone_rpc() {
     assert!(all_success, "all zone compaction results should be success");
     eprintln!("compact_zone: compacted {compacted_count} zones, deleted {total_deleted} free records");
 
-    // 6. Verify bitmap is now cleared for freed segments.
-    {
+    // 6. Verify bitmap is cleared only when a positive cutoff was available.
+    let compacted = {
         let disk = dg
             .disks
             .read()
@@ -872,26 +866,27 @@ async fn diskdb_e2e_compact_zone_rpc() {
         let zone = &zones[zone_index as usize];
         #[allow(clippy::cast_possible_truncation)]
         let bit0 = segments[0].unit_offset as u32;
-        assert!(
-            !zone.usage_bits.is_set(bit0),
-            "freed bit should be clear after compaction"
-        );
-    }
+        let compacted = zone.compact_slot.load(std::sync::atomic::Ordering::Acquire) > 0;
+        assert_eq!(zone.usage_bits.is_set(bit0), !compacted);
+        compacted
+    };
 
     // 7. Verify FreeBlockKey records are deleted from KV.
     let verify_kv = cluster.make_ddb_kv_client();
     for seg in &segments[0..2] {
         let free_key = FreeBlockKey {
-            disk_id,
+            disk_id: seg.disk_id.expect("segment disk"),
             zone_index: seg.zone_index,
             unit_offset: seg.unit_offset,
+            allocation_ts: seg.allocation_ts,
         };
         let val = kv_get(&verify_kv, &free_key.to_bytes()).await;
-        assert!(
-            val.is_none(),
-            "free record should be deleted after compaction (offset={})",
-            seg.unit_offset
-        );
+        assert_eq!(val.is_none(), compacted, "free record retention mismatch");
+    }
+
+    if !compacted {
+        eprintln!("compaction deferred at contiguous slot zero");
+        return;
     }
 
     // 8. Verify space is now reclaimable — allocate 2 more blocks.

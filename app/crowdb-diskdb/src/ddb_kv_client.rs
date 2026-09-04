@@ -17,7 +17,9 @@ use crowdb_kv_client::{BatchOp, CrowdbKvClient, GetOutcome, JournalOp, ReadMode,
 use crowdb_protocol::common::DiskId;
 use crowdb_protocol::diskdb::rpc::{BusyBlockValue, FreeBlockValue, RecoveryScanProgressValue, ZoneValue};
 use crowdb_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey, RecoveryScanProgressKey, ZoneKey};
-use crowdb_protocol::{RecoveryScanProgressValueExt, ZoneValueExt};
+use crowdb_protocol::{
+    decode_busy_block_value, decode_free_block_value, RecoveryScanProgressValueExt, ZoneValueExt,
+};
 
 use crate::model::records::{BusyRecord, FreeRecord, ZoneRecords};
 
@@ -55,7 +57,7 @@ impl DdbKvClient {
 
     /// Point-lookup a `BusyBlockValue` at `BusyBlockKey`. Returns
     /// `Ok(None)` if the key does not exist (block is not busy).
-    /// Used by the `validate_owner_on_free` path.
+    /// Used by diagnostics and compatibility tooling.
     pub async fn get_busy(
         &self,
         bind: Bind,
@@ -75,12 +77,11 @@ impl DdbKvClient {
             .await?;
         match outcome {
             GetOutcome::Found { value, .. } => {
-                let bv = bincode::deserialize::<BusyBlockValue>(&value).map_err(|e| {
-                    crowdb_kv_client::Error::SysdataDecode {
+                let bv =
+                    decode_busy_block_value(&value).map_err(|e| crowdb_kv_client::Error::SysdataDecode {
                         key: format!("{:02x?}", key.to_bytes()),
-                        reason: e.to_string(),
-                    }
-                })?;
+                        reason: e,
+                    })?;
                 Ok(Some(bv))
             }
             GetOutcome::NotFound => Ok(None),
@@ -89,9 +90,8 @@ impl DdbKvClient {
 
     /// Persist a single busy-block record: `put` to `BusyBlockKey`.
     ///
-    /// Per §3.4/§7, this also deletes any prior `FreeBlockKey` for the
-    /// same offset (re-allocation of a freed block). Done as one
-    /// `batch_write` for atomicity.
+    /// The prior incarnation has already been consolidated before its bitmap
+    /// range can be allocated again.
     pub async fn persist_busy(
         &self,
         bind: Bind,
@@ -105,21 +105,11 @@ impl DdbKvClient {
             zone_index,
             unit_offset,
         };
-        let free_key = FreeBlockKey {
-            disk_id: *disk_id,
-            zone_index,
-            unit_offset,
-        };
         let busy_bytes = bincode::serialize(value).expect("serialize BusyBlockValue");
-        let ops = vec![
-            BatchOp::Put {
-                key: Bytes::from(busy_key.to_bytes()),
-                value: Bytes::from(busy_bytes),
-            },
-            BatchOp::Delete {
-                key: Bytes::from(free_key.to_bytes()),
-            },
-        ];
+        let ops = vec![BatchOp::Put {
+            key: Bytes::from(busy_key.to_bytes()),
+            value: Bytes::from(busy_bytes),
+        }];
         let (store_id, group_id) = bind;
         self.kv.batch_write(store_id, group_id, &ops).await.map(|_| ())
     }
@@ -131,14 +121,9 @@ impl DdbKvClient {
         bind: Bind,
         records: &[(DiskId, u32, u64, BusyBlockValue)],
     ) -> Result<()> {
-        let mut ops = Vec::with_capacity(records.len() * 2);
+        let mut ops = Vec::with_capacity(records.len());
         for (disk_id, zone_index, unit_offset, value) in records {
             let busy_key = BusyBlockKey {
-                disk_id: *disk_id,
-                zone_index: *zone_index,
-                unit_offset: *unit_offset,
-            };
-            let free_key = FreeBlockKey {
                 disk_id: *disk_id,
                 zone_index: *zone_index,
                 unit_offset: *unit_offset,
@@ -148,16 +133,12 @@ impl DdbKvClient {
                 key: Bytes::from(busy_key.to_bytes()),
                 value: Bytes::from(busy_bytes),
             });
-            ops.push(BatchOp::Delete {
-                key: Bytes::from(free_key.to_bytes()),
-            });
         }
         let (store_id, group_id) = bind;
         self.kv.batch_write(store_id, group_id, &ops).await.map(|_| ())
     }
 
-    /// Persist a single free: one `batch_write` that deletes the
-    /// `BusyBlockKey` and puts the `FreeBlockValue` at `FreeBlockKey`.
+    /// Persist one immutable incarnation-qualified free fact.
     pub async fn persist_free(
         &self,
         bind: Bind,
@@ -166,26 +147,17 @@ impl DdbKvClient {
         unit_offset: u64,
         value: &FreeBlockValue,
     ) -> Result<()> {
-        let busy_key = BusyBlockKey {
-            disk_id: *disk_id,
-            zone_index,
-            unit_offset,
-        };
         let free_key = FreeBlockKey {
             disk_id: *disk_id,
             zone_index,
             unit_offset,
+            allocation_ts: value.pre_allocation_ts,
         };
         let free_bytes = bincode::serialize(value).expect("serialize FreeBlockValue");
-        let ops = vec![
-            BatchOp::Delete {
-                key: Bytes::from(busy_key.to_bytes()),
-            },
-            BatchOp::Put {
-                key: Bytes::from(free_key.to_bytes()),
-                value: Bytes::from(free_bytes),
-            },
-        ];
+        let ops = vec![BatchOp::Put {
+            key: Bytes::from(free_key.to_bytes()),
+            value: Bytes::from(free_bytes),
+        }];
         let (store_id, group_id) = bind;
         self.kv.batch_write(store_id, group_id, &ops).await.map(|_| ())
     }
@@ -198,22 +170,15 @@ impl DdbKvClient {
         bind: Bind,
         records: &[(DiskId, u32, u64, FreeBlockValue)],
     ) -> Result<()> {
-        let mut ops = Vec::with_capacity(records.len() * 2);
+        let mut ops = Vec::with_capacity(records.len());
         for (disk_id, zone_index, unit_offset, value) in records {
-            let busy_key = BusyBlockKey {
-                disk_id: *disk_id,
-                zone_index: *zone_index,
-                unit_offset: *unit_offset,
-            };
             let free_key = FreeBlockKey {
                 disk_id: *disk_id,
                 zone_index: *zone_index,
                 unit_offset: *unit_offset,
+                allocation_ts: value.pre_allocation_ts,
             };
             let free_bytes = bincode::serialize(value).expect("serialize FreeBlockValue");
-            ops.push(BatchOp::Delete {
-                key: Bytes::from(busy_key.to_bytes()),
-            });
             ops.push(BatchOp::Put {
                 key: Bytes::from(free_key.to_bytes()),
                 value: Bytes::from(free_bytes),
@@ -268,12 +233,13 @@ impl DdbKvClient {
             .get(store_id, group_id, &zone_bytes, ReadMode::Linearizable, None)
             .await?;
         if let GetOutcome::Found { value, .. } = zone_get {
-            records.zone_value = Some(bincode::deserialize::<ZoneValue>(&value).map_err(|e| {
-                crowdb_kv_client::Error::SysdataDecode {
-                    key: format!("{zone_bytes:02x?}"),
-                    reason: e.to_string(),
-                }
-            })?);
+            records.zone_value =
+                Some(
+                    ZoneValue::from_bytes(&value).map_err(|e| crowdb_kv_client::Error::SysdataDecode {
+                        key: format!("{zone_bytes:02x?}"),
+                        reason: e,
+                    })?,
+                );
         }
 
         // 2. BusyBlock records
@@ -295,8 +261,12 @@ impl DdbKvClient {
             .await?;
         for (key, value) in &busy_scan.items {
             if let Ok(bk) = BusyBlockKey::from_bytes(key) {
-                if let Ok(bv) = bincode::deserialize::<BusyBlockValue>(value) {
-                    records.busy.push(BusyRecord { key: bk, value: bv });
+                if let Ok(bv) = decode_busy_block_value(value) {
+                    records.busy.push(BusyRecord {
+                        key: bk,
+                        value: bv,
+                        commit_slot: 0,
+                    });
                 }
             }
         }
@@ -320,13 +290,59 @@ impl DdbKvClient {
             .await?;
         for (key, value) in &free_scan.items {
             if let Ok(fk) = FreeBlockKey::from_bytes(key) {
-                if let Ok(fv) = bincode::deserialize::<FreeBlockValue>(value) {
-                    records.free.push(FreeRecord { key: fk, value: fv });
+                if let Ok(fv) = decode_free_block_value(value) {
+                    records.free.push(FreeRecord {
+                        key: fk,
+                        value: fv,
+                        commit_slot: 0,
+                    });
                 }
             }
         }
 
         Ok(records)
+    }
+
+    /// Read busy and free records from one immutable commit-slot boundary.
+    pub async fn read_zone_records_bounded(
+        &self,
+        bind: Bind,
+        disk_id: &DiskId,
+        zone_index: u32,
+    ) -> Result<(ZoneRecords, u64)> {
+        let (store_id, group_id) = bind;
+        let mut records = ZoneRecords::default();
+        let free_prefix = FreeBlockKey::prefix_for_zone(disk_id, zone_index);
+        let free_scan = self
+            .kv
+            .scan_bounded(store_id, group_id, &free_prefix, &[], &[], 0, false, None)
+            .await?;
+        let cutoff = free_scan.scan_cutoff;
+        for ((key, value), commit_slot) in free_scan.items.iter().zip(&free_scan.commit_slots) {
+            if let (Ok(key), Ok(value)) = (FreeBlockKey::from_bytes(key), decode_free_block_value(value)) {
+                records.free.push(FreeRecord {
+                    key,
+                    value,
+                    commit_slot: *commit_slot,
+                });
+            }
+        }
+
+        let busy_prefix = BusyBlockKey::prefix_for_zone(disk_id, zone_index);
+        let busy_scan = self
+            .kv
+            .scan_bounded_at(store_id, group_id, &busy_prefix, &[], &[], 0, false, None, cutoff)
+            .await?;
+        for ((key, value), commit_slot) in busy_scan.items.iter().zip(&busy_scan.commit_slots) {
+            if let (Ok(key), Ok(value)) = (BusyBlockKey::from_bytes(key), decode_busy_block_value(value)) {
+                records.busy.push(BusyRecord {
+                    key,
+                    value,
+                    commit_slot: *commit_slot,
+                });
+            }
+        }
+        Ok((records, cutoff))
     }
 
     /// Delete a batch of free records by key (R73 compaction).
@@ -351,6 +367,7 @@ impl DdbKvClient {
         disk_id: &DiskId,
         zone_index: u32,
         zone_value: &ZoneValue,
+        busy_keys: &[Vec<u8>],
         free_keys: &[Vec<u8>],
     ) -> Result<()> {
         let zone_key = ZoneKey {
@@ -358,11 +375,16 @@ impl DdbKvClient {
             zone_index,
         };
         let zone_bytes = bincode::serialize(zone_value).expect("serialize ZoneValue");
-        let mut ops = Vec::with_capacity(1 + free_keys.len());
+        let mut ops = Vec::with_capacity(1 + busy_keys.len() + free_keys.len());
         ops.push(BatchOp::Put {
             key: Bytes::from(zone_key.to_bytes()),
             value: Bytes::from(zone_bytes),
         });
+        for k in busy_keys {
+            ops.push(BatchOp::Delete {
+                key: Bytes::from(k.clone()),
+            });
+        }
         for k in free_keys {
             ops.push(BatchOp::Delete {
                 key: Bytes::from(k.clone()),

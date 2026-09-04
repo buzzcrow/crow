@@ -1264,6 +1264,7 @@ fn parse_segments<'a, V: IntoIterator<Item = &'a FBSegment> + Clone>(
             unit_offset: s.unit_offset(),
             zone_index: s.zone_index(),
             unit_count: s.unit_count(),
+            allocation_ts: s.allocation_ts(),
         });
     }
     Some(out)
@@ -1367,6 +1368,7 @@ fn build_allocate_response(
                 &FBInt128::new(disk_id.high, disk_id.low),
                 &FBInt128::new(owner.high, owner.low),
                 s.unit_offset,
+                s.allocation_ts,
                 s.zone_index,
                 s.unit_count,
             )

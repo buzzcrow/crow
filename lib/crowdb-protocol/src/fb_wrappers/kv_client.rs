@@ -117,6 +117,9 @@ impl<'a> FBKvScanResponseRef<'a> {
     pub fn timed_out(&self) -> bool {
         self.root.is_some_and(|r| r.timed_out())
     }
+    pub fn scan_cutoff(&self) -> u64 {
+        self.root.map_or(0, |r| r.scan_cutoff())
+    }
 }
 
 // ── FBKvJournalScanResponseRef ──────────────────────────────────

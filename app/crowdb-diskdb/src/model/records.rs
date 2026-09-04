@@ -14,6 +14,7 @@ use crowdb_protocol::key::{BusyBlockKey, FreeBlockKey};
 pub struct BusyRecord {
     pub key: BusyBlockKey,
     pub value: BusyBlockValue,
+    pub commit_slot: u64,
 }
 
 /// A free-block record read from the data group.
@@ -21,6 +22,7 @@ pub struct BusyRecord {
 pub struct FreeRecord {
     pub key: FreeBlockKey,
     pub value: FreeBlockValue,
+    pub commit_slot: u64,
 }
 
 /// All records for one zone (used by R73 recovery).

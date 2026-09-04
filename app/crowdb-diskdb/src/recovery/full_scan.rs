@@ -10,6 +10,7 @@
 
 use crowdb_protocol::common::DiskId;
 use crowdb_protocol::DiskGroupId;
+use std::collections::HashMap;
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::records::ZoneRecords;
@@ -36,6 +37,23 @@ pub async fn rebuild_zone_bitmap_full_scan(
         #[allow(clippy::cast_possible_truncation)]
         let offset = busy.key.unit_offset as u32;
         let _ = zone.usage_bits.range_set(offset, busy.value.unit_count);
+    }
+    let busy_by_offset: HashMap<u64, _> = records
+        .busy
+        .iter()
+        .map(|record| (record.key.unit_offset, record))
+        .collect();
+    for free in &records.free {
+        if busy_by_offset.get(&free.key.unit_offset).is_some_and(|busy| {
+            free.key.allocation_ts == free.value.pre_allocation_ts
+                && busy.value.allocation_ts == free.value.pre_allocation_ts
+                && busy.value.unit_count == free.value.unit_count
+                && busy.value.owner_chunk == free.value.previous_owner
+        }) {
+            #[allow(clippy::cast_possible_truncation)]
+            let offset = free.key.unit_offset as u32;
+            let _ = zone.usage_bits.range_clear(offset, free.value.unit_count);
+        }
     }
     // `used_count` = popcount of the rebuilt bitmap (may differ from
     // the sum of `unit_count`s if there were overlapping records —

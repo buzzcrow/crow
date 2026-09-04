@@ -13,6 +13,7 @@
 //! atomic `batch_write` (I6) — they succeed or fail together. No window
 //! where the snapshot is durable but the free records survive.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -52,6 +53,7 @@ impl Drop for CompactingGuard<'_> {
 /// If diskdb crashes during the batch, the KV group's paxos
 /// consensus ensures the batch is atomic — either all ops are
 /// applied or none are.
+#[allow(clippy::too_many_lines)]
 pub async fn compact_zone(
     kv: &DdbKvClient,
     bind: Bind,
@@ -79,10 +81,22 @@ pub async fn compact_zone(
 
     // Step 1: scan free records for the zone (no zone lock — KV read).
     let scan_start = std::time::Instant::now();
-    let records = kv.read_zone_records(bind, &disk_id, zone_idx).await?;
+    let (records, scan_cutoff) = kv.read_zone_records_bounded(bind, &disk_id, zone_idx).await?;
     metrics
         .compaction_scan_free_latency
         .observe(scan_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+    let previous_cutoff = zone.compact_slot.load(Ordering::Acquire);
+    if scan_cutoff <= previous_cutoff {
+        tracing::debug!(
+            disk_id = ?disk_id,
+            zone_index = zone_idx,
+            scan_cutoff,
+            previous_cutoff,
+            "compaction deferred until contiguous applied advances"
+        );
+        return Ok(());
+    }
+
     let free_keys: Vec<Vec<u8>> = records.free.iter().map(|r| r.key.to_bytes()).collect();
     #[allow(clippy::cast_possible_truncation)]
     let free_count = free_keys.len() as u32;
@@ -100,37 +114,48 @@ pub async fn compact_zone(
         return Ok(());
     }
 
-    // Step 2: in-memory compaction — partition by watermark,
-    // range_clear only new records, advance compact_ts (zone lock
-    // held only for the bitmap mutation, I9).
+    let busy_by_offset: HashMap<u64, _> = records
+        .busy
+        .iter()
+        .map(|record| (record.key.unit_offset, record))
+        .collect();
+    let matching_frees: Vec<_> = records
+        .free
+        .iter()
+        .filter(|free| {
+            free.commit_slot > previous_cutoff
+                && free.commit_slot <= scan_cutoff
+                && busy_by_offset.get(&free.key.unit_offset).is_some_and(|busy| {
+                    free.key.allocation_ts == free.value.pre_allocation_ts
+                        && busy.value.allocation_ts == free.value.pre_allocation_ts
+                        && busy.value.unit_count == free.value.unit_count
+                        && busy.value.owner_chunk == free.value.previous_owner
+                })
+        })
+        .cloned()
+        .collect();
+    let busy_keys: Vec<Vec<u8>> = matching_frees
+        .iter()
+        .filter_map(|free| busy_by_offset.get(&free.key.unit_offset))
+        .map(|busy| busy.key.to_bytes())
+        .collect();
+
+    // Step 2: clear only free facts matching the current busy incarnation.
     let merge_start = std::time::Instant::now();
-    let result = zone.compact_zone_inner(&records.free);
+    let result = zone.compact_zone_inner(&matching_frees);
     metrics
         .compaction_merge_bitmap_latency
         .observe(merge_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
 
-    // Step 3: determine snapshot_slot = current applied frontier.
-    let snapshot_slot = match kv.get_applied_slot(bind).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                disk_id = ?disk_id,
-                zone_index = zone_idx,
-                error = %e,
-                "get_applied_slot failed; anchoring at slot 0"
-            );
-            0
-        }
-    };
-
-    // Step 4: build the new ZoneValue (with CRC + advanced compact_ts).
-    zone.snapshot_slot.store(snapshot_slot, Ordering::Release);
+    // Step 3: the bitmap and deletions cover exactly the bounded scan cutoff.
+    zone.snapshot_slot.store(scan_cutoff, Ordering::Release);
+    zone.compact_slot.store(scan_cutoff, Ordering::Release);
     let zv = zone.to_zone_value();
 
     // Step 5: atomic batch_write — Put ZoneValue + Delete all free
     // records (I6). They succeed or fail together.
     let persist_start = std::time::Instant::now();
-    kv.compact_zone_batch(bind, &disk_id, zone_idx, &zv, &free_keys)
+    kv.compact_zone_batch(bind, &disk_id, zone_idx, &zv, &busy_keys, &free_keys)
         .await?;
     metrics
         .compaction_kv_persist_latency
@@ -162,7 +187,7 @@ pub async fn compact_zone(
         new_free_count = result.new_free_count,
         stale_free_count = result.stale_free_count,
         compact_ts = result.new_compact_ts,
-        snapshot_slot,
+        snapshot_slot = scan_cutoff,
         "compaction completed"
     );
 

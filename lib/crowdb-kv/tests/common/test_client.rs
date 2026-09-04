@@ -187,6 +187,8 @@ impl TestKvClient {
                 req.keys_only,
                 req.count_only,
                 req.deadline_ms,
+                req.bounded,
+                req.scan_cutoff,
             )
             .await
             .map_err(status)?;

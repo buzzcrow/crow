@@ -24,7 +24,7 @@ fn elapsed_ns(start: std::time::Instant) -> u64 {
     start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
 }
 
-/// Errors from the free path when `validate_owner_on_free` is enabled.
+/// Errors from the free path.
 #[derive(Debug)]
 pub enum FreeError {
     /// KV client error during validation or persist.
@@ -180,6 +180,7 @@ pub async fn allocate_block(
         unit_size,
         state: BlockState::Ok as i32,
         commit_state: CommitState::Tentative as i32,
+        allocation_ts: dg.next_allocation_ts(),
     };
     let bind = dg.bind();
     if let Err(e) = kv
@@ -198,6 +199,7 @@ pub async fn allocate_block(
         unit_offset: range.unit_offset,
         unit_count: range.unit_count,
         owner_chunk: Some(*owner_chunk),
+        allocation_ts: value.allocation_ts,
     })
 }
 
@@ -275,6 +277,7 @@ pub async fn allocate_blocks(
                     unit_size,
                     state: BlockState::Ok as i32,
                     commit_state: CommitState::Tentative as i32,
+                    allocation_ts: dg.next_allocation_ts(),
                 },
             )
         })
@@ -297,12 +300,14 @@ pub async fn allocate_blocks(
 
     let segments: Vec<Segment> = claims
         .iter()
-        .map(|(disk, zone, range)| Segment {
+        .zip(&records)
+        .map(|((disk, zone, range), (_, _, _, value))| Segment {
             disk_id: Some(disk.disk_id),
             zone_index: zone.zone_index,
             unit_offset: range.unit_offset,
             unit_count: range.unit_count,
             owner_chunk: Some(*owner_chunk),
+            allocation_ts: value.allocation_ts,
         })
         .collect();
     Ok(segments)
@@ -312,20 +317,14 @@ pub async fn allocate_blocks(
 
 /// Free a single block. v1: synchronous (no batch, no timer).
 ///
-/// The free path is **persist-only**: one `batch_write` (Delete
-/// `BusyBlockKey` + Put `FreeBlockValue`) makes the block free on
-/// disk. The in-memory bitmap is **not** touched — the bit stays set,
+/// The free path is **persist-only**: one immutable allocation-qualified
+/// `FreeBlockValue` records the request. The in-memory bitmap is not touched,
 /// `used_count` is not decremented (I1). Compaction is the sole
 /// bit-clearer for freed blocks (I3); `rollback_allocate` is the
 /// allocate-only bitmap clear and is never used here.
 ///
-/// Phase 0 (optional): when `validate_owner_on_free` is `true`, read
-/// the `BusyBlockValue` from the data group and validate `owner_chunk`
-/// before persisting. Rejects on `NotBusy` or `OwnerMismatch`. When
-/// `false` (default), no KV read — `owner_chunk` comes from the
-/// `Segment`.
-/// Phase 1: persist `FreeBlockValue` (delete `BusyBlockKey` + put
-/// `FreeBlockKey` in one `batch_write`) — durable free first.
+/// No KV read is required. Compaction validates the segment's owner and
+/// allocation timestamp against the current busy incarnation.
 /// Post-persist: increment `uncompacted_free_record_count` on the zone
 /// so compaction knows there is work to do.
 ///
@@ -336,14 +335,12 @@ pub async fn allocate_blocks(
 /// the periodic compaction cadence still reclaims the block.
 ///
 /// # Errors
-/// Returns `FreeError::NotBusy` / `FreeError::OwnerMismatch` on
-/// validation failure (no persist). Returns `FreeError::Kv` if the
-/// persist fails — the block is still busy, the caller can retry.
+/// Returns `FreeError::Kv` if the persist fails; retrying is idempotent.
 pub async fn free_block(
     dg: &Arc<DdbDiskGroup>,
     segment: &Segment,
     kv: &DdbKvClient,
-    validate_owner_on_free: bool,
+    _validate_owner_on_free: bool,
 ) -> std::result::Result<(), FreeError> {
     let disk_id = segment.disk_id.ok_or_else(|| {
         FreeError::Kv(crowdb_kv_client::Error::SysdataDecode {
@@ -353,38 +350,12 @@ pub async fn free_block(
     })?;
     let bind: Bind = dg.bind();
 
-    // Phase 0: validate ownership (optional, one paxos round-trip).
-    if validate_owner_on_free {
-        let busy = kv
-            .get_busy(bind, &disk_id, segment.zone_index, segment.unit_offset)
-            .await?;
-        match busy {
-            None => {
-                return Err(FreeError::NotBusy {
-                    disk_id,
-                    zone_index: segment.zone_index,
-                    unit_offset: segment.unit_offset,
-                });
-            }
-            Some(bv) => {
-                if bv.owner_chunk != segment.owner_chunk {
-                    return Err(FreeError::OwnerMismatch {
-                        disk_id,
-                        zone_index: segment.zone_index,
-                        unit_offset: segment.unit_offset,
-                        expected: segment.owner_chunk.unwrap_or_default(),
-                        actual: bv.owner_chunk.unwrap_or_default(),
-                    });
-                }
-            }
-        }
-    }
-
-    // Phase 1: persist FreeBlockValue (durable free first).
+    // Persist one immutable incarnation-qualified free fact.
     let value = FreeBlockValue {
         unit_count: segment.unit_count,
         previous_owner: segment.owner_chunk,
-        freed_ts: dg.next_freed_ts(),
+        pre_allocation_ts: segment.allocation_ts,
+        free_ts: crate::model::disk_group::now_nanos(),
     };
     kv.persist_free(bind, &disk_id, segment.zone_index, segment.unit_offset, &value)
         .await
@@ -423,63 +394,22 @@ pub async fn free_block(
 /// Free multiple blocks (one `batch_write` per data group).
 ///
 /// Persist-only free (same contract as `free_block`): one `batch_write`
-/// deletes all `BusyBlockKey`s and puts all `FreeBlockValue`s. The
-/// in-memory bitmaps are **not** touched — bits stay set, `used_count`
+/// writes allocation-qualified `FreeBlockValue`s. The in-memory bitmaps are
+/// not touched — bits stay set, `used_count`
 /// is not decremented (I1); compaction is the sole bit-clearer (I3).
-///
-/// When `validate_owner_on_free` is `true`, all segments are validated
-/// first (all-or-nothing) — if any segment fails validation, no
-/// persist happens.
 ///
 /// If the persist fails, no in-memory state changed — all blocks are
 /// still busy and the caller can retry safely.
 ///
 /// # Errors
-/// Returns `FreeError::NotBusy` / `FreeError::OwnerMismatch` on
-/// validation failure (no persist). Returns `FreeError::Kv` if the
-/// persist fails — all blocks are still busy, the caller can retry.
+/// Returns `FreeError::Kv` if the persist fails; retrying is idempotent.
 pub async fn free_blocks(
     dg: &Arc<DdbDiskGroup>,
     segments: &[Segment],
     kv: &DdbKvClient,
-    validate_owner_on_free: bool,
+    _validate_owner_on_free: bool,
 ) -> std::result::Result<(), FreeError> {
     let bind: Bind = dg.bind();
-
-    // Phase 0: validate ownership for all segments (all-or-nothing).
-    if validate_owner_on_free {
-        for seg in segments {
-            let disk_id = seg.disk_id.ok_or_else(|| {
-                FreeError::Kv(crowdb_kv_client::Error::SysdataDecode {
-                    key: "segment.disk_id".to_string(),
-                    reason: "missing disk_id in Segment".to_string(),
-                })
-            })?;
-            let busy = kv
-                .get_busy(bind, &disk_id, seg.zone_index, seg.unit_offset)
-                .await?;
-            match busy {
-                None => {
-                    return Err(FreeError::NotBusy {
-                        disk_id,
-                        zone_index: seg.zone_index,
-                        unit_offset: seg.unit_offset,
-                    });
-                }
-                Some(bv) => {
-                    if bv.owner_chunk != seg.owner_chunk {
-                        return Err(FreeError::OwnerMismatch {
-                            disk_id,
-                            zone_index: seg.zone_index,
-                            unit_offset: seg.unit_offset,
-                            expected: seg.owner_chunk.unwrap_or_default(),
-                            actual: bv.owner_chunk.unwrap_or_default(),
-                        });
-                    }
-                }
-            }
-        }
-    }
 
     // Phase 1: persist all in one batch_write (durable free first).
     let records: Vec<(DiskId, u32, u64, FreeBlockValue)> = segments
@@ -493,7 +423,8 @@ pub async fn free_blocks(
                     FreeBlockValue {
                         unit_count: seg.unit_count,
                         previous_owner: seg.owner_chunk,
-                        freed_ts: dg.next_freed_ts(),
+                        pre_allocation_ts: seg.allocation_ts,
+                        free_ts: crate::model::disk_group::now_nanos(),
                     },
                 )
             })

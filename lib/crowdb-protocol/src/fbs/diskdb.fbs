@@ -84,6 +84,7 @@ struct FBSegment {
     disk_id:crowdb.rpc.proto.FBInt128;
     owner_chunk:crowdb.rpc.proto.FBInt128;
     unit_offset:uint64;
+    allocation_ts:uint64;
     zone_index:uint32;
     unit_count:uint32;
 }

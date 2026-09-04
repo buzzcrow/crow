@@ -39,11 +39,8 @@ pub struct DdbDiskGroup {
     allocating_disks: ArcSwap<AllocateDiskContext>,
     /// Round-robin cursor over `allocating_disks`.
     pos_v_disk_ctx: AtomicU64,
-    /// Per-disk-group monotonic timestamp source for `FreeBlockValue.freed_ts`.
-    /// Advanced by `max(now(), last + 1)` on each free. Initialized to
-    /// `max(now(), max(freed_ts of all scanned free records) + 1)` after
-    /// recovery (§8 Monotonic timestamp source).
-    free_ts_source: AtomicU64,
+    /// Per-disk-group monotonic allocation-incarnation source.
+    allocation_ts_source: AtomicU64,
 }
 
 impl DdbDiskGroup {
@@ -60,7 +57,7 @@ impl DdbDiskGroup {
             disk_index: DashMap::new(),
             allocating_disks: ArcSwap::from_pointee(Vec::new()),
             pos_v_disk_ctx: AtomicU64::new(0),
-            free_ts_source: AtomicU64::new(now_nanos()),
+            allocation_ts_source: AtomicU64::new(now_nanos()),
         }
     }
 
@@ -92,18 +89,17 @@ impl DdbDiskGroup {
         self.allocating_disks.store(Arc::new(new_ctx));
     }
 
-    /// Generate the next monotonic `freed_ts` for a `FreeBlockValue`.
+    /// Generate the next monotonic allocation incarnation.
     /// Advances the source by `max(now(), last + 1)` to guarantee
     /// monotonicity even if the wall clock jumps backwards.
-    pub fn next_freed_ts(&self) -> u64 {
+    pub fn next_allocation_ts(&self) -> u64 {
         let now = now_nanos();
         loop {
-            let prev = self.free_ts_source.load(Ordering::Acquire);
-            // Saturating add keeps monotonicity at u64::MAX instead of
-            // wrapping to 0 (which would break the compact_ts watermark).
+            let prev = self.allocation_ts_source.load(Ordering::Acquire);
+            // Saturating add avoids wrapping to a reusable incarnation.
             let next = now.max(prev.saturating_add(1));
             if self
-                .free_ts_source
+                .allocation_ts_source
                 .compare_exchange(prev, next, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
@@ -112,13 +108,11 @@ impl DdbDiskGroup {
         }
     }
 
-    /// Initialize the timestamp source after zone load to
-    /// `max(now(), max_freed_ts + 1)`. Called once after all zones in
-    /// the disk-group are loaded.
-    pub fn init_free_ts_source_after_load(&self, max_freed_ts: u64) {
+    /// Initialize the incarnation source above every recovered incarnation.
+    pub fn init_allocation_ts_source_after_load(&self, max_allocation_ts: u64) {
         let now = now_nanos();
-        let target = now.max(max_freed_ts + 1);
-        self.free_ts_source.store(target, Ordering::Release);
+        let target = now.max(max_allocation_ts.saturating_add(1));
+        self.allocation_ts_source.fetch_max(target, Ordering::AcqRel);
     }
 
     /// Whether this disk-group can accept allocations.
@@ -365,9 +359,8 @@ pub enum AllocError {
     Persistence,
 }
 
-/// Current wall-clock time in nanoseconds (monotonic source for
-/// `FreeBlockValue.freed_ts`).
-fn now_nanos() -> u64 {
+/// Current wall-clock time in nanoseconds.
+pub(crate) fn now_nanos() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -109,6 +109,7 @@ pub struct ZoneValue {
     pub snapshot_slot: u64,
     pub crc32: u32,
     pub compact_ts: u64,
+    pub compact_slot: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -135,6 +136,7 @@ pub struct Segment {
     pub unit_offset: u64,
     pub unit_count: u32,
     pub owner_chunk: Option<ChunkId>,
+    pub allocation_ts: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -144,13 +146,15 @@ pub struct BusyBlockValue {
     pub unit_size: u32,
     pub state: i32,
     pub commit_state: i32,
+    pub allocation_ts: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct FreeBlockValue {
     pub unit_count: u32,
     pub previous_owner: Option<ChunkId>,
-    pub freed_ts: u64,
+    pub pre_allocation_ts: u64,
+    pub free_ts: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]

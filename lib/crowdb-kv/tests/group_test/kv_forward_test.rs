@@ -166,6 +166,8 @@ async fn follower_scan_forwards_to_leader_after_local_clear() {
             keys_only: false,
             count_only: false,
             deadline_ms: 0,
+            bounded: false,
+            scan_cutoff: 0,
         })
         .await
         .expect("kv scan on follower")

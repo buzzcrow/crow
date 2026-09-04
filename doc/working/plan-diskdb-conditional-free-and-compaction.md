@@ -73,6 +73,29 @@ fencing, R132 slot-ordered compaction, then R130 verification and cleanup.
   accounting before accepting benchmark results.
 - [ ] Add the deterministic mixed-selection/accounting unit test and complete
   the three unchecked R130 benchmark checklist entries.
+
+## Open Issues for Review
+
+- The existing diskdb recovery integration harness can expose live records
+  while reporting `contiguous_applied = 0` and per-record commit slot zero.
+  Bounded compaction now defers without mutation or deletion in that state.
+  Decide whether the harness should explicitly close Paxos gaps so it also
+  exercises a successful positive-cutoff compaction pass.
+- The bounded API reads current versions and filters versions newer than its
+  cutoff; it does not reconstruct overwritten historical values. Diskdb makes
+  this safe by compacting only non-active zones, where Busy keys cannot be
+  overwritten by allocation, while Free keys are incarnation-qualified and
+  immutable. Keep this restriction explicit if the API gains other callers.
+- `validate_owner_on_free` remains in configuration and RPC plumbing for wire
+  compatibility but no longer causes a read-before-free check. Decide whether
+  to deprecate it for one release or remove it in the next protocol break.
+- Legacy Busy and Free values decode as allocation incarnation zero. Recovery
+  can reconcile a legacy zero/zero pair, but rollout should still require a
+  full recovery scan before a legacy zone becomes allocatable.
+- The repository-wide `tree-lint` gate currently fails before analyzing these
+  Rust-only changes because the pixi clang-tidy environment cannot find
+  `stddef.h`, `spdlog`, `isa-l`, and `liburing` headers. No C++ files changed;
+  repair the lint environment separately before using this gate for release.
 - [ ] Trace R130 public behavior to client E2E coverage and either add missing
   public-path cases or explicitly narrow acceptance where a behavior is
   intentionally server-internal.

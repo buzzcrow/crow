@@ -154,11 +154,14 @@ table FBKvScanRequest {
     count_only:bool;
     deadline_ms:uint64;
     forwarded:bool;
+    bounded:bool;
+    scan_cutoff:uint64;
 }
 
 table FBKvScanItem {
     key:[ubyte];
     value:[ubyte];
+    commit_slot:uint64;
 }
 
 table FBKvScanResponse {
@@ -176,6 +179,7 @@ table FBKvScanResponse {
     not_leader_hint:string;
     count:uint64;
     timed_out:bool;
+    scan_cutoff:uint64;
 }
 
 // ── JournalScan ─────────────────────────────────────────────────

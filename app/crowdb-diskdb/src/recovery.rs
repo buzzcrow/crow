@@ -238,7 +238,7 @@ impl ZoneLoader {
         // greater than any pre-existing free record — critical for
         // ownership transfer where the prior owner's clock may be
         // ahead of ours.
-        dg.init_free_ts_source_after_load(max_freed_ts_in_dg);
+        dg.init_allocation_ts_source_after_load(max_freed_ts_in_dg);
 
         Ok(dg)
     }

@@ -621,6 +621,7 @@ where
             unit_offset: s.unit_offset(),
             zone_index: s.zone_index(),
             unit_count: s.unit_count(),
+            allocation_ts: s.allocation_ts(),
         })
         .collect()
 }
@@ -687,6 +688,7 @@ fn build_strip_body_offset(
                         &FBInt128::new(disk_id.high, disk_id.low),
                         &FBInt128::new(owner.high, owner.low),
                         s.unit_offset,
+                        s.allocation_ts,
                         s.zone_index,
                         s.unit_count,
                     )
@@ -712,6 +714,7 @@ fn build_strip_body_offset(
                         &FBInt128::new(disk_id.high, disk_id.low),
                         &FBInt128::new(owner.high, owner.low),
                         s.unit_offset,
+                        s.allocation_ts,
                         s.zone_index,
                         s.unit_count,
                     )

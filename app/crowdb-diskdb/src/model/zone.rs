@@ -36,11 +36,9 @@ pub struct AllocatedRange {
 pub struct CompactResult {
     /// The new `compact_ts` (monotonically advanced).
     pub new_compact_ts: u64,
-    /// Count of new free records (`freed_ts > old compact_ts`) that
-    /// were `range_clear`ed.
+    /// Count of incarnation-matched free records that were cleared.
     pub new_free_count: u32,
-    /// Count of stale free records (`freed_ts <= old compact_ts`) that
-    /// were dropped without touching the bitmap.
+    /// Compatibility counter; incarnation filtering happens upstream.
     pub stale_free_count: u32,
 }
 
@@ -64,10 +62,10 @@ pub struct DdbZone {
     pub used_count: AtomicU32,
     /// Last compacted snapshot slot (R73).
     pub snapshot_slot: AtomicU64,
-    /// Compaction watermark — max `freed_ts` of all free records merged
-    /// into the bitmap. Free records with `freed_ts <= compact_ts` are
-    /// stale (already merged); `freed_ts > compact_ts` are new.
+    /// Diagnostic maximum free timestamp observed by compaction.
     pub compact_ts: AtomicU64,
+    /// Highest KV commit slot completely examined by compaction.
+    pub compact_slot: AtomicU64,
     /// `true` when the zone has been compacted and its bitmap is
     /// accurate (eligible for rotation into the active set). Set by
     /// compaction and recovery; cleared when published into the active
@@ -107,6 +105,7 @@ impl DdbZone {
             used_count: AtomicU32::new(0),
             snapshot_slot: AtomicU64::new(0),
             compact_ts: AtomicU64::new(0),
+            compact_slot: AtomicU64::new(0),
             compacted_ready: AtomicBool::new(false),
             zone_lock: RwLock::new(()),
             uncompacted_free_record_count: AtomicU32::new(0),
@@ -414,10 +413,9 @@ impl DdbZone {
         self.uncompacted_free_record_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// In-memory compaction step: partition free records by the
-    /// `compact_ts` watermark, `range_clear` only the **new** free
-    /// records (stale ones are already merged), recompute `used_count`,
-    /// and advance `compact_ts` monotonically. The zone lock is held
+    /// Clear free records already matched to their busy incarnation,
+    /// recompute `used_count`, and advance the diagnostic free-time
+    /// watermark monotonically. The zone lock is held
     /// only for the in-memory bitmap mutation (I9).
     ///
     /// The caller reads the free records from KV (no lock), calls this
@@ -425,28 +423,11 @@ impl DdbZone {
     /// records in one atomic `batch_write` (I6). Returns the partition
     /// counts so the caller knows how many records it will delete.
     pub fn compact_zone_inner(&self, free_records: &[crate::model::records::FreeRecord]) -> CompactResult {
-        // Partition by watermark. Read without the lock — the caller
-        // scanned the free records unlocked (I9); the value is
-        // re-read under the lock below.
-        let partition_ts = self.compact_ts.load(Ordering::Acquire);
-
-        let mut new_records: Vec<&crate::model::records::FreeRecord> = Vec::new();
-        let mut stale_count: u32 = 0;
-        for free in free_records {
-            if free.value.freed_ts <= partition_ts {
-                stale_count += 1;
-            } else {
-                new_records.push(free);
-            }
-        }
-
         // Acquire zone lock for the in-memory bitmap mutation.
         let _guard = self.zone_lock.write().unwrap();
 
-        // range_clear only the new free records (stale ones are already
-        // merged — clearing them again could corrupt a re-allocated
-        // block, I7).
-        for free in &new_records {
+        // The caller has matched these facts against current busy incarnations.
+        for free in free_records {
             #[allow(clippy::cast_possible_truncation)]
             let offset = free.key.unit_offset as u32;
             let _ = self.usage_bits.range_clear(offset, free.value.unit_count);
@@ -457,20 +438,21 @@ impl DdbZone {
         self.used_count
             .store(u32::try_from(popcount).unwrap_or(u32::MAX), Ordering::Release);
 
-        // Advance compact_ts monotonically: max(current, max(new
-        // freed_ts)). The partition read was unlocked and may be stale
-        // if another compaction ran in between — re-read under the
-        // lock so compact_ts never regresses (watermark invariant, I7).
-        let current_compact_ts = self.compact_ts.load(Ordering::Acquire);
-        let max_new_freed_ts = new_records.iter().map(|f| f.value.freed_ts).max().unwrap_or(0);
-        let new_compact_ts = current_compact_ts.max(max_new_freed_ts);
-        self.compact_ts.store(new_compact_ts, Ordering::Release);
+        let max_free_ts = free_records
+            .iter()
+            .map(|record| record.value.free_ts)
+            .max()
+            .unwrap_or(0);
+        let current_compact_ts = self
+            .compact_ts
+            .fetch_max(max_free_ts, Ordering::AcqRel)
+            .max(max_free_ts);
 
         #[allow(clippy::cast_possible_truncation)]
         CompactResult {
-            new_compact_ts,
-            new_free_count: new_records.len() as u32,
-            stale_free_count: stale_count,
+            new_compact_ts: current_compact_ts,
+            new_free_count: free_records.len() as u32,
+            stale_free_count: 0,
         }
     }
 
@@ -511,6 +493,7 @@ impl DdbZone {
             snapshot_slot: self.snapshot_slot.load(Ordering::Acquire),
             crc32: 0,
             compact_ts: self.compact_ts.load(Ordering::Acquire),
+            compact_slot: self.compact_slot.load(Ordering::Acquire),
         };
         zv.compute_checksum();
         zv
@@ -546,6 +529,7 @@ impl DdbZone {
             used_count: AtomicU32::new(u32::try_from(used_count).unwrap_or(u32::MAX)),
             snapshot_slot: AtomicU64::new(value.snapshot_slot),
             compact_ts: AtomicU64::new(value.compact_ts),
+            compact_slot: AtomicU64::new(value.compact_slot),
             compacted_ready: AtomicBool::new(true),
             zone_lock: RwLock::new(()),
             uncompacted_free_record_count: AtomicU32::new(0),
@@ -664,30 +648,29 @@ mod accessor_tests {
                 disk_id: DiskId { high: 0, low: 1 },
                 zone_index: 0,
                 unit_offset: offset,
+                allocation_ts: freed_ts,
             },
             value: FreeBlockValue {
                 unit_count: count,
                 previous_owner: None,
-                freed_ts,
+                pre_allocation_ts: freed_ts,
+                free_ts: freed_ts,
             },
+            commit_slot: freed_ts,
         }
     }
 
     #[test]
-    fn compact_zone_inner_stale_records_dropped() {
-        // Free records with freed_ts <= compact_ts are stale (already
-        // merged) — their bits are NOT range_cleared (I7).
+    fn compact_zone_inner_matched_record_is_cleared() {
         let z = make_zone(128);
         let r = z.allocate(4, 100).expect("alloc 4");
         // Set compact_ts to 100 — a free record with freed_ts=50 is stale.
         z.compact_ts.store(100, Ordering::Release);
         let free_records = vec![make_free_record(r.unit_offset, 4, 50)];
         let result = z.compact_zone_inner(&free_records);
-        assert_eq!(result.stale_free_count, 1);
-        assert_eq!(result.new_free_count, 0);
-        // Bitmap NOT cleared — bits still set.
-        assert_eq!(z.used_count.load(Ordering::Acquire), 4);
-        // compact_ts unchanged (no new records).
+        assert_eq!(result.stale_free_count, 0);
+        assert_eq!(result.new_free_count, 1);
+        assert_eq!(z.used_count.load(Ordering::Acquire), 0);
         assert_eq!(z.compact_ts.load(Ordering::Acquire), 100);
     }
 
@@ -727,16 +710,15 @@ mod accessor_tests {
         let r1 = z.allocate(4, 100).expect("alloc 4 at 0");
         let r2 = z.allocate(4, 100).expect("alloc 4 at 4");
         z.compact_ts.store(50, Ordering::Release);
-        // r1's free is stale (freed_ts=30), r2's free is new (freed_ts=100).
+        // The caller has incarnation-matched both records.
         let free_records = vec![
             make_free_record(r1.unit_offset, 4, 30),
             make_free_record(r2.unit_offset, 4, 100),
         ];
         let result = z.compact_zone_inner(&free_records);
-        assert_eq!(result.stale_free_count, 1);
-        assert_eq!(result.new_free_count, 1);
-        // Only r2's bits cleared — used_count = 4 (r1 still set).
-        assert_eq!(z.used_count.load(Ordering::Acquire), 4);
+        assert_eq!(result.stale_free_count, 0);
+        assert_eq!(result.new_free_count, 2);
+        assert_eq!(z.used_count.load(Ordering::Acquire), 0);
         // compact_ts = max(50, 100) = 100.
         assert_eq!(z.compact_ts.load(Ordering::Acquire), 100);
     }

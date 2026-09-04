@@ -128,6 +128,7 @@ impl KvStore for PxKvStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     async fn kv_scan(
         &self,
         group_id: u64,
@@ -140,6 +141,8 @@ impl KvStore for PxKvStore {
         keys_only: bool,
         count_only: bool,
         deadline_ms: u64,
+        bounded: bool,
+        requested_scan_cutoff: u64,
         request_id: u64,
         request_create_ms: u64,
     ) -> crate::rpc::KvScanResponse {
@@ -164,6 +167,15 @@ impl KvStore for PxKvStore {
                 return scan_err(msg, String::new(), request_id, request_create_ms);
             }
         };
+        let scan_cutoff = if bounded {
+            if requested_scan_cutoff == 0 {
+                read_slot
+            } else {
+                requested_scan_cutoff
+            }
+        } else {
+            0
+        };
 
         // Ordered prefix scan from the engine. The engine returns the
         // `limit` smallest matching live keys (no tombstones) in key order
@@ -176,7 +188,12 @@ impl KvStore for PxKvStore {
         // Corruption) propagate as scan_err instead of being silently
         // swallowed as an empty ok result.
         let engine_keys_only = keys_only || count_only;
-        let engine_byte_budget = if count_only { 0 } else { self.scan_byte_budget };
+        let engine_byte_budget = if count_only || bounded {
+            0
+        } else {
+            self.scan_byte_budget
+        };
+        let engine_limit = if bounded { 0 } else { limit as usize };
         let (scanned, truncated) = match group
             .local_replica()
             .learner
@@ -184,7 +201,7 @@ impl KvStore for PxKvStore {
                 prefix,
                 start_after,
                 end_key,
-                limit as usize,
+                engine_limit,
                 engine_byte_budget,
                 engine_keys_only,
                 deadline_ms,
@@ -229,15 +246,27 @@ impl KvStore for PxKvStore {
                 error_code: crate::rpc::KvErrorCode::KvErrorNone as i32,
                 count,
                 timed_out: deadline_ms != 0 && truncated,
+                scan_cutoff,
             };
         }
 
         let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(scanned.len());
-        for (key, _slot, value) in scanned {
+        for (key, commit_slot, value) in scanned {
+            if bounded && commit_slot > scan_cutoff {
+                continue;
+            }
             // Key and value are already zero-copy Bytes from the
             // engine's packed scan buffer — assign directly, no conversion.
             // For keys_only scans the value is an empty Bytes.
-            items.push(crate::rpc::KvScanItem { key, value });
+            items.push(crate::rpc::KvScanItem {
+                key,
+                value,
+                commit_slot,
+            });
+        }
+        let bounded_truncated = limit != 0 && items.len() > limit as usize;
+        if bounded_truncated {
+            items.truncate(limit as usize);
         }
 
         debug!(
@@ -247,7 +276,7 @@ impl KvStore for PxKvStore {
             limit,
             keys_only,
             returned = items.len(),
-            truncated,
+            truncated = if bounded { bounded_truncated } else { truncated },
             "kv_scan local-replica read"
         );
 
@@ -255,7 +284,7 @@ impl KvStore for PxKvStore {
             version: 1,
             ok: true,
             error: String::new(),
-            truncated,
+            truncated: if bounded { bounded_truncated } else { truncated },
             items,
             request_id,
             request_create_ms,
@@ -263,7 +292,8 @@ impl KvStore for PxKvStore {
             not_leader_hint: String::new(),
             error_code: crate::rpc::KvErrorCode::KvErrorNone as i32,
             count: 0,
-            timed_out: deadline_ms != 0 && truncated,
+            timed_out: deadline_ms != 0 && if bounded { bounded_truncated } else { truncated },
+            scan_cutoff,
         }
     }
 
@@ -438,6 +468,7 @@ impl KvStore for PxKvStore {
             items.push(crate::rpc::KvScanItem {
                 key: Bytes::from(e.key.clone()),
                 value: Bytes::from(e.value.clone()),
+                commit_slot: e.slot,
             });
         }
         crate::rpc::SnapshotScanResponse {

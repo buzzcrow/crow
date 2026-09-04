@@ -181,6 +181,8 @@ impl KvClientRpcForwarder {
             count_only: req.count_only(),
             deadline_ms: req.deadline_ms(),
             forwarded: true,
+            bounded: req.bounded(),
+            scan_cutoff: req.scan_cutoff(),
         };
         let fb_req = FBKvScanRequest::create(&mut builder, &args);
         builder.finish(fb_req, None);
@@ -813,6 +815,8 @@ impl KvRpcService {
                         keys_only,
                         count_only,
                         deadline_ms,
+                        fb_req.bounded(),
+                        fb_req.scan_cutoff(),
                         request_id,
                         request_create_ms,
                     )
@@ -851,6 +855,8 @@ impl KvRpcService {
                     keys_only,
                     count_only,
                     deadline_ms,
+                    fb_req.bounded(),
+                    fb_req.scan_cutoff(),
                     request_id,
                     request_create_ms,
                 )
@@ -1325,6 +1331,7 @@ fn build_scan_response(req_id: u64, create_nano: u64, resp: &crate::rpc::KvScanR
                 &FBKvScanItemArgs {
                     key: Some(key),
                     value: Some(value),
+                    commit_slot: item.commit_slot,
                 },
             )
         })
@@ -1349,6 +1356,7 @@ fn build_scan_response(req_id: u64, create_nano: u64, resp: &crate::rpc::KvScanR
         not_leader_hint,
         count: resp.count,
         timed_out: resp.timed_out,
+        scan_cutoff: resp.scan_cutoff,
     };
     let fb = FBKvScanResponse::create(&mut builder, &args);
     builder.finish(fb, None);
@@ -1513,6 +1521,7 @@ fn build_snapshot_scan_response(
                 &FBKvScanItemArgs {
                     key: Some(key),
                     value: Some(value),
+                    commit_slot: 0,
                 },
             )
         })
@@ -1634,6 +1643,7 @@ fn patch_scan_not_leader_hint(ctrl: &mut (Vec<u8>, usize), endpoint: &str) {
                         &FBKvScanItemArgs {
                             key: Some(key),
                             value: Some(value),
+                            commit_slot: item.commit_slot(),
                         },
                     )
                 })
@@ -1660,6 +1670,7 @@ fn patch_scan_not_leader_hint(ctrl: &mut (Vec<u8>, usize), endpoint: &str) {
         not_leader_hint: Some(hint),
         count: view.count(),
         timed_out: view.timed_out(),
+        scan_cutoff: view.scan_cutoff(),
     };
     let fb = FBKvScanResponse::create(&mut builder, &args);
     builder.finish(fb, None);
@@ -1821,6 +1832,7 @@ fn submit_scan_error(
         not_leader_hint: None,
         count: 0,
         timed_out: false,
+        scan_cutoff: 0,
     };
     let resp = FBKvScanResponse::create(&mut builder, &args);
     builder.finish(resp, None);

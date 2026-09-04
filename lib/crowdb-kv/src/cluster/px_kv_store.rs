@@ -667,6 +667,7 @@ pub(crate) fn scan_err(
         error_code,
         count: 0,
         timed_out: false,
+        scan_cutoff: 0,
     }
 }
 

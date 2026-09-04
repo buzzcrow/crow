@@ -106,6 +106,8 @@ async fn snapshot_scan_is_point_in_time_consistent() {
             false,
             false,
             0,
+            false,
+            0,
             200,
             2000,
         )

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crowdb_protocol::common::{ChunkId, DiskId};
 use crowdb_protocol::diskdb::rpc::BusyBlockValue;
 use crowdb_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey};
-use crowdb_protocol::ZoneValueExt;
+use crowdb_protocol::{decode_busy_block_value, decode_free_block_value, ZoneValueExt};
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::zone::DdbZone;
@@ -176,7 +176,7 @@ async fn scan_zone_records(
         .await
     {
         // Try bincode decode (CRC is checked separately below).
-        if let Ok(zv) = bincode::deserialize::<crowdb_protocol::diskdb::rpc::ZoneValue>(&value) {
+        if let Ok(zv) = crowdb_protocol::diskdb::rpc::ZoneValue::from_bytes(&value) {
             zone_value = Some(zv);
         } else {
             // Bincode failure — synthesize a corrupt snapshot so
@@ -186,6 +186,7 @@ async fn scan_zone_records(
                 snapshot_slot: 0,
                 crc32: 1, // intentionally wrong so verify_checksum fails
                 compact_ts: 0,
+                compact_slot: 0,
             });
         }
     }
@@ -210,7 +211,7 @@ async fn scan_zone_records(
     {
         for (key, value) in &scan.items {
             let key_ok = BusyBlockKey::from_bytes(key).is_ok();
-            let val_ok = bincode::deserialize::<BusyBlockValue>(value).is_ok();
+            let val_ok = decode_busy_block_value(value).is_ok();
             if !key_ok || !val_ok {
                 corrupt_busy.push(key.to_vec());
             }
@@ -237,7 +238,7 @@ async fn scan_zone_records(
     {
         for (key, value) in &scan.items {
             let key_ok = FreeBlockKey::from_bytes(key).is_ok();
-            let val_ok = bincode::deserialize::<crowdb_protocol::diskdb::rpc::FreeBlockValue>(value).is_ok();
+            let val_ok = decode_free_block_value(value).is_ok();
             if !key_ok || !val_ok {
                 corrupt_free.push(key.to_vec());
             }

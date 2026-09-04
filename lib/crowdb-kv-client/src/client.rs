@@ -41,12 +41,15 @@ pub enum GetOutcome {
 #[derive(Debug, Clone)]
 pub struct ScanOutcome {
     pub items: Vec<(Bytes, Bytes)>,
+    /// Per-item record revisions in the same order as `items`.
+    pub commit_slots: Vec<u64>,
     pub truncated: bool,
     pub timed_out: bool,
     /// The applied frontier when the scan ran (page 1's `read_slot`).
     /// Used by `get_applied_slot` to read the data group's frontier via
     /// a linearizable scan.
     pub read_slot: u64,
+    pub scan_cutoff: u64,
 }
 
 /// One op from a `journal_scan` — a Put or Delete at a specific commit
@@ -1001,6 +1004,107 @@ impl CrowdbKvClient {
         keys_only: bool,
         deadline: Option<u64>,
     ) -> Result<ScanOutcome> {
+        self.scan_impl(
+            store_id,
+            group_id,
+            prefix,
+            start_after,
+            end_key,
+            limit,
+            read_mode,
+            min_slot,
+            keys_only,
+            deadline,
+            false,
+            0,
+        )
+        .await
+    }
+
+    /// Complete current-version prefix scan at one fixed contiguous-applied
+    /// cutoff. Every returned item carries its record commit slot.
+    ///
+    /// # Errors
+    /// Returns transport, topology, or server errors, including an invalid cutoff.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scan_bounded(
+        &self,
+        store_id: u64,
+        group_id: u64,
+        prefix: &[u8],
+        start_after: &[u8],
+        end_key: &[u8],
+        limit: u32,
+        keys_only: bool,
+        deadline: Option<u64>,
+    ) -> Result<ScanOutcome> {
+        self.scan_impl(
+            store_id,
+            group_id,
+            prefix,
+            start_after,
+            end_key,
+            limit,
+            ReadMode::Linearizable,
+            None,
+            keys_only,
+            deadline,
+            true,
+            0,
+        )
+        .await
+    }
+
+    /// Complete a bounded scan at an already established cutoff.
+    ///
+    /// # Errors
+    /// Returns transport, topology, or server errors, including a changed cutoff.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scan_bounded_at(
+        &self,
+        store_id: u64,
+        group_id: u64,
+        prefix: &[u8],
+        start_after: &[u8],
+        end_key: &[u8],
+        limit: u32,
+        keys_only: bool,
+        deadline: Option<u64>,
+        scan_cutoff: u64,
+    ) -> Result<ScanOutcome> {
+        self.scan_impl(
+            store_id,
+            group_id,
+            prefix,
+            start_after,
+            end_key,
+            limit,
+            ReadMode::Linearizable,
+            None,
+            keys_only,
+            deadline,
+            true,
+            scan_cutoff,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    async fn scan_impl(
+        &self,
+        store_id: u64,
+        group_id: u64,
+        prefix: &[u8],
+        start_after: &[u8],
+        end_key: &[u8],
+        limit: u32,
+        read_mode: ReadMode,
+        min_slot: Option<u64>,
+        keys_only: bool,
+        deadline: Option<u64>,
+        bounded: bool,
+        scan_cutoff: u64,
+    ) -> Result<ScanOutcome> {
         let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
         let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
         let Some(t) = &self.rpc_transport else {
@@ -1013,6 +1117,7 @@ impl CrowdbKvClient {
         let mut backoff = self.retry.backoff_base;
         // Inner pagination state: collect pages until !truncated or limit reached.
         let mut all_items: Vec<(Bytes, Bytes)> = Vec::new();
+        let mut all_commit_slots = Vec::new();
         let mut page_start_after: Vec<u8> = start_after.to_vec();
         // After page 1 of a Linearizable scan returns read_slot = S, switch
         // subsequent pages to MinSlot with min_slot = S. Later pages only need
@@ -1024,6 +1129,7 @@ impl CrowdbKvClient {
         let mut page_read_mode = read_mode;
         let mut page_min_slot = min_slot;
         let mut page1_read_slot: Option<u64> = None;
+        let mut fixed_scan_cutoff = scan_cutoff;
         loop {
             // Remaining entry-count budget for this page. The server's byte
             // budget may stop the page before this limit is reached; that's
@@ -1052,6 +1158,8 @@ impl CrowdbKvClient {
                     keys_only,
                     false,
                     deadline.unwrap_or(0),
+                    bounded,
+                    fixed_scan_cutoff,
                 )
                 .await
                 .map_err(|e| e.to_string());
@@ -1101,8 +1209,18 @@ impl CrowdbKvClient {
                             page_read_mode = ReadMode::MinSlot;
                             page_min_slot = resp.read_slot;
                         }
+                        if bounded {
+                            if fixed_scan_cutoff != 0 && resp.scan_cutoff != fixed_scan_cutoff {
+                                return Err(Error::Transport {
+                                    endpoint: endpoint.clone(),
+                                    status: "bounded scan cutoff changed or missing".into(),
+                                });
+                            }
+                            fixed_scan_cutoff = resp.scan_cutoff;
+                        }
                         for item in resp.items {
                             all_items.push((item.key, item.value));
+                            all_commit_slots.push(item.commit_slot);
                         }
                         // If the page was truncated (server hit byte budget or
                         // entry limit) and we haven't reached the caller's
@@ -1121,9 +1239,11 @@ impl CrowdbKvClient {
                                 self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
                                 return Ok(ScanOutcome {
                                     items: all_items,
+                                    commit_slots: all_commit_slots,
                                     truncated: true,
                                     timed_out: true,
                                     read_slot: page1_read_slot.unwrap_or(0),
+                                    scan_cutoff: fixed_scan_cutoff,
                                 });
                             }
                             page_start_after = all_items.last().expect("non-empty page").0.to_vec();
@@ -1140,12 +1260,15 @@ impl CrowdbKvClient {
                         // If the caller's limit was reached, truncate.
                         if limit != 0 && all_items.len() > limit as usize {
                             all_items.truncate(limit as usize);
+                            all_commit_slots.truncate(limit as usize);
                         }
                         return Ok(ScanOutcome {
                             items: all_items,
+                            commit_slots: all_commit_slots,
                             truncated: outcome_truncated,
                             timed_out: resp.timed_out,
                             read_slot: page1_read_slot.unwrap_or(0),
+                            scan_cutoff: fixed_scan_cutoff,
                         });
                     }
                     self.metrics.record_scan_error();
@@ -1234,6 +1357,8 @@ impl CrowdbKvClient {
                     false,
                     true,
                     deadline.unwrap_or(0),
+                    false,
+                    0,
                 )
                 .await
                 .map_err(|e| e.to_string());

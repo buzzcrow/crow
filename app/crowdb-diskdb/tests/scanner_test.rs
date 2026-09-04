@@ -246,6 +246,7 @@ fn is_zero_owner_handles_none() {
         unit_size: 1024,
         state: 0,
         commit_state: 0,
+        allocation_ts: 0,
     };
     assert!(is_zero_owner(&bv));
 }
@@ -258,6 +259,7 @@ fn is_zero_owner_handles_zero_chunk() {
         unit_size: 1024,
         state: 0,
         commit_state: 0,
+        allocation_ts: 0,
     };
     assert!(is_zero_owner(&bv));
 }
@@ -270,6 +272,7 @@ fn is_zero_owner_handles_valid_chunk() {
         unit_size: 1024,
         state: 0,
         commit_state: 0,
+        allocation_ts: 0,
     };
     assert!(!is_zero_owner(&bv));
 }
@@ -453,6 +456,7 @@ async fn scan_integrity_detects_corrupt_snapshot() {
         snapshot_slot: 1,
         crc32: 999, // wrong CRC
         compact_ts: 0,
+        compact_slot: 0,
     };
     let zone_key = crowdb_protocol::key::ZoneKey {
         disk_id,

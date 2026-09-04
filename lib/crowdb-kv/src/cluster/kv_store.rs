@@ -85,6 +85,8 @@ pub trait KvStore {
         keys_only: bool,
         count_only: bool,
         deadline_ms: u64,
+        bounded: bool,
+        scan_cutoff: u64,
         request_id: u64,
         request_create_ms: u64,
     ) -> KvScanResponse;

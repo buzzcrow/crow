@@ -438,6 +438,8 @@ impl KvRpcTransport {
         keys_only: bool,
         count_only: bool,
         deadline_ms: u64,
+        bounded: bool,
+        scan_cutoff: u64,
     ) -> Result<KvScanResponse> {
         let req_id = self.next_id();
         let conn = self.conn_for(rpc_endpoint)?;
@@ -462,6 +464,8 @@ impl KvRpcTransport {
             count_only,
             deadline_ms,
             forwarded: false,
+            bounded,
+            scan_cutoff,
         };
         let req = FBKvScanRequest::create(&mut builder, &args);
         builder.finish(req, None);
@@ -688,6 +692,7 @@ impl KvRpcTransport {
                     .map(|item| KvScanItem {
                         key: Bytes::copy_from_slice(item.key().unwrap_or_default().bytes()),
                         value: Bytes::copy_from_slice(item.value().unwrap_or_default().bytes()),
+                        commit_slot: 0,
                     })
                     .collect()
             })
@@ -861,6 +866,7 @@ fn parse_scan_response(buf: &[u8]) -> Result<KvScanResponse> {
                 .map(|item| KvScanItem {
                     key: Bytes::copy_from_slice(item.key().map_or(&[], |k| k.bytes())),
                     value: Bytes::copy_from_slice(item.value().map_or(&[], |v| v.bytes())),
+                    commit_slot: item.commit_slot(),
                 })
                 .collect()
         })
@@ -878,6 +884,7 @@ fn parse_scan_response(buf: &[u8]) -> Result<KvScanResponse> {
         error_code: fb_ret_code_to_kv_error_code(r.ret_code()),
         count: r.count(),
         timed_out: r.timed_out(),
+        scan_cutoff: r.scan_cutoff(),
     })
 }
 
