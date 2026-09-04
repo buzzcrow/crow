@@ -72,7 +72,10 @@ complexity, and dependency. Before implementation, follow the
   operator-manual `BindMapValue` write with automatic monitoring +
   rebinding. Monitor detects instance join/leave, rebalances disk-group
   assignments, migrates data during rebinding.
-- **[R101](R101-kv-put-cas.md)** — KV compare-and-set on Put — Area: kv — Add `expected_revision` to `KvSetRequest` for optimistic concurrency; leader checks key revision before propose (lease-protected). Defense-in-depth for the chunkdb per-chunk lock (`doc/design/chunkdb/design-crowdb-chunkdb.md` §10); enables cross-instance CAS on `put_chunk` if range ownership is ever bypassed.
+- **[R101](R101-kv-put-cas.md)** — KV compare-and-set on Put — Area: kv —
+  deferred pending an ordered-application design. Leader-side
+  read-before-propose is not atomic with concurrent proposals, while
+  replica-local apply-time predicates can diverge under out-of-order apply.
 - **[R79](R79-diskdb-free-batch.md)** — diskdb free batch
   (size-threshold, no timer) — Area: diskdb — Group frees into a
   batch and flush via one `batch_write` when the batch reaches a

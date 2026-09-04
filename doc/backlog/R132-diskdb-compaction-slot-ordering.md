@@ -102,12 +102,15 @@ watermark.
    record and its integrity check. Decode existing records conservatively,
    rebuild or replay as required, and make journal/full-scan recovery use
    Paxos slots rather than reconstructing a timestamp source.
-6. **Free-key and owner fencing invariants** — DiskDB allocation/free,
-   group-0 synchronization, and compaction entry points: prove and enforce
-   that a `FreeBlockKey` is immutable until compaction deletes it, that a
-   later operation cannot overwrite the same key while it is eligible for a
-   bounded scan, and that only the immutable disk-group owner may compact.
-   This requirement does not implement owner change or data migration.
+6. **Allocation-incarnation and owner fencing invariants** — DiskDB
+   allocation/free, group-0 synchronization, and compaction entry points: add
+   a monotonic `allocation_ts` to the busy value and returned segment, append
+   it to `FreeBlockKey`, and store it as `pre_allocation_ts` in the free value.
+   Free performs one blind immutable put and never deletes the busy record.
+   Compaction clears a range and deletes its busy record only when allocation
+   timestamp, unit count, and owner all match. Only the immutable disk-group
+   owner may compact. This requirement does not implement owner change or
+   data migration.
 7. **Feature-grouped correctness coverage** — KV engine/client tests,
    `app/crowdb-diskdb/tests/recovery_test.rs`, and the compaction feature
    suite under `lib/crowdb-diskdb-client/tests/`: cover slot visibility,
@@ -168,10 +171,10 @@ later revisions remain for the next compaction
 - Uses the existing engine per-key resolved slot, Paxos
   `contiguous_applied` frontier, linearizable apply fence, atomic KV batch,
   and immutable disk-group ownership established by R130.
-- R101 conditional writes are not required if free keys are proven immutable
-  and compaction is owner-fenced. If either invariant cannot be enforced,
-  R132 must depend on R101 and delete each scanned key conditionally by its
-  expected revision.
+- R101 conditional writes are not used. Incarnation-qualified free facts are
+  immutable blind writes, and compaction validates them against the current
+  busy incarnation while the zone is non-active. This preserves parallel
+  Multi-Paxos proposal and apply behavior.
 - R102 owner rebinding and record migration remain out of scope. R102 must
   preserve the compaction fencing and watermark contract when it later adds
   owner or KV-group transitions.

@@ -3,6 +3,15 @@
 
 ### R101: kv — Compare-and-Set on Put
 
+## Status
+
+Deferred: the proposed leader-side read-before-propose check is not atomic
+with concurrent proposals on the same leader. Applying a conditional command
+inside the state machine is also incompatible with replica-local out-of-order
+apply because replicas can evaluate the same slots in different orders and
+diverge. A future implementation requires an explicit ordered application or
+serialization design; R101 is not a dependency of R132.
+
 ## Problem
 
 **Current behavior + impact**

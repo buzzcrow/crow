@@ -60,7 +60,12 @@ because no operation reads before writing.
 - **No multi-group transactions / 2PC.** Each operation targets a
   single group.
 - **No read-modify-write (`CAS`, `Increment`).** Only blind operations.
-  This is what makes parallel slot writes safe.
+  This is what makes parallel slot writes safe. A leader-side read before
+  propose is not atomic because concurrent requests can observe the same
+  revision and enter different slots. An apply-time predicate is also unsafe:
+  replicas may apply those slots in different orders and choose different
+  predicate results. General conditional mutation therefore requires ordered
+  application or another serialization boundary and is outside this design.
 - **No dynamic group split/merge.** Operator-managed; membership changes
   require planned reconfiguration.
 - **No core-library sharding.** Every KV RPC carries an explicit
@@ -197,6 +202,12 @@ single-field overrides without rebuilding the whole struct. The
 - **Operations:** `Get`, `Put`, `Delete`, `Scan`, `BatchPut`,
   `BatchGet`, `BatchDelete` — all single-group.
 - **Not supported:** `CAS`, `Increment`, `Watch`/change feed, TTL/expiry.
+  Callers that require retry-safe mutation should prefer immutable,
+  incarnation-qualified facts whose effects commute under out-of-order apply.
+  For example, DiskDB records a free against the allocation incarnation it
+  releases; later consolidation validates that fact against the current busy
+  incarnation. This preserves blind parallel writes without treating a
+  read-then-write sequence as atomic.
 - **Limits:** key ≤ 1 KB, value ≤ 1 MB, batch ≤ 1024 ops or 4 MiB.
 
 ## 6. Read Modes

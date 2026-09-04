@@ -4,9 +4,8 @@
 # DiskDB Conditional Free and Compaction Closure Plan
 
 This plan closes the stale-free and compaction-ordering findings discovered
-while finishing R130. Work is ordered as R101 conditional mutation, DiskDB
-allocation-incarnation fencing, R132 slot-ordered compaction, then R130
-verification and cleanup.
+while finishing R130. Work is ordered as DiskDB allocation-incarnation
+fencing, R132 slot-ordered compaction, then R130 verification and cleanup.
 
 ## Timestamp and Revision Model
 
@@ -26,26 +25,7 @@ verification and cleanup.
   metadata because an application cannot know the chosen slot when it encodes
   an opaque value.
 
-## Phase 1: Redesign R101 as Atomic Conditional Batch
-
-- [ ] Replace the current read-before-propose CAS design. Two concurrent
-  requests on one leader must not both pass the same precondition while being
-  proposed in parallel slots.
-- [ ] Define conditional batch predicates needed by DiskDB: key absent, key
-  present, record value or selected incarnation field matches, and optional
-  idempotency-result recognition.
-- [ ] Define the ordering lane for conditional mutations. Earlier mutations
-  must be applied before predicate evaluation, and later mutations must not
-  affect predicate keys before the conditional operation is applied.
-- [ ] Keep blind writes on the existing parallel path. Implement the
-  conditional lane without a blocking mutex; if a blocking lock becomes
-  necessary, stop for explicit review.
-- [ ] Return the applied conditional result, including mismatch details, only
-  after the state machine has determined the predicate outcome.
-- [ ] Add protocol, KV core, client, concurrency, retry, and leader-change
-  tests before integrating DiskDB.
-
-## Phase 2: Fence DiskDB Allocation Incarnations
+## Phase 1: Fence DiskDB Allocation Incarnations
 
 - [ ] Add `allocation_ts` to `BusyBlockValue` and `Segment`, and
   `pre_allocation_ts` plus diagnostic `free_ts` to `FreeBlockValue`, with
@@ -55,16 +35,19 @@ verification and cleanup.
   the high-water mark.
 - [ ] Preserve `allocation_ts` through allocate, commit, ChunkDB metadata,
   DiskDB client transport, and free requests.
-- [ ] Replace read-before-free owner validation with one R101 conditional
-  batch: the current busy record must match `allocation_ts` and the required
-  owner fields before it is deleted and replaced by a free record.
-- [ ] Make a repeated free idempotent while its matching free record exists.
-  After compaction removes that record, a delayed retry returns stale/not-found
+- [ ] Make `FreeBlockKey` incarnation-specific by appending `allocation_ts`.
+  Free performs one blind immutable put and never deletes `BusyBlockKey` or
+  clears the bitmap.
+- [ ] Remove the read-before-free validation path. Compaction authoritatively
+  matches `pre_allocation_ts`, unit count, and owner against the current busy
+  value before clearing the bitmap and deleting the matching records.
+- [ ] Make repeated free naturally idempotent by rewriting the same immutable
+  incarnation key. A delayed retry can create only its old incarnation event
   and can never affect a newer busy incarnation.
 - [ ] Cover response-loss retry, retry before compaction, retry after reuse,
   concurrent duplicate free, owner mismatch, and multi-block batches.
 
-## Phase 3: Implement R132 Slot-Ordered Compaction
+## Phase 2: Implement R132 Slot-Ordered Compaction
 
 - [ ] Expose each scan item's `commit_slot` without copying its value.
 - [ ] Add a fixed-cutoff bounded current-version scan using the leader's
@@ -80,7 +63,7 @@ verification and cleanup.
 - [ ] Verify owner fencing, delayed lower-slot apply, concurrent free,
   pagination, batch failure, restart, and legacy recovery.
 
-## Phase 4: Close R130
+## Phase 3: Close R130
 
 - [ ] Re-run the two failed mixed-workload sentinels: 64 workers with one block
   and 16 workers with four blocks.
@@ -100,10 +83,6 @@ verification and cleanup.
 
 ## Stop Conditions
 
-- A conditional mutation requires a blocking lock or globally serializes the
-  existing blind-write hot path.
-- The conditional result cannot be tied to the applied Paxos slot across
-  leader change and retry.
 - `allocation_ts` cannot be reconstructed above every durable busy/free value
   on restart or future ownership handoff.
 - A bounded scan cannot prove a complete current-version prefix at its fixed
