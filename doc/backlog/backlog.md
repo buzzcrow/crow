@@ -11,10 +11,17 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R131** — Bump this line in the same commit when adding a new item.
+**Next R number: R132** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
+- **[R131](R131-diskdb-allocate-performance.md)** — diskdb allocation
+  throughput — Area: diskdb / client / kv / RPC — Trace and measure the
+  complete allocation path, isolate bitmap, persistence, scheduling,
+  serialization, transport, consensus, WAL, and storage costs, then tune
+  the confirmed bottlenecks. Target at least 400K one-unit allocations/s
+  for a sustained 20-second mem-block run on the Linux reference host,
+  with zero errors and exact space accounting.
 - **[R130](R130-diskdb-behavior-conformance.md)** — diskdb behavioral
   conformance review — Area: diskdb / client — Review the completed
   diskdb implementation against the diskdb design by feature, close

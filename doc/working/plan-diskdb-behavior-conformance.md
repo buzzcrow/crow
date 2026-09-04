@@ -140,10 +140,14 @@ Data migration and owner handoff remain in R102.
   free only members of a non-duplicated live set, and restore failed
   frees. There is no free-only benchmark. Files:
   `app/crowdb-cli/src/commands/bench/`.
-- [x] **Verify and report**: compare the live set, durable records, and
-  recalculated space totals; report throughput, latency, operation counts,
+- [x] **Verify and report**: compare the live set with recalculated space
+  totals; report throughput, latency, operation counts,
   RPC failures, correctness failures, and final capacity. Files:
   `app/crowdb-cli/src/commands/bench/`.
+- [x] **Add a regression sweep**: run allocate and mix against a fresh
+  memory-backed topology per case with 1/4/16/64 workers plus four-block
+  request cases, recording throughput, latency, stop reason, errors,
+  and space correctness. Files: `tools/bench-diskdb-regression.sh`.
 
 ## Test Checklist
 

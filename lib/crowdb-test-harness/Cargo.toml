@@ -38,3 +38,8 @@ crowdb-tree-ffi = { path = "../crowdb-tree/ffi", optional = true }
 crowdb-diskdb-client = { path = "../crowdb-diskdb-client", optional = true }
 crowdb-chunkdb-client = { path = "../crowdb-chunkdb-client", optional = true }
 ctor = "1.0.13"
+
+[[bin]]
+name = "diskdb-bench-cluster"
+path = "src/bin/diskdb_bench_cluster.rs"
+required-features = ["diskdb"]

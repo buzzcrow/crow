@@ -233,8 +233,17 @@ pub struct KvCluster {
 impl KvCluster {
     /// Start a 1-node cluster with store 0, groups 0 and 1.
     pub async fn start() -> Self {
+        Self::start_with_backend(false).await
+    }
+
+    /// Start the fixture with memory-backed KV and WAL engines.
+    pub async fn start_mem_block() -> Self {
+        Self::start_with_backend(true).await
+    }
+
+    async fn start_with_backend(mem_block: bool) -> Self {
         let mut nodes = Vec::new();
-        let node = start_kv_node_with_groups(0, &[0, 1], 1)
+        let node = start_kv_node_with_groups(0, &[0, 1], 1, mem_block)
             .await
             .unwrap_or_else(|e| panic!("start kv node 0: {e}"));
         nodes.push(node);
@@ -301,6 +310,7 @@ async fn start_kv_node_with_groups(
     node_id: u64,
     group_ids: &[u64],
     replica_id: u64,
+    mem_block: bool,
 ) -> std_io::Result<KvNode> {
     let group_str = group_ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
     let root = crate::test_dirs::TestDir::new("kv-node")?;
@@ -327,9 +337,11 @@ async fn start_kv_node_with_groups(
         &listen_port.to_string(),
         "--election-profile",
         "e2e",
-    ])
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    ]);
+    if mem_block {
+        cmd.args(["--kv-backend", "mem-block", "--wal-backend", "mem-block"]);
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("stdout captured");
     let stderr = child.stderr.take().expect("stderr captured");

@@ -37,6 +37,8 @@ struct TaskContext {
     sender: crossbeam_channel::Sender<Segment>,
     receiver: crossbeam_channel::Receiver<Segment>,
     stop: Arc<AtomicBool>,
+    compacting: Arc<AtomicBool>,
+    in_flight: Arc<AtomicU64>,
     sequence: Arc<AtomicU64>,
     deadline: Instant,
 }
@@ -44,7 +46,7 @@ struct TaskContext {
 struct ReportInput<'a> {
     args: &'a DiskdbArgs,
     mixed: bool,
-    started: Instant,
+    elapsed: Duration,
     baseline: u64,
     final_busy: u64,
     live: &'a [Segment],
@@ -54,8 +56,7 @@ pub async fn run(cli: &Cli, verb: DiskdbBenchVerb) -> ExitCode {
     let args = match &verb {
         DiskdbBenchVerb::Allocate(args) | DiskdbBenchVerb::Mix(args) => args.clone(),
     };
-    if args.concurrency == 0 || args.unit_count == 0 || args.blocks_per_request == 0 {
-        eprintln!("concurrency, unit-count, and blocks-per-request must be non-zero");
+    if !valid_args(&args) {
         return ExitCode::from(2);
     }
     let kv = match build_kv_client(cli, ReadEndpointPolicy::Leader, &KvClientTunables::default()) {
@@ -89,6 +90,8 @@ pub async fn run(cli: &Cli, verb: DiskdbBenchVerb) -> ExitCode {
     let mixed = matches!(verb, DiskdbBenchVerb::Mix(_));
     let (sender, receiver) = crossbeam_channel::unbounded::<Segment>();
     let stop = Arc::new(AtomicBool::new(false));
+    let compacting = Arc::new(AtomicBool::new(false));
+    let in_flight = Arc::new(AtomicU64::new(0));
     let sequence = Arc::new(AtomicU64::new(1));
     let deadline = Instant::now() + Duration::from_secs(args.duration_secs);
     let started = Instant::now();
@@ -101,6 +104,8 @@ pub async fn run(cli: &Cli, verb: DiskdbBenchVerb) -> ExitCode {
         let receiver = receiver.clone();
         let stop = Arc::clone(&stop);
         let sequence = Arc::clone(&sequence);
+        let compacting = Arc::clone(&compacting);
+        let in_flight = Arc::clone(&in_flight);
         handles.push(tokio::spawn(run_task(
             task_id,
             TaskContext {
@@ -111,6 +116,8 @@ pub async fn run(cli: &Cli, verb: DiskdbBenchVerb) -> ExitCode {
                 sender,
                 receiver,
                 stop,
+                compacting,
+                in_flight,
                 sequence,
                 deadline,
             },
@@ -127,12 +134,10 @@ pub async fn run(cli: &Cli, verb: DiskdbBenchVerb) -> ExitCode {
             }
         }
     }
+    let elapsed = started.elapsed();
     let live: Vec<_> = receiver.try_iter().collect();
-    if mixed {
-        if let Err(error) = compact_all(&client, &groups).await {
-            eprintln!("diskdb compaction failed: {error}");
-            total.errors += 1;
-        }
+    if mixed && !compact_for_verification(&client, &groups).await {
+        total.errors += 1;
     }
     let final_busy = busy_bytes(&client, &groups).await.unwrap_or(u64::MAX);
     report(
@@ -140,12 +145,30 @@ pub async fn run(cli: &Cli, verb: DiskdbBenchVerb) -> ExitCode {
         &ReportInput {
             args: &args,
             mixed,
-            started,
+            elapsed,
             baseline,
             final_busy,
             live: &live,
         },
     )
+}
+
+fn valid_args(args: &DiskdbArgs) -> bool {
+    let valid = args.concurrency > 0 && args.unit_count > 0 && args.blocks_per_request > 0;
+    if !valid {
+        eprintln!("concurrency, unit-count, and blocks-per-request must be non-zero");
+    }
+    valid
+}
+
+async fn compact_for_verification(client: &DiskdbClient, groups: &[u64]) -> bool {
+    for _ in 0..3 {
+        if let Err(error) = compact_all(client, groups).await {
+            eprintln!("diskdb compaction failed: {error}");
+            return false;
+        }
+    }
+    true
 }
 
 fn report(total: &mut TaskResult, input: &ReportInput<'_>) -> ExitCode {
@@ -166,7 +189,7 @@ fn report(total: &mut TaskResult, input: &ReportInput<'_>) -> ExitCode {
         .collect::<HashSet<_>>()
         .len();
     total.latency_ns.sort_unstable();
-    let elapsed = input.started.elapsed();
+    let elapsed = input.elapsed;
     let operations = total.allocated + total.freed;
     let throughput = u128::from(operations)
         .saturating_mul(1_000_000_000)
@@ -202,6 +225,17 @@ async fn run_task(task_id: usize, context: TaskContext) -> TaskResult {
     let mut result = TaskResult::default();
     let mut rng = SmallRng::seed_from_u64(context.args.seed ^ u64::try_from(task_id).unwrap_or(u64::MAX));
     while Instant::now() < context.deadline && !context.stop.load(Ordering::Acquire) {
+        if context.compacting.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+            continue;
+        }
+        context.in_flight.fetch_add(1, Ordering::AcqRel);
+        if context.compacting.load(Ordering::Acquire) {
+            context.in_flight.fetch_sub(1, Ordering::AcqRel);
+            tokio::task::yield_now().await;
+            continue;
+        }
+        let mut mutation_in_flight = true;
         let do_free = context.mixed && rng.gen_range(0..100) >= 70;
         let started = Instant::now();
         if do_free {
@@ -233,13 +267,34 @@ async fn run_task(task_id: usize, context: TaskContext) -> TaskResult {
                     result.exhausted = true;
                     context.stop.store(true, Ordering::Release);
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    if context
+                        .compacting
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        context.in_flight.fetch_sub(1, Ordering::AcqRel);
+                        mutation_in_flight = false;
+                        while context.in_flight.load(Ordering::Acquire) != 0 {
+                            tokio::task::yield_now().await;
+                        }
+                        if compact_all(&context.client, &context.groups).await.is_err() {
+                            result.errors += 1;
+                        }
+                        context.compacting.store(false, Ordering::Release);
+                    } else {
+                        tokio::task::yield_now().await;
+                    }
+                }
                 Err(_) => result.errors += 1,
             }
         }
         result
             .latency_ns
             .push(started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+        if mutation_in_flight {
+            context.in_flight.fetch_sub(1, Ordering::AcqRel);
+        }
     }
     result
 }
