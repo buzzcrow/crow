@@ -164,9 +164,11 @@ are in `diskdb_type.fbs`.
     `unit_capacity` (multiple of 64 bits per §2).
   - `snapshot_slot: u64` — the slot at which this snapshot was written.
     Strategy 2 (journal scan replay) replays operations after this slot.
-  - `compact_slot: u64` — the fixed contiguous-applied cutoff completely
-    processed by compaction. Initialized to zero for a baseline or legacy
-    snapshot.
+  - `compact_slot: u64` — the last successfully persisted fixed
+    contiguous-applied scan cutoff. It records scan progress, but does not
+    exclude a surviving immutable free fact at or below an earlier cutoff;
+    such a fact must still be reconciled. Initialized to zero for a baseline
+    or legacy snapshot.
   - `crc32: u32` — CRC32 checksum over `usage_bitmap` + `compact_slot`
     for integrity verification (§9 scanner coordination).
 
@@ -396,9 +398,12 @@ atomic `batch_write`.
 1. **Bounded scan** free and busy records at one fixed
    contiguous-applied cutoff. Retain each record's `commit_slot`; an
    incomplete scan cannot advance the watermark.
-2. **Match incarnations** by physical range. A free is effective only when
-   its `pre_allocation_ts`, unit count, and previous owner equal the current
-   busy value. Mismatches are stale or invalid facts and never clear bits.
+2. **Match incarnations** by physical range. Reconcile every scanned free
+   fact whose record revision is at or below the fixed cutoff, including a
+   surviving fact whose revision is below the prior `compact_slot`. A free is
+   effective only when its `pre_allocation_ts`, unit count, and previous owner
+   equal the current busy value. Mismatches are stale or invalid facts and
+   never clear bits.
 3. **Acquire the zone-level lock**, clear only ranges with a complete match,
    and recompute `used_count = popcount`. Release the lock before KV I/O.
 4. Build a new `ZoneValue` from the merged bitmap with `snapshot_slot` and
@@ -422,8 +427,10 @@ Suppose allocation 1001 is freed and later the same physical range is
 allocated as incarnation 1002. A delayed retry can only recreate
 `FreeBlockKey(..., 1001)`. Compaction compares it with the current busy value,
 sees `1001 != 1002`, and leaves both the bitmap bit and busy record unchanged.
-The fixed `compact_slot` cutoff ensures every eligible immutable fact is
-processed before the watermark advances.
+The atomic exact-key deletion normally removes every observed fact before
+`compact_slot` advances. A surviving or delayed lower-revision fact is still
+processed on a later complete scan; the watermark is never used as a lower
+record filter.
 
 ### Ready-zone tracking
 

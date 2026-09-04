@@ -44,6 +44,17 @@ async fn exhaust_free_compact_and_reuse_exact_space() {
 
     let freed: Vec<_> = allocated.iter().step_by(2).copied().collect();
     free_segments(&client, &freed).await;
+    let response_loss_retry = freed[0];
+    let (retry_a, retry_b) = tokio::join!(
+        client.free_blocks(FreeBlocksRequest {
+            segments: vec![response_loss_retry],
+        }),
+        client.free_blocks(FreeBlocksRequest {
+            segments: vec![response_loss_retry],
+        }),
+    );
+    assert_eq!(retry_a.expect("first duplicate retry").freed_count, 1);
+    assert_eq!(retry_b.expect("second duplicate retry").freed_count, 1);
     assert_usage(&client, capacity_bytes, capacity_bytes).await;
 
     compact_all(&client, &disk_ids).await;
@@ -55,6 +66,17 @@ async fn exhaust_free_compact_and_reuse_exact_space() {
     let replacements = allocate_exact(&client, freed.len()).await;
     let replacement_units = collect_units(&replacements);
     assert_eq!(replacement_units, freed_units, "only freed units may be reused");
+    assert_usage(&client, capacity_bytes, capacity_bytes).await;
+    assert_no_space(&client).await;
+
+    let delayed_retry = client
+        .free_blocks(FreeBlocksRequest {
+            segments: vec![response_loss_retry],
+        })
+        .await
+        .expect("delayed old-incarnation retry");
+    assert_eq!(delayed_retry.freed_count, 1);
+    compact_all(&client, &disk_ids).await;
     assert_usage(&client, capacity_bytes, capacity_bytes).await;
     assert_no_space(&client).await;
 

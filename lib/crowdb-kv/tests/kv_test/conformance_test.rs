@@ -127,6 +127,20 @@ pub fn scan_is_ordered_prefix_filtered_and_truncates(e: &dyn KVEngine) {
     assert!(!trunc2);
 }
 
+pub fn scan_reports_each_live_records_commit_slot(e: &dyn KVEngine) {
+    e.apply(3, &batch(vec![put(b"k:a", b"a")])).into_ready().unwrap();
+    e.apply(7, &batch(vec![put(b"k:b", b"b")])).into_ready().unwrap();
+
+    let (items, truncated) = e.scan(b"k:", b"", b"", 0, 0, false, 0).into_ready().unwrap();
+
+    assert!(!truncated);
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].0.as_ref(), b"k:a");
+    assert_eq!(items[0].1, 3);
+    assert_eq!(items[1].0.as_ref(), b"k:b");
+    assert_eq!(items[1].1, 7);
+}
+
 /// `end_key` is an exclusive upper bound: only keys strictly less than
 /// `end_key` are returned. Empty `end_key` = unbounded (today's behavior).
 /// `prefix` + `end_key` together intersect correctly.

@@ -11,9 +11,16 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R134** — Bump this line in the same commit when adding a new item.
+**Next R number: R135** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
+
+- **[R134](R134-diskdb-module-boundaries.md)** — diskdb liveness and RPC
+  module boundaries — Area: diskdb / client — finish separating group-0
+  observation, reconciliation, heartbeat, and loading from the keep-alive
+  scheduler, and split common gates, mutations, queries, and admin handlers
+  behind the existing RPC service interface. Preserve the completed behavior
+  and lock-free hot paths with feature-grouped component coverage.
 
 - **[R133](R133-chunkdb-behavior-conformance.md)** — chunkdb behavioral
   conformance and benchmark — Area: chunkdb / client / diskdb / console —
@@ -26,17 +33,6 @@ complexity, and dependency. Before implementation, follow the
   chunkdb` plus a timestamped regression script that deploys a six-storage-
   node, three-rack topology with KV, DiskDB, and ChunkDB services and verifies
   both chunk metadata and DiskDB space accounting.
-- **[R132](R132-diskdb-compaction-slot-ordering.md)** — diskdb
-  compaction slot ordering — Area: kv / protocol / client / diskdb —
-  expose each live KV record's Paxos revision slot, add a bounded scan
-  whose fixed upper cutoff is captured from the contiguous-applied
-  frontier and retained across pagination, and replace DiskDB's
-  pre-submit free timestamp watermark with that slot boundary. This
-  closes the correctness race where a higher-slot free is applied and
-  compacted before a delayed lower-slot free becomes visible. The
-  design relies on immutable free-record keys and single-owner
-  compaction; it does not add general MVCC snapshot semantics or
-  disk-group migration.
 - **[R131](R131-diskdb-allocate-performance.md)** — diskdb allocation
   throughput — Area: diskdb / client / kv / RPC — Trace and measure the
   complete allocation path, isolate bitmap, persistence, scheduling,
@@ -44,17 +40,6 @@ complexity, and dependency. Before implementation, follow the
   the confirmed bottlenecks. Target at least 400K one-unit allocations/s
   for a sustained 20-second mem-block run on the Linux reference host,
   with zero errors and exact space accounting.
-- **[R130](R130-diskdb-behavior-conformance.md)** — diskdb behavioral
-  conformance review — Area: diskdb / client — Review the completed
-  diskdb implementation against the diskdb design by feature, close
-  behavioral gaps, and reorganize tests around the same feature
-  boundaries. Give special attention to group-0 synchronization,
-  balanced owner assignment when a disk-group is created, immutable
-  ownership, restart/recovery, and status transitions. KV-group binding
-  and data migration remain exclusively in R102. Component-level E2E tests live in
-  `crowdb-diskdb-client`; `crowdb-cli bench diskdb` provisions a
-  three-node, four-disks-per-node cluster for allocate and 70/30 mixed
-  allocate/free workloads with space-accounting verification.
 - **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
   migration — Area: chunkdb / kv — Implement the full
   `Copying`/`Cutover`/`Complete` migration flow for transferring chunkdb

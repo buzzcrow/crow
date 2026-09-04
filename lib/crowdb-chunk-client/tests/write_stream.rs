@@ -91,6 +91,7 @@ impl ChunkAllocator for MockChunkAllocator {
                 unit_offset: st.next_segment_offset,
                 unit_count: 1,
                 owner_chunk: Some(chunk_id),
+                allocation_ts: st.next_segment_offset + 1,
             });
             st.next_segment_offset += 1;
         }
@@ -153,6 +154,7 @@ impl ChunkAllocator for MockChunkAllocator {
                 unit_offset: st.next_segment_offset,
                 unit_count: 1,
                 owner_chunk: Some(chunk_id),
+                allocation_ts: st.next_segment_offset + 1,
             });
             st.next_segment_offset += 1;
         }

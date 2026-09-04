@@ -724,7 +724,7 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
     // 6. Verify the zone's used_count is 0 (the block was freed).
     assert_eq!(
         zone.used_count.load(std::sync::atomic::Ordering::Acquire),
-        if compacted { 0 } else { 1 },
+        u32::from(!compacted),
         "deferred compaction must preserve the conservative bitmap"
     );
 

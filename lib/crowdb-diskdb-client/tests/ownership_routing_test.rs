@@ -1,24 +1,20 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! E2E validate-owner test: starts diskdb with
-//! allocation ownership routing, allocates a block, then verifies
-//! that freeing with a wrong `owner_chunk` is rejected
-//! (`PermissionDenied`) and freeing with the correct owner succeeds.
-//! Also verifies that freeing a non-busy block returns `NotFound`.
+//! Client E2E coverage for routing and compaction-time free validation.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use crowdb_diskdb_client::{DiskdbClient, DiskdbClientError, DiskdbRpcTransport, RetryConfig};
-use crowdb_protocol::diskdb::rpc::{AllocateBlocksRequest, FreeBlocksRequest, Segment};
+use crowdb_diskdb_client::{DiskdbClient, DiskdbRpcTransport, RetryConfig};
+use crowdb_protocol::diskdb::rpc::{AllocateBlocksRequest, CompactZoneRequest, FreeBlocksRequest, Segment};
 use crowdb_test_harness::cluster::KvCluster;
 use crowdb_test_harness::diskdb::*;
-use crowdb_test_harness::hardware::{seed_hardware, standard_disk_ids_3, DG_ID};
+use crowdb_test_harness::hardware::{seed_hardware, standard_disk_ids_3, DG_ID, UNIT_SIZE_BYTES};
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn owner_validation_rejects_wrong_disk_group() {
+async fn compaction_rejects_mismatched_free_facts() {
     require_binaries();
 
     // 1. Start kv cluster + seed hardware.
@@ -73,7 +69,8 @@ async fn owner_validation_rejects_wrong_disk_group() {
         seg.disk_id, seg.zone_index, seg.unit_offset
     );
 
-    // 5. Free with wrong owner → PermissionDenied.
+    // 5. Blind free persists the wrong-owner fact, but compaction must not
+    // clear the current busy incarnation.
     let owner_b = make_chunk_id(0, 999);
     let wrong_seg = Segment {
         disk_id: seg.disk_id,
@@ -81,46 +78,29 @@ async fn owner_validation_rejects_wrong_disk_group() {
         unit_offset: seg.unit_offset,
         unit_count: seg.unit_count,
         owner_chunk: Some(owner_b),
+        allocation_ts: seg.allocation_ts,
     };
-    let result = client
+    let wrong_free = client
         .free_blocks(FreeBlocksRequest {
             segments: vec![wrong_seg],
         })
-        .await;
-    assert!(
-        matches!(&result, Err(DiskdbClientError::NotOwner(msg)) if msg.contains("owner mismatch")),
-        "expected not-owner error for wrong owner, got {result:?}"
-    );
-    eprintln!("  free with wrong owner: rejected (NotOwner)");
-
-    // 6. Free with correct owner → success.
-    let free_resp = client
-        .free_blocks(FreeBlocksRequest {
-            segments: alloc_resp.segments.clone(),
+        .await
+        .expect("blind wrong-owner free is persisted");
+    assert_eq!(wrong_free.freed_count, 1);
+    let disk_id = seg.disk_id.expect("allocated segment has disk id");
+    let wrong_compaction = client
+        .compact_zone(CompactZoneRequest {
+            disk_id: Some(disk_id),
+            zone_indices: vec![seg.zone_index],
         })
         .await
-        .expect("free with correct owner should succeed");
-    assert_eq!(free_resp.freed_count, 1, "expected 1 freed");
-    eprintln!("  free with correct owner: succeeded (freed_count=1)");
-
-    // 7. Free a non-busy block → NotFound.
-    let fake_seg = Segment {
-        disk_id: seg.disk_id,
-        zone_index: seg.zone_index,
-        unit_offset: 999_999,
-        unit_count: 1,
-        owner_chunk: Some(owner_a),
-    };
-    let result = client
-        .free_blocks(FreeBlocksRequest {
-            segments: vec![fake_seg],
-        })
-        .await;
-    assert!(
-        matches!(&result, Err(DiskdbClientError::Rpc(msg)) if msg.contains("not found")),
-        "expected not found error for non-busy block, got {result:?}"
-    );
-    eprintln!("  free non-busy block: rejected (NotFound)");
+        .expect("compact wrong-owner fact");
+    assert!(wrong_compaction.zones.iter().all(|zone| zone.success));
+    let after_wrong = client
+        .query_disk_group(DG_ID)
+        .await
+        .expect("query after mismatch");
+    assert_eq!(after_wrong.disk_groups[0].busy_bytes, u64::from(UNIT_SIZE_BYTES));
 
     eprintln!();
     eprintln!("diskdb_client_e2e_validate_owner: ALL CHECKS PASSED");

@@ -170,6 +170,15 @@ impl KvStore for PxKvStore {
         let scan_cutoff = if bounded {
             if requested_scan_cutoff == 0 {
                 read_slot
+            } else if requested_scan_cutoff > read_slot {
+                return scan_err(
+                    format!(
+                        "bounded scan cutoff {requested_scan_cutoff} exceeds contiguous applied {read_slot}"
+                    ),
+                    String::new(),
+                    request_id,
+                    request_create_ms,
+                );
             } else {
                 requested_scan_cutoff
             }

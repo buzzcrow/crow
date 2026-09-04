@@ -25,6 +25,7 @@ use crate::ddb_config::CompactionConfig;
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::metrics::DiskdbMetrics;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
+use crate::model::records::ZoneRecords;
 use crate::model::zone::DdbZone;
 use crate::recovery::ZoneLoadError;
 
@@ -100,39 +101,12 @@ pub async fn compact_zone(
     let free_keys: Vec<Vec<u8>> = records.free.iter().map(|r| r.key.to_bytes()).collect();
     #[allow(clippy::cast_possible_truncation)]
     let free_count = free_keys.len() as u32;
-    if free_count == 0 {
-        // Nothing to compact.
-        zone.uncompacted_free_record_count.store(0, Ordering::Release);
-        zone.mark_compacted_ready();
-        metrics.compaction_latency.observe(
-            compaction_start
-                .elapsed()
-                .as_nanos()
-                .try_into()
-                .unwrap_or(u64::MAX),
-        );
-        return Ok(());
-    }
 
+    let matching_frees = matching_free_records(&records, scan_cutoff);
     let busy_by_offset: HashMap<u64, _> = records
         .busy
         .iter()
         .map(|record| (record.key.unit_offset, record))
-        .collect();
-    let matching_frees: Vec<_> = records
-        .free
-        .iter()
-        .filter(|free| {
-            free.commit_slot > previous_cutoff
-                && free.commit_slot <= scan_cutoff
-                && busy_by_offset.get(&free.key.unit_offset).is_some_and(|busy| {
-                    free.key.allocation_ts == free.value.pre_allocation_ts
-                        && busy.value.allocation_ts == free.value.pre_allocation_ts
-                        && busy.value.unit_count == free.value.unit_count
-                        && busy.value.owner_chunk == free.value.previous_owner
-                })
-        })
-        .cloned()
         .collect();
     let busy_keys: Vec<Vec<u8>> = matching_frees
         .iter()
@@ -140,19 +114,15 @@ pub async fn compact_zone(
         .map(|busy| busy.key.to_bytes())
         .collect();
 
-    // Step 2: clear only free facts matching the current busy incarnation.
+    // Step 2: prepare the prospective durable bitmap without changing the
+    // live zone. A failed batch must leave all in-memory state unchanged.
     let merge_start = std::time::Instant::now();
-    let result = zone.compact_zone_inner(&matching_frees);
+    let zv = zone.prepare_compaction(&matching_frees, scan_cutoff);
     metrics
         .compaction_merge_bitmap_latency
         .observe(merge_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
 
-    // Step 3: the bitmap and deletions cover exactly the bounded scan cutoff.
-    zone.snapshot_slot.store(scan_cutoff, Ordering::Release);
-    zone.compact_slot.store(scan_cutoff, Ordering::Release);
-    let zv = zone.to_zone_value();
-
-    // Step 5: atomic batch_write — Put ZoneValue + Delete all free
+    // Step 3: atomic batch_write — Put ZoneValue + Delete all free
     // records (I6). They succeed or fail together.
     let persist_start = std::time::Instant::now();
     kv.compact_zone_batch(bind, &disk_id, zone_idx, &zv, &busy_keys, &free_keys)
@@ -161,12 +131,18 @@ pub async fn compact_zone(
         .compaction_kv_persist_latency
         .observe(persist_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
 
-    // Step 6: decrement uncompacted_free_record_count by the total
+    // Step 4: publish the durable result to the live cache only after the
+    // atomic batch succeeds. A crash before publication reloads the snapshot.
+    let result = zone.compact_zone_inner(&matching_frees);
+    zone.snapshot_slot.store(scan_cutoff, Ordering::Release);
+    zone.compact_slot.store(scan_cutoff, Ordering::Release);
+
+    // Step 5: decrement uncompacted_free_record_count by the total
     // free records processed (both stale and new were deleted).
     zone.uncompacted_free_record_count
         .fetch_sub(free_count, Ordering::AcqRel);
 
-    // Step 7: mark the zone as compacted and ready for rotation.
+    // Step 6: mark the zone as compacted and ready for rotation.
     zone.mark_compacted_ready();
 
     metrics
@@ -192,6 +168,37 @@ pub async fn compact_zone(
     );
 
     Ok(())
+}
+
+fn matching_free_records(records: &ZoneRecords, scan_cutoff: u64) -> Vec<crate::model::records::FreeRecord> {
+    let busy_by_offset: HashMap<u64, _> = records
+        .busy
+        .iter()
+        .map(|record| (record.key.unit_offset, record))
+        .collect();
+    records
+        .free
+        .iter()
+        .filter(|free| {
+            free.commit_slot <= scan_cutoff
+                && busy_by_offset.get(&free.key.unit_offset).is_some_and(|busy| {
+                    free.key.allocation_ts == free.value.pre_allocation_ts
+                        && busy.value.allocation_ts == free.value.pre_allocation_ts
+                        && busy.value.unit_count == free.value.unit_count
+                        && busy.value.owner_chunk == free.value.previous_owner
+                })
+        })
+        .cloned()
+        .collect()
+}
+
+#[cfg(feature = "test-util")]
+#[must_use]
+pub fn matching_free_records_for_tests(
+    records: &ZoneRecords,
+    scan_cutoff: u64,
+) -> Vec<crate::model::records::FreeRecord> {
+    matching_free_records(records, scan_cutoff)
 }
 
 /// Snapshot compaction engine. Owns a `DdbKvClient` and runs as a

@@ -41,6 +41,7 @@ fn make_chunk(unit_kb: u32, num_segments: usize) -> Arc<Chunk> {
             unit_offset: i as u64 * 10,
             unit_count: 1,
             owner_chunk: Some(ChunkId { high: 1, low: 1 }),
+            allocation_ts: i as u64 + 1,
         })
         .collect();
     let strip = ChunkStrip {

@@ -38,6 +38,11 @@ fn scan_is_ordered_prefix_filtered_and_truncates() {
 }
 
 #[test]
+fn scan_reports_each_live_records_commit_slot() {
+    conformance::scan_reports_each_live_records_commit_slot(&InMemKV::new());
+}
+
+#[test]
 fn scan_end_key_exclusive_upper_bound() {
     conformance::scan_end_key_exclusive_upper_bound(&InMemKV::new());
 }

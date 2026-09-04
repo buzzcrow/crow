@@ -13,6 +13,8 @@
 #   DISKDB_BENCH_MODES          space-separated modes (default: "mem")
 #   DISKDB_BENCH_CASES          optional space-separated case labels
 #   DISKDB_BENCH_DATA_GROUPS    number of KV data groups (default: 1)
+#   DISKDB_BENCH_DISK_CAPACITY  bytes per disk (default: 1 TiB)
+#   DISKDB_BENCH_ZONE_SIZE      bytes per zone (default: 256 GiB)
 #   DISKDB_BENCH_LOG_ROOT       persistent run root
 #   DISKDB_BENCH_RESULTS        output TSV path
 #
@@ -51,14 +53,17 @@ DURATION="${DISKDB_BENCH_DURATION:-20}"
 MODES="${DISKDB_BENCH_MODES:-mem}"
 CASES="${DISKDB_BENCH_CASES:-}"
 DATA_GROUP_COUNT="${DISKDB_BENCH_DATA_GROUPS:-1}"
+DISK_CAPACITY="${DISKDB_BENCH_DISK_CAPACITY:-1099511627776}"
+ZONE_SIZE="${DISKDB_BENCH_ZONE_SIZE:-274877906944}"
 RUN_STAMP=$(date +%Y%m%d-%H%M%S)
 LOG_ROOT="${DISKDB_BENCH_LOG_ROOT:-$(pwd)/bench-log/diskdb-regression-$RUN_STAMP}"
 RESULTS_FILE="${DISKDB_BENCH_RESULTS:-$LOG_ROOT/results.tsv}"
 CURRENT_CONFIG=""
 FAILURES=0
 
-if ! [[ "$DURATION" =~ ^[1-9][0-9]*$ ]] || ! [[ "$DATA_GROUP_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ERROR: duration and data-group count must be positive integers" >&2
+if ! [[ "$DURATION" =~ ^[1-9][0-9]*$ ]] || ! [[ "$DATA_GROUP_COUNT" =~ ^[1-9][0-9]*$ ]] \
+    || ! [[ "$DISK_CAPACITY" =~ ^[1-9][0-9]*$ ]] || ! [[ "$ZONE_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: duration, data-group count, disk capacity, and zone size must be positive integers" >&2
     exit 2
 fi
 
@@ -108,8 +113,8 @@ deploy_case() {
     group_csv=$(IFS=,; echo "${groups[*]}")
     cli cluster local-deploy -t diskdb --data-groups "$group_csv" \
         --disk-groups-per-node 1 --disks-per-group 4 \
-        --disk-capacity-bytes 1099511627776 \
-        --disk-zone-size-bytes 274877906944 \
+        --disk-capacity-bytes "$DISK_CAPACITY" \
+        --disk-zone-size-bytes "$ZONE_SIZE" \
         --disk-unit-size-bytes 1048576
 }
 

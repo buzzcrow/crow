@@ -881,7 +881,8 @@ async fn diskdb_e2e_compact_zone_rpc() {
             allocation_ts: seg.allocation_ts,
         };
         let val = kv_get(&verify_kv, &free_key.to_bytes()).await;
-        assert_eq!(val.is_none(), compacted, "free record retention mismatch");
+        let compacted_here = compacted && seg.disk_id == Some(disk_id);
+        assert_eq!(val.is_none(), compacted_here, "free record retention mismatch");
     }
 
     if !compacted {

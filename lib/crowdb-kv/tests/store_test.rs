@@ -55,3 +55,6 @@ mod apply_fence;
 
 #[path = "store_test/snapshot_api_test.rs"]
 mod snapshot_api;
+
+#[path = "store_test/bounded_scan_test.rs"]
+mod bounded_scan;

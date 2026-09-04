@@ -14,8 +14,9 @@ use crowdb_kv_client::{ReadEndpointPolicy, ServiceRegistryClient};
 use crowdb_protocol::common::ChunkId;
 use crowdb_protocol::diskdb::rpc::{AllocateBlocksRequest, CompactZoneRequest, FreeBlocksRequest, Segment};
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 
+use super::diskdb_workload::select_free;
 use super::kv_client::{build_kv_client, KvClientTunables};
 use super::loader::BenchRecorder;
 use super::metrics::BenchMetrics;
@@ -185,11 +186,7 @@ async fn compact_for_verification(client: &DiskdbClient, groups: &[u64]) -> bool
 }
 
 fn report(total: &mut TaskResult, input: &ReportInput<'_>) -> ExitCode {
-    let expected_delta = input
-        .live
-        .iter()
-        .map(|segment| u64::from(segment.unit_count) * input.args.unit_size_bytes)
-        .sum::<u64>();
+    let expected_delta = live_bytes(input.live, input.args.unit_size_bytes);
     let actual_delta = input.final_busy.saturating_sub(input.baseline);
     let unique = input
         .live
@@ -234,6 +231,12 @@ fn report(total: &mut TaskResult, input: &ReportInput<'_>) -> ExitCode {
     }
 }
 
+fn live_bytes(live: &[Segment], unit_size_bytes: u64) -> u64 {
+    live.iter()
+        .map(|segment| u64::from(segment.unit_count) * unit_size_bytes)
+        .sum()
+}
+
 async fn run_task(task_id: usize, context: TaskContext) -> TaskResult {
     let mut result = TaskResult::default();
     let mut rng = SmallRng::seed_from_u64(context.args.seed ^ u64::try_from(task_id).unwrap_or(u64::MAX));
@@ -249,7 +252,7 @@ async fn run_task(task_id: usize, context: TaskContext) -> TaskResult {
             continue;
         }
         let mut mutation_in_flight = true;
-        let do_free = context.mixed && rng.gen_range(0..100) >= 70;
+        let do_free = select_free(&mut rng, context.mixed);
         let started = Instant::now();
         if do_free {
             if let Ok(segment) = context.receiver.try_recv() {

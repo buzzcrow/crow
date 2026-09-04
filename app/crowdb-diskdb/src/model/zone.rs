@@ -456,6 +456,47 @@ impl DdbZone {
         }
     }
 
+    /// Build the durable zone snapshot produced by `free_records` without
+    /// changing the live bitmap or watermarks.
+    #[must_use]
+    pub(crate) fn prepare_compaction(
+        &self,
+        free_records: &[crate::model::records::FreeRecord],
+        scan_cutoff: u64,
+    ) -> ZoneValue {
+        let usage_bits = UsageBitmap::restore(&self.usage_bits.snapshot());
+        for free in free_records {
+            #[allow(clippy::cast_possible_truncation)]
+            let offset = free.key.unit_offset as u32;
+            let _ = usage_bits.range_clear(offset, free.value.unit_count);
+        }
+        let max_free_ts = free_records
+            .iter()
+            .map(|record| record.value.free_ts)
+            .max()
+            .unwrap_or(0);
+        let mut value = ZoneValue {
+            usage_bitmap: usage_bits.snapshot(),
+            snapshot_slot: scan_cutoff,
+            crc32: 0,
+            compact_ts: self.compact_ts.load(Ordering::Acquire).max(max_free_ts),
+            compact_slot: scan_cutoff,
+        };
+        value.compute_checksum();
+        value
+    }
+
+    /// Expose prospective snapshot construction to integration tests.
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub fn prepare_compaction_for_tests(
+        &self,
+        free_records: &[crate::model::records::FreeRecord],
+        scan_cutoff: u64,
+    ) -> ZoneValue {
+        self.prepare_compaction(free_records, scan_cutoff)
+    }
+
     /// Mark the zone as compacted and ready for rotation.
     pub fn mark_compacted_ready(&self) {
         self.compacted_ready.store(true, Ordering::Release);

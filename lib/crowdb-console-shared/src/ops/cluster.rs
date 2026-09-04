@@ -785,9 +785,9 @@ async fn deploy_diskdb_instances(
         .await?;
         ctx.config_mut().add_server(ServerEntry {
             id: server_id,
-            url: deployed.mgmt_url,
+            url: deployed.endpoint.clone(),
             node_id: Some(node.id),
-            rpc_url: Some(deployed.rpc_url),
+            rpc_url: Some(deployed.endpoint),
             rest_port: Some(ports.http[index]),
             rpc_port: Some(ports.rpc[index]),
             auto_start: true,

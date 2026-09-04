@@ -74,6 +74,7 @@ fn make_segments(chunk_id: ChunkId, count: usize, offset: &mut u64) -> Vec<Segme
             unit_offset: *offset,
             unit_count: 1,
             owner_chunk: Some(chunk_id),
+            allocation_ts: *offset + 1,
         });
         *offset += 1;
     }

@@ -77,3 +77,7 @@ path = "tests/direct_cli_test.rs"
 [[test]]
 name = "diskdb_bench_test"
 path = "tests/diskdb_bench_test.rs"
+
+[[test]]
+name = "diskdb_workload_test"
+path = "tests/diskdb_workload_test.rs"

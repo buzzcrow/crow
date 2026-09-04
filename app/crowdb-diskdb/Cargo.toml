@@ -91,6 +91,10 @@ name = "config_reload_test"
 path = "tests/config_reload_test.rs"
 
 [[test]]
+name = "compaction_state_test"
+path = "tests/compaction_state_test.rs"
+
+[[test]]
 name = "state_machine_test"
 path = "tests/state_machine_test.rs"
 
