@@ -126,14 +126,14 @@ describe('Sidebar · KV logical projection', () => {
 });
 
 describe('Sidebar · Chunk hierarchy', () => {
-  it('renders node → disk group → disk with DiskDB as a sibling, no owned DG subtree', () => {
+  it('renders node → disk group → disk; DiskDB server is not shown in Capacity view', () => {
     const { getByText, queryByText } = renderSidebar(Domain.Chunk);
     expect(getByText('N-10', { exact: true })).toBeTruthy();
     // Physical disk group is under the node.
     expect(getByText(/Physical Group.*DG-100/)).toBeTruthy();
     expect(getByText('0123456789ab…')).toBeTruthy();
-    // DiskDB is a sibling item under the node.
-    expect(getByText('DDB-10', { exact: true })).toBeTruthy();
+    // DiskDB is a service item that belongs in the Cluster domain only.
+    expect(queryByText('DDB-10')).toBeNull();
     // No KV server item in the Chunk tree.
     expect(queryByText('KV-10')).toBeNull();
   });

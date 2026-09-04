@@ -487,7 +487,8 @@ fn compute_strips_remaining(
     let unit_bytes = u64::from((config.read_buffer_size / 1024) as u32) * 1024;
     let strip_data_capacity = ec_scheme.data_num as u64 * unit_bytes;
     let total_strips = total.div_ceil(strip_data_capacity) as usize;
-    Some(total_strips)
+    // Subtract 1 for the initial strip from allocate_chunk.
+    Some(total_strips.saturating_sub(1))
 }
 
 /// Append 1 strip to an existing chunk and return the full cumulative

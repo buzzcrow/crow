@@ -292,8 +292,8 @@ export function Sidebar({
           const ndg = nodeDiskGroups[nodeId];
           const allDgs = ndg?.diskGroups || [];
 
-          // Chunk owns the physical disk hierarchy. DiskDB is a separate
-          // sibling item and never contains owned disk-group children.
+          // Chunk owns the physical disk hierarchy only. DiskDB is a
+          // service item that belongs in the Cluster domain, not here.
           for (const dg of allDgs) {
             const disks = ndg?.disksByDg[dg.id] || [];
             const dgStatus = dgStatusByKey.get(`${rack.id}:${nodeId}:${dg.id}`);
