@@ -286,7 +286,7 @@ the client.
   and exhaustion respectively, and verify all 12 disks plus all capacity
   totals.
 - Run deterministic mixed mode, verify no duplicate free, reconcile
-  persist-only frees, and assert durable records equal the final live set.
+  persist-only frees, and assert capacity accounting equals the final live set.
 
 ## Module Structure
 

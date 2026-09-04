@@ -5,6 +5,7 @@
 //!
 //! Module index only; workload implementations live in `bench/`.
 
+pub mod diskdb;
 pub mod kv_client;
 pub mod kv_prepare;
 pub mod kv_read;

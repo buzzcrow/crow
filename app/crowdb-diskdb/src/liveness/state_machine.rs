@@ -77,12 +77,12 @@ impl HwStateMachine {
     /// Validate + apply a disk transition, running entry side-effects.
     /// Returns the new status, or `Err` on an illegal transition.
     pub fn transition_disk(&self, disk: &DdbDisk, to: HwStatus) -> Result<HwStatus, IllegalTransition> {
-        let from = *disk.effective_status.read().unwrap();
+        let from = disk.effective_status();
         if !Self::is_legal_transition(from, to) {
             return Err(IllegalTransition { from, to });
         }
         Self::on_enter_disk(to, disk);
-        *disk.effective_status.write().unwrap() = to;
+        disk.set_effective_status(to);
         Ok(to)
     }
 
@@ -94,12 +94,12 @@ impl HwStateMachine {
         dg: &DdbDiskGroup,
         to: HwStatus,
     ) -> Result<HwStatus, IllegalTransition> {
-        let from = *dg.status.read().unwrap();
+        let from = dg.status();
         if !Self::is_legal_transition(from, to) {
             return Err(IllegalTransition { from, to });
         }
         Self::on_enter_disk_group(to, dg);
-        *dg.status.write().unwrap() = to;
+        dg.set_status(to);
         Ok(to)
     }
 

@@ -126,7 +126,7 @@ impl ZoneLoader {
         zone_rotate_count: u32,
     ) -> Result<Arc<DdbDiskGroup>, ZoneLoadError> {
         let dg = Arc::new(DdbDiskGroup::new(dg_id, node_id, rack_id));
-        *dg.bind.write().unwrap() = bind;
+        dg.set_bind(bind);
 
         // Track max freed_ts across all zones in all disks — used to
         // seed the per-disk-group monotonic timestamp source (§8).
@@ -208,7 +208,7 @@ impl ZoneLoader {
                         )));
                     }
                 };
-                disk.add_zone(Arc::new(zone));
+                disk.add_zone(&Arc::new(zone));
                 // Track max freed_ts across all zones for timestamp
                 // source seeding (§8).
                 if zone_max_freed_ts > max_freed_ts_in_dg {

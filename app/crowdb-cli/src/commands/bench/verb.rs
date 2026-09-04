@@ -18,6 +18,48 @@ pub enum BenchVerb {
     Kv(KvBenchVerb),
     /// Raw crowdb-rpc echo throughput benchmark against a fb-server.
     Rpc(RpcArgs),
+    /// Distributed disk-block allocation benchmark.
+    #[command(subcommand)]
+    Diskdb(DiskdbBenchVerb),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DiskdbBenchVerb {
+    /// Allocate until capacity exhaustion or the time limit.
+    Allocate(DiskdbArgs),
+    /// Run deterministic 70% allocate and 30% free traffic.
+    Mix(DiskdbArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct DiskdbArgs {
+    /// Run duration in seconds.
+    #[arg(long, default_value_t = 10)]
+    pub duration_secs: u64,
+    /// Concurrent workload tasks.
+    #[arg(long, default_value_t = 4)]
+    pub concurrency: usize,
+    /// Allocation size in disk units.
+    #[arg(long, default_value_t = 1)]
+    pub unit_count: u32,
+    /// Blocks requested by each allocation RPC.
+    #[arg(long, default_value_t = 1)]
+    pub blocks_per_request: u32,
+    /// Expected unit size, used for space verification.
+    #[arg(long, default_value_t = 1_048_576)]
+    pub unit_size_bytes: u64,
+    /// Storage mode configured by cluster initialization.
+    #[arg(long, value_enum, default_value_t = DiskdbBenchMode::Mem)]
+    pub mode: DiskdbBenchMode,
+    /// Deterministic workload seed.
+    #[arg(long, default_value_t = 1)]
+    pub seed: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DiskdbBenchMode {
+    Mem,
+    Block,
 }
 
 #[derive(Subcommand, Debug)]
@@ -228,6 +270,7 @@ pub enum BenchReadEndpoint {
 pub async fn run_bench_verb(cli: &Cli, verb: BenchVerb) -> ExitCode {
     match verb {
         BenchVerb::Rpc(args) => super::rpc::run(cli, args).await,
+        BenchVerb::Diskdb(verb) => super::diskdb::run(cli, verb).await,
         BenchVerb::Kv(kv) => match kv {
             KvBenchVerb::Prepare(args) => super::kv_prepare::run(cli, args).await,
             KvBenchVerb::Read(args) => super::kv_read::run(cli, args).await,

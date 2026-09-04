@@ -813,7 +813,7 @@ impl DiskdbRpcService {
             return;
         };
 
-        let bind = *dg.bind.read().unwrap();
+        let bind = dg.bind();
         let zone_count = disk_value.zone_count;
         let zones_to_rebuild: Vec<u32> = if req_zone_index == ALL_ZONES {
             (0..zone_count).collect()
@@ -1027,8 +1027,8 @@ impl DiskdbRpcService {
             return;
         };
 
-        let bind = *dg.bind.read().unwrap();
-        let zone_count = disk.disk_value.read().unwrap().zone_count;
+        let bind = dg.bind();
+        let zone_count = disk.disk_value.zone_count;
         let zones_to_compact: Vec<u32> = if zone_indices.is_empty() {
             (0..zone_count).collect()
         } else {
@@ -1060,7 +1060,7 @@ impl DiskdbRpcService {
             let mut total_deleted = 0u32;
             for zi in zones_to_compact {
                 let zone = {
-                    let zones = disk.zones.read().unwrap();
+                    let zones = disk.zones.load();
                     let loaded = zones.len();
                     if zi as usize >= loaded {
                         drop(zones);
@@ -1222,7 +1222,7 @@ impl DiskdbRpcService {
                     disks
                         .iter()
                         .find(|d| &d.disk_id == disk_id)
-                        .map(|d| (d.disk_value.read().unwrap().clone(), d.disk_id))
+                        .map(|d| (d.disk_value.clone(), d.disk_id))
                 };
                 if let Some((dv, did)) = dv_clone {
                     return Some((n, dv, did));
@@ -1486,7 +1486,7 @@ fn build_query_capacity_response_zone(
     let bitmap_bytes = {
         let disk_opt = dg.get_disk(disk.disk_id);
         disk_opt.and_then(|d| {
-            let zones = d.zones.read().unwrap();
+            let zones = d.zones.load();
             let zi = zone_index as usize;
             (zi < zones.len()).then(|| zones[zi].usage_bits.snapshot())
         })
@@ -1495,7 +1495,7 @@ fn build_query_capacity_response_zone(
     let disk_off = build_disk_info_offset(&mut fbb, disk, false, Some(zone_off));
     let disk_id_off = fbb.create_vector(&[FBInt128::new(disk.disk_id.high, disk.disk_id.low)]);
     let disk_vec_off = fbb.create_vector(&[disk_off]);
-    let status = *dg.status.read().unwrap();
+    let status = dg.status();
     let dg_off = FBDiskGroupInfo::create(
         &mut fbb,
         &FBDiskGroupInfoArgs {
@@ -1824,7 +1824,7 @@ fn build_disk_group_info_offset<'a>(
         .map(|d| build_disk_info_offset(fbb, d, include_zones, None))
         .collect();
     let disk_vec = fbb.create_vector(&disk_offs);
-    let status = *dg.status.read().unwrap();
+    let status = dg.status();
     FBDiskGroupInfo::create(
         fbb,
         &FBDiskGroupInfoArgs {
@@ -1848,7 +1848,7 @@ fn build_disk_info_offset<'a>(
     include_zones: bool,
     single_zone: Option<flatbuffers::WIPOffset<FBZoneUsage<'a>>>,
 ) -> flatbuffers::WIPOffset<FBDiskInfo<'a>> {
-    let dv = disk.disk_value.read().unwrap();
+    let dv = &disk.disk_value;
     let usage = disk.usage();
     let zone_usages = if let Some(zo) = single_zone {
         Some(fbb.create_vector(&[zo]))

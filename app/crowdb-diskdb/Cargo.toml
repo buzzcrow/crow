@@ -121,3 +121,7 @@ path = "tests/query_handler_test.rs"
 [[test]]
 name = "scanner_test"
 path = "tests/scanner_test.rs"
+
+[[test]]
+name = "startup_sync_test"
+path = "tests/startup_sync_test.rs"

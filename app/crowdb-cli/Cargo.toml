@@ -20,6 +20,7 @@ crowdb-kv-client = { path = "../../lib/crowdb-kv-client" }
 crowdb-common = { path = "../../lib/crowdb-common/rust" }
 crowdb-protocol = { path = "../../lib/crowdb-protocol" }
 crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi" }
+crowdb-diskdb-client = { path = "../../lib/crowdb-diskdb-client" }
 flatbuffers = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
@@ -72,3 +73,7 @@ path = "tests/diskdb_cli_test.rs"
 [[test]]
 name = "direct_cli_test"
 path = "tests/direct_cli_test.rs"
+
+[[test]]
+name = "diskdb_bench_test"
+path = "tests/diskdb_bench_test.rs"

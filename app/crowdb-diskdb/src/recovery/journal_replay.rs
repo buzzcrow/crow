@@ -129,7 +129,7 @@ pub async fn load_zone_inner(
         disk_id,
         zone_index: zone_idx,
         disk_group_id,
-        zone_state: std::sync::RwLock::new(DdbZoneHealth::Healthy),
+        zone_state: std::sync::atomic::AtomicU8::new(DdbZoneHealth::Healthy as u8),
         unit_capacity,
         usage_bits,
         last_pos_64: std::sync::atomic::AtomicU64::new(0),

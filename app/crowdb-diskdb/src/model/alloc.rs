@@ -92,17 +92,17 @@ async fn compact_fallback(
     zone_rotate_count: u32,
     metrics: &crate::metrics::DiskdbMetrics,
 ) {
-    let bind = *dg.bind.read().unwrap();
+    let bind = dg.bind();
     let disks = dg.disks.read().unwrap().clone();
     for disk in disks {
         // Collect active zone indices to skip (I4).
         let active_zone_indices: std::collections::HashSet<u32> = {
-            let active = disk.active_zone_context.read().unwrap();
+            let active = disk.active_zone_context.load();
             active.iter().map(|z| z.zone_index).collect()
         };
-        let zones = disk.zones.read().unwrap().clone();
+        let zones = disk.zones.load_full();
         let mut compacted = 0u32;
-        for zone in zones {
+        for zone in zones.iter() {
             if compacted >= zone_rotate_count {
                 break;
             }
@@ -114,7 +114,7 @@ async fn compact_fallback(
             if zone.compacted_ready.load(std::sync::atomic::Ordering::Acquire) {
                 continue;
             }
-            if let Err(e) = compact_zone(kv, bind, disk.disk_id, &zone, zone.zone_index, metrics).await {
+            if let Err(e) = compact_zone(kv, bind, disk.disk_id, zone, zone.zone_index, metrics).await {
                 tracing::warn!(
                     disk_id = ?disk.disk_id,
                     zone_index = zone.zone_index,
@@ -181,7 +181,7 @@ pub async fn allocate_block(
         state: BlockState::Ok as i32,
         commit_state: CommitState::Tentative as i32,
     };
-    let bind = *dg.bind.read().unwrap();
+    let bind = dg.bind();
     if let Err(e) = kv
         .persist_busy(bind, &disk.disk_id, zone.zone_index, range.unit_offset, &value)
         .await
@@ -280,7 +280,7 @@ pub async fn allocate_blocks(
         })
         .collect();
 
-    let bind = *dg.bind.read().unwrap();
+    let bind = dg.bind();
     let phase2_start = std::time::Instant::now();
     if let Err(e) = kv.persist_busy_batch(bind, &records).await {
         // Rollback ALL Phase 1 claims.
@@ -351,7 +351,7 @@ pub async fn free_block(
             reason: "missing disk_id in Segment".to_string(),
         })
     })?;
-    let bind: Bind = *dg.bind.read().unwrap();
+    let bind: Bind = dg.bind();
 
     // Phase 0: validate ownership (optional, one paxos round-trip).
     if validate_owner_on_free {
@@ -444,7 +444,7 @@ pub async fn free_blocks(
     kv: &DdbKvClient,
     validate_owner_on_free: bool,
 ) -> std::result::Result<(), FreeError> {
-    let bind: Bind = *dg.bind.read().unwrap();
+    let bind: Bind = dg.bind();
 
     // Phase 0: validate ownership for all segments (all-or-nothing).
     if validate_owner_on_free {
@@ -551,7 +551,7 @@ pub async fn commit_blocks(
     segments: &[Segment],
     kv: &DdbKvClient,
 ) -> std::result::Result<u32, FreeError> {
-    let bind: Bind = *dg.bind.read().unwrap();
+    let bind: Bind = dg.bind();
 
     // Read each busy block and prepare the updated value.
     let mut records: Vec<(DiskId, u32, u64, BusyBlockValue)> = Vec::with_capacity(segments.len());

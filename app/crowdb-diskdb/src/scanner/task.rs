@@ -175,7 +175,7 @@ impl ScannerTask {
             let Some(dg) = ctx.container.get_disk_group(dg_id) else {
                 continue;
             };
-            let bind = *dg.bind.read().unwrap();
+            let bind = dg.bind();
             let disks_snapshot = snapshot_disk_zones(&dg);
 
             for (disk_id, zones) in disks_snapshot {
@@ -238,7 +238,7 @@ fn snapshot_disk_zones(dg: &crate::model::disk_group::DdbDiskGroup) -> Vec<(Disk
     disks
         .iter()
         .map(|d| {
-            let zones = d.zones.read().unwrap();
+            let zones = d.zones.load();
             let zone_info: ZoneList = zones
                 .iter()
                 .map(|z| (z.zone_index, z.unit_capacity, Arc::clone(z)))
@@ -256,7 +256,7 @@ fn collect_active_zones(dg: &crate::model::disk_group::DdbDiskGroup, disk_id: Di
     let Some(disk) = disks.iter().find(|d| d.disk_id == disk_id) else {
         return Vec::new();
     };
-    let active = disk.active_zone_context.read().unwrap();
+    let active = disk.active_zone_context.load();
     active.iter().cloned().collect()
 }
 

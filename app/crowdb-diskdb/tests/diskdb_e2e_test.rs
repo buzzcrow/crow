@@ -203,11 +203,11 @@ async fn diskdb_e2e_allocate_free() {
         .get_disk_group(DG_ID)
         .expect("disk-group should be in container");
     let (bind, disk_count, zone_count) = {
-        let bind = *dg.bind.read().unwrap();
+        let bind = dg.bind();
         let disks = dg.disks.read().unwrap();
         assert_eq!(disks.len(), 3, "expected 3 disks");
         let zone_count = {
-            let zones = disks[0].zones.read().unwrap();
+            let zones = disks[0].zones.load();
             u32::try_from(zones.len()).unwrap()
         };
         (bind, disks.len(), zone_count)
@@ -789,7 +789,7 @@ async fn diskdb_e2e_compact_zone_rpc() {
             .find(|d| d.disk_id == disk_id)
             .cloned()
             .expect("disk exists");
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         let zone = &zones[zone_index as usize];
         #[allow(clippy::cast_possible_truncation)]
         let bit0 = segments[0].unit_offset as u32;
@@ -824,9 +824,9 @@ async fn diskdb_e2e_compact_zone_rpc() {
     let mut compacted_count = 0u32;
     let mut total_deleted = 0u32;
     let mut all_success = true;
-    let zone_count = disk.zones.read().unwrap().len();
+    let zone_count = disk.zones.load().len();
     for zi in 0..zone_count {
-        let zone = Arc::clone(&disk.zones.read().unwrap()[zi]);
+        let zone = Arc::clone(&disk.zones.load()[zi]);
         let backlog_before = zone
             .uncompacted_free_record_count
             .load(std::sync::atomic::Ordering::Acquire);
@@ -868,7 +868,7 @@ async fn diskdb_e2e_compact_zone_rpc() {
             .find(|d| d.disk_id == disk_id)
             .cloned()
             .expect("disk exists");
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         let zone = &zones[zone_index as usize];
         #[allow(clippy::cast_possible_truncation)]
         let bit0 = segments[0].unit_offset as u32;
@@ -973,7 +973,7 @@ async fn diskdb_e2e_suspect_rediscovery() {
 
     // Verify disk is Up and allocatable before the test.
     assert_eq!(
-        *target_disk.effective_status.read().unwrap(),
+        target_disk.effective_status(),
         HwStatus::Up,
         "disk should be Up before absence"
     );
@@ -995,7 +995,7 @@ async fn diskdb_e2e_suspect_rediscovery() {
         "expected 1 status change (Up → Suspect)"
     );
     assert_eq!(
-        *target_disk.effective_status.read().unwrap(),
+        target_disk.effective_status(),
         HwStatus::Suspect,
         "disk should be Suspect after first absence"
     );
@@ -1043,7 +1043,7 @@ async fn diskdb_e2e_suspect_rediscovery() {
         "expected 1 status change (Suspect → Up)"
     );
     assert_eq!(
-        *target_disk.effective_status.read().unwrap(),
+        target_disk.effective_status(),
         HwStatus::Up,
         "disk should be Up after rediscovery"
     );

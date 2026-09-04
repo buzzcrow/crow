@@ -218,16 +218,16 @@ impl CompactionEngine {
             let Some(dg) = container.get_disk_group(dg_id) else {
                 continue;
             };
-            let bind = *dg.bind.read().unwrap();
+            let bind = dg.bind();
             let disks = dg.disks.read().unwrap().clone();
             for disk in disks {
                 // Collect active zone indices to skip (I4).
                 let active_zone_indices: std::collections::HashSet<u32> = {
-                    let active = disk.active_zone_context.read().unwrap();
+                    let active = disk.active_zone_context.load();
                     active.iter().map(|z| z.zone_index).collect()
                 };
-                let zones = disk.zones.read().unwrap().clone();
-                for zone in zones {
+                let zones = disk.zones.load_full();
+                for zone in zones.iter() {
                     // Skip active zones — no concurrent allocate (I4).
                     if active_zone_indices.contains(&zone.zone_index) {
                         continue;
@@ -239,7 +239,7 @@ impl CompactionEngine {
                         continue;
                     }
                     if let Err(e) =
-                        compact_zone(&self.kv, bind, disk.disk_id, &zone, zone.zone_index, metrics).await
+                        compact_zone(&self.kv, bind, disk.disk_id, zone, zone.zone_index, metrics).await
                     {
                         tracing::warn!(
                             disk_id = ?disk.disk_id,
@@ -343,7 +343,7 @@ impl PreparatoryThread {
             let Some(dg) = container.get_disk_group(dg_id) else {
                 continue;
             };
-            let bind = *dg.bind.read().unwrap();
+            let bind = dg.bind();
             let disks = dg.disks.read().unwrap().clone();
             for disk in disks {
                 self.preparatory_cycle_for_disk(bind, &disk, zone_rotate_count, metrics)
@@ -360,7 +360,7 @@ impl PreparatoryThread {
         zone_rotate_count: u32,
         metrics: &DiskdbMetrics,
     ) {
-        let zones = disk.zones.read().unwrap().clone();
+        let zones = disk.zones.load_full();
         let zone_num = zones.len();
         if zone_num == 0 || zone_rotate_count == 0 {
             return;
@@ -368,7 +368,7 @@ impl PreparatoryThread {
 
         // Collect active zone indices to skip (I4).
         let active_zone_indices: std::collections::HashSet<u32> = {
-            let active = disk.active_zone_context.read().unwrap();
+            let active = disk.active_zone_context.load();
             active.iter().map(|z| z.zone_index).collect()
         };
 

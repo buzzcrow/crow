@@ -660,6 +660,7 @@ dependencies = [
  "crossbeam-channel",
  "crowdb-common",
  "crowdb-console-shared",
+ "crowdb-diskdb-client",
  "crowdb-kv-client",
  "crowdb-protocol",
  "crowdb-rpc-ffi",

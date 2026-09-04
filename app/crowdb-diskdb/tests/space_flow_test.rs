@@ -44,7 +44,7 @@ fn make_disk(low: u64) -> Arc<DdbDisk> {
     disk.set_effective_status(HwStatus::Up);
     for zi in 0..ZONE_COUNT {
         let zone = Arc::new(DdbZone::new(disk_id(low), zi, DG, ZONE_CAP));
-        disk.add_zone(zone);
+        disk.add_zone(&zone);
     }
     disk.rebuild_active_zones(ZONE_ROTATE);
     disk
@@ -53,7 +53,7 @@ fn make_disk(low: u64) -> Arc<DdbDisk> {
 fn make_dg() -> Arc<DdbDiskGroup> {
     let dg = Arc::new(DdbDiskGroup::new(DG, 10, 1));
     // Default group status is Init; set to Up for allocation tests.
-    *dg.status.write().unwrap() = HwStatus::Up;
+    dg.set_status(HwStatus::Up);
     for i in 1..=DISK_COUNT {
         dg.add_disk(make_disk(u64::from(i)));
     }
@@ -160,7 +160,7 @@ fn multi_thread_no_double_allocation() {
 fn zone_rotate_one_uses_all_zones() {
     let dg = Arc::new(DdbDiskGroup::new(DG, 10, 1));
     // Default group status is Init; set to Up for allocation tests.
-    *dg.status.write().unwrap() = HwStatus::Up;
+    dg.set_status(HwStatus::Up);
     let disk = make_disk(1);
     dg.add_disk(disk);
     dg.rebuild_allocating_disks();

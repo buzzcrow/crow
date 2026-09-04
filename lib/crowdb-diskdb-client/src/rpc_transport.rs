@@ -537,7 +537,7 @@ fn check_ret_code(code: FBDiskdbRetCode, msg: Option<&str>) -> Result<()> {
     }
     let msg = msg.unwrap_or("unknown error");
     Err(match code {
-        FBDiskdbRetCode::NoSpace => DiskdbClientError::Rpc(format!("no space: {msg}")),
+        FBDiskdbRetCode::NoSpace => DiskdbClientError::NoSpace(msg.to_string()),
         FBDiskdbRetCode::NotOwner => DiskdbClientError::NotOwner(msg.to_string()),
         FBDiskdbRetCode::DiskNotFound => DiskdbClientError::Rpc(format!("disk not found: {msg}")),
         FBDiskdbRetCode::DiskGroupNotFound => DiskdbClientError::Rpc(format!("disk-group not found: {msg}")),

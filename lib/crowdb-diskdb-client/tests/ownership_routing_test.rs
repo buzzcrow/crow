@@ -18,10 +18,8 @@ use crowdb_test_harness::hardware::{seed_hardware, standard_disk_ids_3, DG_ID};
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn diskdb_client_e2e_validate_owner() {
-    if !check_binaries() {
-        return;
-    }
+async fn owner_validation_rejects_wrong_disk_group() {
+    require_binaries();
 
     // 1. Start kv cluster + seed hardware.
     eprintln!("=== validate-owner: starting kv cluster ===");
@@ -37,11 +35,24 @@ async fn diskdb_client_e2e_validate_owner() {
     // 3. Build client + refresh endpoints.
     let svc = cluster.make_service_registry_client();
     let transport = Arc::new(DiskdbRpcTransport::new());
-    let client = Arc::new(DiskdbClient::new(svc, transport).with_retry_config(RetryConfig {
-        max_retries: 5,
-        initial_backoff: Duration::from_millis(100),
-    }));
+    let client = Arc::new(
+        DiskdbClient::new(svc.clone(), transport).with_retry_config(RetryConfig {
+            max_retries: 5,
+            initial_backoff: Duration::from_millis(100),
+        }),
+    );
     client.refresh_endpoints().await.expect("refresh endpoints");
+
+    svc.register_diskdb(998, "127.0.0.1:1", &[101], &[])
+        .await
+        .expect("register temporary route");
+    client.refresh_endpoints().await.expect("add temporary route");
+    assert!(client.disk_group_ids().contains(&101));
+    svc.unregister("diskdb", 998)
+        .await
+        .expect("remove temporary route");
+    client.refresh_endpoints().await.expect("remove stale route");
+    assert!(!client.disk_group_ids().contains(&101));
 
     // 4. Allocate 1 block with owner = chunk A.
     let owner_a = make_chunk_id(0, 42);

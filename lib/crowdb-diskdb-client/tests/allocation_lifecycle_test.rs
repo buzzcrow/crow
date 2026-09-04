@@ -20,10 +20,8 @@ use crowdb_test_harness::hardware::{
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn diskdb_client_e2e_full_flow() {
-    if !check_binaries() {
-        return;
-    }
+async fn allocate_commit_and_free_through_client() {
+    require_binaries();
 
     // 1. Start the single-node kv cluster.
     eprintln!("=== starting kv cluster ===");

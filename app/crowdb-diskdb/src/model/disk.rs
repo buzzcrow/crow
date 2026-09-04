@@ -4,9 +4,10 @@
 //! `DdbDisk` — disk struct with zone management and the disk-level
 //! round-robin allocator (`disk_allocate`, `rotate_active_zones`).
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use crowdb_protocol::common::{DiskId, HwStatus};
 use crowdb_protocol::diskdb::rpc::DiskValue;
 use crowdb_protocol::{DiskGroupId, NodeId, RackId};
@@ -24,17 +25,17 @@ pub struct DdbDisk {
     pub disk_group_id: DiskGroupId,
     pub node_id: NodeId,
     pub rack_id: RackId,
-    pub disk_value: RwLock<DiskValue>,
+    pub disk_value: DiskValue,
     /// All zones on this disk, indexed by `zone_index`.
-    pub zones: RwLock<Vec<Arc<DdbZone>>>,
+    pub zones: ArcSwap<Vec<Arc<DdbZone>>>,
     /// Round-robin cursor for zone rotation scan.
     pub pos_v_zone: AtomicU64,
     /// RCU-published active zone set.
-    pub active_zone_context: RwLock<Arc<ActiveZoneContext>>,
+    pub active_zone_context: ArcSwap<ActiveZoneContext>,
     /// Round-robin cursor over the active set.
     pub pos_v_zone_ctx: AtomicU64,
     /// Effective `HwStatus` for this disk (node/group/disk combined).
-    pub effective_status: RwLock<HwStatus>,
+    effective_status: AtomicI32,
     /// R74 per-disk hot-path counters. `None` in tests that don't
     /// track metrics; attached during `disk_add_init` and
     /// `load_disk_group`.
@@ -58,20 +59,24 @@ impl DdbDisk {
             disk_group_id,
             node_id,
             rack_id,
-            disk_value: RwLock::new(disk_value),
-            zones: RwLock::new(Vec::new()),
+            disk_value,
+            zones: ArcSwap::from_pointee(Vec::new()),
             pos_v_zone: AtomicU64::new(0),
-            active_zone_context: RwLock::new(Arc::new(Vec::new())),
+            active_zone_context: ArcSwap::from_pointee(Vec::new()),
             pos_v_zone_ctx: AtomicU64::new(0),
-            effective_status: RwLock::new(HwStatus::Init),
+            effective_status: AtomicI32::new(HwStatus::Init as i32),
             metrics: None,
             zone_load_spawned: AtomicBool::new(false),
         }
     }
 
     /// Add a zone to this disk.
-    pub fn add_zone(&self, zone: Arc<DdbZone>) {
-        self.zones.write().unwrap().push(zone);
+    pub fn add_zone(&self, zone: &Arc<DdbZone>) {
+        self.zones.rcu(|current| {
+            let mut zones = (**current).clone();
+            zones.push(Arc::clone(zone));
+            Arc::new(zones)
+        });
     }
 
     /// Atomically claim the right to spawn a background zone load task.
@@ -86,7 +91,11 @@ impl DdbDisk {
 
     /// Whether this disk can accept allocations.
     pub fn allocatable(&self) -> bool {
-        *self.effective_status.read().unwrap() == HwStatus::Up
+        self.effective_status() == HwStatus::Up
+    }
+
+    pub fn effective_status(&self) -> HwStatus {
+        HwStatus::try_from(self.effective_status.load(Ordering::Acquire)).unwrap_or(HwStatus::Init)
     }
 
     /// Directly set the effective status, bypassing transition
@@ -95,7 +104,7 @@ impl DdbDisk {
     /// a test/direct-set helper. Zones follow the disk-level
     /// `HwStatus` — no per-zone marking.
     pub fn set_effective_status(&self, status: HwStatus) {
-        *self.effective_status.write().unwrap() = status;
+        self.effective_status.store(status as i32, Ordering::Release);
     }
 
     /// Disk-level allocate — round-robin over the active zone set,
@@ -112,7 +121,7 @@ impl DdbDisk {
         if !self.allocatable() {
             return None;
         }
-        let zones = self.zones.read().unwrap();
+        let zones = self.zones.load();
         let zone_num = zones.len();
         if zone_num == 0 {
             return None;
@@ -121,7 +130,7 @@ impl DdbDisk {
 
         for _ in 0..max_loop {
             // RCU read: clone the Arc, drop the lock.
-            let ctx = Arc::clone(&self.active_zone_context.read().unwrap());
+            let ctx = self.active_zone_context.load_full();
             let active = ctx.as_ref();
             if active.is_empty() {
                 if !self.rotate_active_zones(&ctx, zone_rotate_count) {
@@ -156,21 +165,14 @@ impl DdbDisk {
     ///
     /// Returns `false` if no allocatable zones remain.
     fn rotate_active_zones(&self, old_ctx: &Arc<ActiveZoneContext>, zone_rotate_count: u32) -> bool {
-        let zones = self.zones.read().unwrap();
+        let zones = self.zones.load();
         let zone_num = zones.len();
         if zone_num == 0 {
             return false;
         }
         // RCU check: if another thread already rotated, retry.
-        {
-            let current = self.active_zone_context.read().unwrap();
-            if !Arc::ptr_eq(&current, old_ctx) {
-                return true; // caller retries disk_allocate
-            }
-        }
-        // Take write lock and re-check (double-checked locking).
-        let mut ctx_guard = self.active_zone_context.write().unwrap();
-        if !Arc::ptr_eq(&ctx_guard, old_ctx) {
+        let current = self.active_zone_context.load_full();
+        if !Arc::ptr_eq(&current, old_ctx) {
             return true;
         }
         #[allow(clippy::cast_possible_truncation)]
@@ -200,15 +202,20 @@ impl DdbDisk {
                 }
             }
         }
-        // Clear compacted_ready on published zones — they will need
-        // re-compaction after being allocated from and freed.
-        for zone in &new_ctx {
-            zone.clear_compacted_ready();
-        }
         // Advance pos_v_zone past the scanned range.
         self.pos_v_zone.fetch_add(zone_num as u64, Ordering::Relaxed);
-        *ctx_guard = Arc::new(new_ctx);
-        !ctx_guard.is_empty()
+        let new_ctx = Arc::new(new_ctx);
+        let populated = !new_ctx.is_empty();
+        let previous = self
+            .active_zone_context
+            .compare_and_swap(old_ctx, Arc::clone(&new_ctx));
+        if !Arc::ptr_eq(&previous, old_ctx) {
+            return true;
+        }
+        for zone in new_ctx.iter() {
+            zone.clear_compacted_ready();
+        }
+        populated
     }
 
     /// Record a persist-only free in a specific zone: increment
@@ -216,7 +223,7 @@ impl DdbDisk {
     /// `used_count` decrement — the bitmap is a conservative over-
     /// estimate (I1). Compaction is the sole bit-clearer (I3).
     pub fn free(&self, zone_index: u32, _unit_offset: u64, _unit_count: u32) -> bool {
-        let zones = self.zones.read().unwrap();
+        let zones = self.zones.load();
         let idx = zone_index as usize;
         if idx >= zones.len() {
             return false;
@@ -229,7 +236,7 @@ impl DdbDisk {
     /// `zone_rotate_count` allocatable zones. Called by disk-add init
     /// (§3.5) and recovery (R73).
     pub fn rebuild_active_zones(&self, zone_rotate_count: u32) {
-        let zones = self.zones.read().unwrap();
+        let zones = self.zones.load();
         let mut new_ctx: Vec<Arc<DdbZone>> = Vec::with_capacity(zone_rotate_count as usize);
         for zone in zones.iter() {
             if new_ctx.len() >= zone_rotate_count as usize {
@@ -239,14 +246,14 @@ impl DdbDisk {
                 new_ctx.push(Arc::clone(zone));
             }
         }
-        *self.active_zone_context.write().unwrap() = Arc::new(new_ctx);
+        self.active_zone_context.store(Arc::new(new_ctx));
     }
 
     // ── R74 space-metrics accessors ───────────────────────────────
 
     /// The disk's `unit_size_bytes` (from `disk_value`).
     fn unit_size_bytes(&self) -> u32 {
-        self.disk_value.read().unwrap().unit_size_bytes
+        self.disk_value.unit_size_bytes
     }
 
     /// Aggregated usage across all zones (R74 §2). Reads `disk_value`
@@ -257,7 +264,7 @@ impl DdbDisk {
     #[must_use]
     pub fn usage(&self) -> DiskUsage {
         let unit_size_bytes = self.unit_size_bytes();
-        let zones = self.zones.read().unwrap();
+        let zones = self.zones.load();
         let mut capacity_bytes = 0u64;
         let mut busy_bytes = 0u64;
         let mut busy_zone_count = 0u32;
@@ -271,7 +278,7 @@ impl DdbDisk {
         #[allow(clippy::cast_possible_truncation)]
         let zone_count = zones.len() as u32;
         #[allow(clippy::cast_possible_truncation)]
-        let active_zone_count = self.active_zone_context.read().unwrap().len() as u32;
+        let active_zone_count = self.active_zone_context.load().len() as u32;
         let free_bytes = capacity_bytes.saturating_sub(busy_bytes);
         let free_zone_count = zone_count.saturating_sub(busy_zone_count);
         DiskUsage {
@@ -292,7 +299,7 @@ impl DdbDisk {
     #[must_use]
     pub fn zone_usages(&self) -> Vec<ZoneUsage> {
         let unit_size_bytes = self.unit_size_bytes();
-        let zones = self.zones.read().unwrap();
+        let zones = self.zones.load();
         zones
             .iter()
             .map(|z| ZoneUsage::from_zone(z, unit_size_bytes))

@@ -207,14 +207,7 @@ impl RecoveryScanTask {
     /// count.
     pub async fn run(&self) -> u64 {
         let disk_id = self.disk.disk_id;
-        let zone_count = self
-            .disk
-            .zones
-            .read()
-            .unwrap()
-            .len()
-            .try_into()
-            .unwrap_or(u32::MAX);
+        let zone_count = self.disk.zones.load().len().try_into().unwrap_or(u32::MAX);
 
         // Read persisted progress (resume on restart). Preserve
         // `started_at_ms` across resumes so the record reflects the
@@ -431,10 +424,10 @@ pub async fn recover_disk_to_up(
     // bit-clearer). In v1 this is a no-op (no frees written by the
     // placeholder scan). In the future, this merges the scan's
     // FreeBlockValues into the bitmap.
-    let zone_count: u32 = disk.zones.read().unwrap().len().try_into().unwrap_or(u32::MAX);
+    let zone_count: u32 = disk.zones.load().len().try_into().unwrap_or(u32::MAX);
     for zi in 0..zone_count {
         let zone = {
-            let zones = disk.zones.read().unwrap();
+            let zones = disk.zones.load();
             Arc::clone(&zones[zi as usize])
         };
         if let Err(e) =

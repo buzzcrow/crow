@@ -294,10 +294,13 @@ pub async fn run_concurrent_benchmark(client: &Arc<DiskdbClient>) {
     );
 }
 
-/// Check if the test can run (both kv-server and diskdb binaries available).
-pub fn check_binaries() -> bool {
+/// Require both subprocess binaries used by diskdb component tests.
+pub fn require_binaries() {
     let bin = crowdb_diskdb_bin();
-    crate::hardware::check_binaries(bin.as_deref())
+    assert!(
+        crate::hardware::check_binaries(bin.as_deref()),
+        "diskdb component tests require built crowdb-kv-server and crowdb-diskdb binaries"
+    );
 }
 
 /// Build a `DiskdbClient` with standard retry config.

@@ -180,13 +180,13 @@ impl RecalcEngine {
     /// Recalc all zones across all disks in one disk-group.
     pub async fn recalc_disk_group(&self, dg_id: DiskGroupId) -> Option<DiskGroupRecalcResult> {
         let dg = self.container.get_disk_group(dg_id)?;
-        let bind = *dg.bind.read().unwrap();
+        let bind = dg.bind();
         let disks_snapshot: Vec<(DiskId, ZoneList)> = {
             let disks = dg.disks.read().unwrap();
             disks
                 .iter()
                 .map(|d| {
-                    let zones = d.zones.read().unwrap();
+                    let zones = d.zones.load();
                     let zone_info: Vec<(u32, u32, Arc<DdbZone>)> = zones
                         .iter()
                         .map(|z| (z.zone_index, z.unit_capacity, Arc::clone(z)))

@@ -32,7 +32,7 @@ fn make_disk_with_zones(zone_count: u32, zone_capacity: u32) -> Arc<DdbDisk> {
     ));
     disk.set_effective_status(HwStatus::Up);
     for zi in 0..zone_count {
-        disk.add_zone(Arc::new(DdbZone::new(
+        disk.add_zone(&Arc::new(DdbZone::new(
             DiskId { high: 0, low: 1 },
             zi,
             1,
@@ -137,10 +137,10 @@ fn test_transition_disk_applies_status_without_zone_marking() {
 
     // The disk-level status is the sole gatekeeper; zones are not
     // marked individually (R76 — no per-zone marking).
-    assert_eq!(*disk.effective_status.read().unwrap(), HwStatus::Bad);
-    let zones = disk.zones.read().unwrap();
+    assert_eq!(disk.effective_status(), HwStatus::Bad);
+    let zones = disk.zones.load();
     for z in zones.iter() {
-        assert_eq!(*z.zone_state.read().unwrap(), DdbZoneHealth::Healthy);
+        assert_eq!(z.health(), DdbZoneHealth::Healthy);
     }
 }
 
@@ -158,7 +158,7 @@ fn test_transition_disk_rejects_illegal() {
         })
     );
     // Status unchanged.
-    assert_eq!(*disk.effective_status.read().unwrap(), HwStatus::Up);
+    assert_eq!(disk.effective_status(), HwStatus::Up);
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn test_transition_disk_group_legal() {
     machine.transition_disk_group(&dg, HwStatus::Up).unwrap();
     let result = machine.transition_disk_group(&dg, HwStatus::Suspect);
     assert_eq!(result, Ok(HwStatus::Suspect));
-    assert_eq!(*dg.status.read().unwrap(), HwStatus::Suspect);
+    assert_eq!(dg.status(), HwStatus::Suspect);
 }
 
 #[test]
@@ -180,7 +180,7 @@ fn test_transition_disk_group_rejects_illegal() {
     machine.transition_disk_group(&dg, HwStatus::Up).unwrap();
     let result = machine.transition_disk_group(&dg, HwStatus::Init);
     assert!(result.is_err());
-    assert_eq!(*dg.status.read().unwrap(), HwStatus::Up);
+    assert_eq!(dg.status(), HwStatus::Up);
 }
 
 #[test]

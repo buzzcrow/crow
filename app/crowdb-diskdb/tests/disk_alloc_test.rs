@@ -36,7 +36,7 @@ fn make_disk(disk_low: u64, zone_count: u32, zone_capacity: u32) -> Arc<DdbDisk>
     disk.set_effective_status(HwStatus::Up);
     for zi in 0..zone_count {
         let zone = Arc::new(DdbZone::new(disk_id(disk_low), zi, DG, zone_capacity));
-        disk.add_zone(zone);
+        disk.add_zone(&zone);
     }
     disk.rebuild_active_zones(ZONE_ROTATE);
     disk
@@ -45,7 +45,7 @@ fn make_disk(disk_low: u64, zone_count: u32, zone_capacity: u32) -> Arc<DdbDisk>
 fn make_dg_with_disks(disk_specs: &[(u64, u32, u32)]) -> Arc<DdbDiskGroup> {
     let dg = Arc::new(DdbDiskGroup::new(DG, 1, 1));
     // Default group status is Init; set to Up for allocation tests.
-    *dg.status.write().unwrap() = HwStatus::Up;
+    dg.set_status(HwStatus::Up);
     for &(disk_low, zone_count, zone_capacity) in disk_specs {
         let disk = make_disk(disk_low, zone_count, zone_capacity);
         dg.add_disk(disk);
@@ -99,7 +99,7 @@ fn disk_free_is_persist_only() {
     let disk = make_disk(1, 1, 64);
     // Fill the zone completely.
     while disk.disk_allocate(1, CAS_RETRY, ZONE_ROTATE).is_some() {}
-    let zones = disk.zones.read().unwrap();
+    let zones = disk.zones.load();
     assert_eq!(zones[0].used_count.load(std::sync::atomic::Ordering::Acquire), 64);
     let backlog_before = zones[0]
         .uncompacted_free_record_count
@@ -136,7 +136,7 @@ fn rotate_clears_compacted_ready_on_published_zones() {
     // rebuild_active_zones picks the first 4 zones. Mark all zones
     // compacted_ready = true first (simulating recovery / compaction).
     {
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         for zone in zones.iter() {
             zone.mark_compacted_ready();
         }
@@ -150,7 +150,7 @@ fn rotate_clears_compacted_ready_on_published_zones() {
     disk.disk_allocate(1, CAS_RETRY, ZONE_ROTATE);
     // After rotation, the new active zones should have
     // compacted_ready = false (cleared on publish).
-    let active = disk.active_zone_context.read().unwrap();
+    let active = disk.active_zone_context.load();
     assert!(
         !active.is_empty(),
         "active set should not be empty after rotation"

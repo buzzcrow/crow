@@ -6,15 +6,15 @@
 use super::disk_group::DdbDiskGroup;
 use crate::liveness::lifecycle::LifecycleState;
 use crowdb_protocol::DiskGroupId;
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 /// Per-instance singleton managing all owned disk-groups.
 pub struct DdbDiskGroupContainer {
-    disk_groups: RwLock<HashMap<DiskGroupId, Arc<DdbDiskGroup>>>,
+    disk_groups: DashMap<DiskGroupId, Arc<DdbDiskGroup>>,
     pub(crate) instance_id: u64,
     pub(crate) degraded: AtomicBool,
     pub(crate) lifecycle: LifecycleState,
@@ -27,7 +27,7 @@ pub struct DdbDiskGroupContainer {
 impl DdbDiskGroupContainer {
     pub fn new(instance_id: u64) -> Self {
         Self {
-            disk_groups: RwLock::new(HashMap::new()),
+            disk_groups: DashMap::new(),
             instance_id,
             degraded: AtomicBool::new(false),
             lifecycle: LifecycleState::new(),
@@ -37,7 +37,7 @@ impl DdbDiskGroupContainer {
 
     pub(crate) fn add_disk_group(&self, dg: Arc<DdbDiskGroup>) {
         let dg_id = dg.disk_group_id;
-        self.disk_groups.write().unwrap().insert(dg_id, dg);
+        self.disk_groups.insert(dg_id, dg);
     }
 
     /// Replace an existing disk-group with a recovered one (same
@@ -45,19 +45,37 @@ impl DdbDiskGroupContainer {
     /// fully-reconstructed disk-group.
     pub fn replace_disk_group(&self, dg: Arc<DdbDiskGroup>) {
         let dg_id = dg.disk_group_id;
-        self.disk_groups.write().unwrap().insert(dg_id, dg);
+        self.disk_groups.insert(dg_id, dg);
+    }
+
+    pub fn replace_disk_group_if_current(
+        &self,
+        expected: &Arc<DdbDiskGroup>,
+        expected_bind: (u64, u64),
+        loaded: Arc<DdbDiskGroup>,
+    ) -> bool {
+        let Some(mut entry) = self.disk_groups.get_mut(&expected.disk_group_id) else {
+            return false;
+        };
+        if !Arc::ptr_eq(entry.value(), expected) || entry.value().bind() != expected_bind {
+            return false;
+        }
+        *entry = loaded;
+        true
     }
 
     pub(crate) fn remove_disk_group(&self, dg_id: DiskGroupId) {
-        self.disk_groups.write().unwrap().remove(&dg_id);
+        self.disk_groups.remove(&dg_id);
     }
 
     pub fn get_disk_group(&self, dg_id: DiskGroupId) -> Option<Arc<DdbDiskGroup>> {
-        self.disk_groups.read().unwrap().get(&dg_id).cloned()
+        self.disk_groups
+            .get(&dg_id)
+            .map(|entry| Arc::clone(entry.value()))
     }
 
     pub fn disk_group_ids(&self) -> Vec<DiskGroupId> {
-        self.disk_groups.read().unwrap().keys().copied().collect()
+        self.disk_groups.iter().map(|entry| *entry.key()).collect()
     }
 
     pub fn enter_degraded_mode(&self) {
@@ -96,7 +114,7 @@ impl DdbDiskGroupContainer {
     /// Number of owned disk-groups (R74 `owned_disk_group_count` gauge).
     #[must_use]
     pub fn disk_group_count(&self) -> usize {
-        self.disk_groups.read().unwrap().len()
+        self.disk_groups.len()
     }
 
     /// Current startup phase.

@@ -110,6 +110,14 @@ impl DiskdbClient {
         Ok(())
     }
 
+    /// Return the currently discovered disk-groups in stable order.
+    #[must_use]
+    pub fn disk_group_ids(&self) -> Vec<DiskGroupId> {
+        let mut ids: Vec<_> = self.endpoint_cache.iter().map(|entry| *entry.key()).collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// Look up the endpoint for `dg_id`, refreshing on cache miss.
     async fn endpoint_for(&self, dg_id: DiskGroupId) -> Result<String> {
         if let Some(endpoint) = self.endpoint_cache.get(&dg_id) {

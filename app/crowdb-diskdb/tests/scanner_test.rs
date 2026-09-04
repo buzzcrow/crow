@@ -312,7 +312,7 @@ async fn scan_ghosts_detects_and_corrects_ghost_busy() {
     wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
 
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
-    let bind = *dg.bind.read().unwrap();
+    let bind = dg.bind();
 
     // 2. Allocate 1 block to have a real busy record.
     let owner_chunk = make_chunk_id(0, 42);
@@ -348,7 +348,7 @@ async fn scan_ghosts_detects_and_corrects_ghost_busy() {
     let zone_idx: u32 = ZONE_COUNT - 1; // non-active zone (active set = 0..zone_rotate_count)
     let ghost_bit: u32 = 120; // high bit, no record there
     {
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         let zone = &zones[zone_idx as usize];
         // Verify the bit is currently clear.
         assert!(
@@ -363,14 +363,14 @@ async fn scan_ghosts_detects_and_corrects_ghost_busy() {
     // 4. Run scan_ghosts with auto_correct=true, reverify_delay_ms=0.
     let scan_kv = cluster.make_ddb_kv_client();
     let zones_list: Vec<(u32, u32, Arc<crowdb_diskdb::model::zone::DdbZone>)> = {
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         zones
             .iter()
             .map(|z| (z.zone_index, z.unit_capacity, Arc::clone(z)))
             .collect()
     };
     let active_zones: Vec<Arc<crowdb_diskdb::model::zone::DdbZone>> = {
-        let active = disk.active_zone_context.read().unwrap();
+        let active = disk.active_zone_context.load();
         active.iter().cloned().collect()
     };
     let disk_id = disk.disk_id;
@@ -394,7 +394,7 @@ async fn scan_ghosts_detects_and_corrects_ghost_busy() {
 
     // 6. Verify the ghost bit was auto-corrected (cleared).
     {
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         let zone = &zones[zone_idx as usize];
         assert!(
             !zone.usage_bits.is_set(ghost_bit),
@@ -439,7 +439,7 @@ async fn scan_integrity_detects_corrupt_snapshot() {
     wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
 
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
-    let bind = *dg.bind.read().unwrap();
+    let bind = dg.bind();
 
     // Pick the first disk + a non-active zone (the scanner skips the
     // active set).
@@ -469,14 +469,14 @@ async fn scan_integrity_detects_corrupt_snapshot() {
     // Run scan_integrity.
     let scan_kv = cluster.make_ddb_kv_client();
     let zones_list: Vec<(u32, u32, Arc<crowdb_diskdb::model::zone::DdbZone>)> = {
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         zones
             .iter()
             .map(|z| (z.zone_index, z.unit_capacity, Arc::clone(z)))
             .collect()
     };
     let active_zones: Vec<Arc<crowdb_diskdb::model::zone::DdbZone>> = {
-        let active = disk.active_zone_context.read().unwrap();
+        let active = disk.active_zone_context.load();
         active.iter().cloned().collect()
     };
     let result = crowdb_diskdb::scanner::integrity::scan_integrity(

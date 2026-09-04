@@ -177,7 +177,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
 
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
-    let bind = *dg.bind.read().unwrap();
+    let bind = dg.bind();
 
     // 3. Allocate 3 blocks (anti-affinity spreads across 3 disks),
     //    free 1 of them. After this, 2 blocks remain busy.
@@ -234,7 +234,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     let dg2 = container2
         .get_disk_group(DG_ID)
         .expect("disk-group exists after restart");
-    let bind2 = *dg2.bind.read().unwrap();
+    let bind2 = dg2.bind();
     assert_eq!(bind, bind2);
 
     // 5. Run strategy 1 recovery on each zone of each disk.
@@ -243,8 +243,8 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
 
     let disks = dg2.disks.read().unwrap().clone();
     for disk in &disks {
-        let zone_size_units = disk.disk_value.read().unwrap().zone_size_units;
-        let zone_count = disk.disk_value.read().unwrap().zone_count;
+        let zone_size_units = disk.disk_value.zone_size_units;
+        let zone_count = disk.disk_value.zone_count;
         // Collect all recovered zones first (no lock held during async
         // recovery calls). Then clear any zones the background_zone_load
         // task (spawned by keepalive.tick) may have added and push the
@@ -269,12 +269,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
                 .expect("recovery should succeed");
             recovered_zones.push(Arc::new(recovered_zone));
         }
-        let mut zones = disk.zones.write().unwrap();
-        zones.clear();
-        for zone in recovered_zones {
-            zones.push(zone);
-        }
-        drop(zones);
+        disk.zones.store(Arc::new(recovered_zones));
         disk.rebuild_active_zones(4);
     }
     dg2.rebuild_allocating_disks();
@@ -290,7 +285,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
             .find(|d| d.disk_id == seg.disk_id.unwrap_or_default())
             .cloned()
             .expect("disk exists");
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         let zone = &zones[seg.zone_index as usize];
         #[allow(clippy::cast_possible_truncation)]
         let bit = seg.unit_offset as u32;
@@ -308,7 +303,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
             .find(|d| d.disk_id == seg.disk_id.unwrap_or_default())
             .cloned()
             .expect("disk exists");
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         let zone = &zones[seg.zone_index as usize];
         #[allow(clippy::cast_possible_truncation)]
         let bit = seg.unit_offset as u32;
@@ -327,8 +322,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
         .iter()
         .map(|d| {
             d.zones
-                .read()
-                .unwrap()
+                .load()
                 .iter()
                 .map(|z| u64::from(z.used_count.load(std::sync::atomic::Ordering::Acquire)))
                 .sum::<u64>()
@@ -425,7 +419,7 @@ async fn recovery_strategy2_journal_replay() {
     wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
 
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
-    let bind = *dg.bind.read().unwrap();
+    let bind = dg.bind();
 
     // 2. Allocate 3 blocks, free 1. 2 remain busy.
     let owner_chunk = make_chunk_id(0, 42);
@@ -475,7 +469,7 @@ async fn recovery_strategy2_journal_replay() {
     assert_eq!(outcome2.groups_added, 1);
 
     let dg2 = container2.get_disk_group(DG_ID).expect("dg exists after restart");
-    let bind2 = *dg2.bind.read().unwrap();
+    let bind2 = dg2.bind();
     assert_eq!(bind, bind2);
 
     // 4. Load via load_disk_group (strategy 2 with fallback).
@@ -483,7 +477,7 @@ async fn recovery_strategy2_journal_replay() {
         let disks_guard = dg2.disks.read().unwrap();
         disks_guard
             .iter()
-            .map(|d| (d.disk_id, d.disk_value.read().unwrap().clone()))
+            .map(|d| (d.disk_id, d.disk_value.clone()))
             .collect()
     };
     let recovery_kv = Arc::new(cluster.make_ddb_kv_client());
@@ -505,7 +499,7 @@ async fn recovery_strategy2_journal_replay() {
             .find(|d| d.disk_id == seg.disk_id.unwrap_or_default())
             .cloned()
             .expect("disk exists");
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         let zone = &zones[seg.zone_index as usize];
         #[allow(clippy::cast_possible_truncation)]
         let bit = seg.unit_offset as u32;
@@ -523,7 +517,7 @@ async fn recovery_strategy2_journal_replay() {
             .find(|d| d.disk_id == seg.disk_id.unwrap_or_default())
             .cloned()
             .expect("disk exists");
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         let zone = &zones[seg.zone_index as usize];
         #[allow(clippy::cast_possible_truncation)]
         let bit = seg.unit_offset as u32;
@@ -542,8 +536,7 @@ async fn recovery_strategy2_journal_replay() {
         .iter()
         .map(|d| {
             d.zones
-                .read()
-                .unwrap()
+                .load()
                 .iter()
                 .map(|z| u64::from(z.used_count.load(std::sync::atomic::Ordering::Acquire)))
                 .sum::<u64>()
@@ -568,7 +561,7 @@ async fn recovery_strategy2_journal_replay() {
         .cloned()
         .expect("freed disk exists");
     let freed_zone = {
-        let zones = freed_disk.zones.read().unwrap();
+        let zones = freed_disk.zones.load();
         Arc::clone(&zones[freed_zone_idx as usize])
     };
     let compaction_kv = cluster.make_ddb_kv_client();
@@ -599,8 +592,7 @@ async fn recovery_strategy2_journal_replay() {
         .iter()
         .map(|d| {
             d.zones
-                .read()
-                .unwrap()
+                .load()
                 .iter()
                 .map(|z| u64::from(z.used_count.load(std::sync::atomic::Ordering::Acquire)))
                 .sum::<u64>()
@@ -653,7 +645,7 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
     wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
 
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
-    let bind = *dg.bind.read().unwrap();
+    let bind = dg.bind();
 
     // 2. Allocate 1 block, then free it. This creates 1 free record.
     let owner_chunk = make_chunk_id(0, 42);
@@ -679,7 +671,7 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
         .expect("disk exists");
     let zone_idx = segment.zone_index;
     let zone = {
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         Arc::clone(&zones[zone_idx as usize])
     };
 
@@ -799,7 +791,7 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
     wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
 
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
-    let bind = *dg.bind.read().unwrap();
+    let bind = dg.bind();
 
     // 2. Allocate block A at offset 0, then free it. This creates a
     // free record with freed_ts = T1.
@@ -829,7 +821,7 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
         .cloned()
         .expect("disk exists");
     let zone = {
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         Arc::clone(&zones[zone_idx as usize])
     };
     // Read the free record's freed_ts.
@@ -1007,7 +999,7 @@ async fn recovery_persist_only_is_idempotent() {
     wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
 
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
-    let bind = *dg.bind.read().unwrap();
+    let bind = dg.bind();
 
     // 2. Allocate 3 blocks, then free 1. This creates a mix of busy
     // and free records on disk.
@@ -1029,10 +1021,7 @@ async fn recovery_persist_only_is_idempotent() {
     // 3. Collect the disk values for recovery.
     let disk_values: Vec<(DiskId, DiskValue)> = {
         let disks = dg.disks.read().unwrap();
-        disks
-            .iter()
-            .map(|d| (d.disk_id, d.disk_value.read().unwrap().clone()))
-            .collect()
+        disks.iter().map(|d| (d.disk_id, d.disk_value.clone())).collect()
     };
 
     // 4. First load — load_disk_group from KV state.
@@ -1050,7 +1039,7 @@ async fn recovery_persist_only_is_idempotent() {
     {
         let disks = dg1.disks.read().unwrap();
         for disk in disks.iter() {
-            let zones = disk.zones.read().unwrap();
+            let zones = disk.zones.load();
             for zone in zones.iter() {
                 state1.push((
                     disk.disk_id.low,
@@ -1074,7 +1063,7 @@ async fn recovery_persist_only_is_idempotent() {
     {
         let disks = dg2.disks.read().unwrap();
         for disk in disks.iter() {
-            let zones = disk.zones.read().unwrap();
+            let zones = disk.zones.load();
             for zone in zones.iter() {
                 state2.push((
                     disk.disk_id.low,
@@ -1108,7 +1097,7 @@ async fn recovery_persist_only_is_idempotent() {
             .find(|d| d.disk_id == freed_disk_id)
             .cloned()
             .expect("disk exists");
-        let zones = disk.zones.read().unwrap();
+        let zones = disk.zones.load();
         let zone = &zones[freed_zone_idx as usize];
         assert!(
             zone.usage_bits.is_set(freed_offset),
@@ -1184,7 +1173,7 @@ async fn preparatory_thread_produces_ready_zones() {
         let disks = dg.disks.read().unwrap();
         let mut result = Vec::new();
         for disk in disks.iter() {
-            let zones = disk.zones.read().unwrap();
+            let zones = disk.zones.load();
             for zone in zones.iter() {
                 let backlog = zone
                     .uncompacted_free_record_count
@@ -1217,10 +1206,10 @@ async fn preparatory_thread_produces_ready_zones() {
         for disk in disks.iter() {
             // Collect active zone indices.
             let active_indices: std::collections::HashSet<u32> = {
-                let active = disk.active_zone_context.read().unwrap();
+                let active = disk.active_zone_context.load();
                 active.iter().map(|z| z.zone_index).collect()
             };
-            let zones = disk.zones.read().unwrap();
+            let zones = disk.zones.load();
             for zone in zones.iter() {
                 if active_indices.contains(&zone.zone_index) {
                     continue;
@@ -1243,10 +1232,10 @@ async fn preparatory_thread_produces_ready_zones() {
         let disks = dg.disks.read().unwrap();
         for disk in disks.iter() {
             let active_indices: std::collections::HashSet<u32> = {
-                let active = disk.active_zone_context.read().unwrap();
+                let active = disk.active_zone_context.load();
                 active.iter().map(|z| z.zone_index).collect()
             };
-            let zones = disk.zones.read().unwrap();
+            let zones = disk.zones.load();
             for zone in zones.iter() {
                 if active_indices.contains(&zone.zone_index) {
                     continue;

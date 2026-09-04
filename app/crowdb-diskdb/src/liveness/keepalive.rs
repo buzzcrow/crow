@@ -418,8 +418,16 @@ impl KeepAlive {
                 return None;
             }
         };
-        let node_status = HwStatus::try_from(node.status).ok()?;
-        let group_status = HwStatus::try_from(group.value.status).ok()?;
+        let Ok(node_status) = HwStatus::try_from(node.status) else {
+            warn!(status = node.status, "sync: invalid node status");
+            self.record_observation_failure();
+            return None;
+        };
+        let Ok(group_status) = HwStatus::try_from(group.value.status) else {
+            warn!(status = group.value.status, "sync: invalid disk-group status");
+            self.record_observation_failure();
+            return None;
+        };
         Some(ObservedDiskGroup {
             owner,
             bind,
@@ -448,13 +456,12 @@ impl KeepAlive {
                     entry.owner.node_id,
                     entry.owner.rack_id,
                 ));
-                *dg.bind.write().unwrap() = entry.bind;
+                dg.set_bind(entry.bind);
                 self.container.add_disk_group(dg);
                 groups_added += 1;
             } else if let Some(dg) = self.container.get_disk_group(entry.owner.dg_id) {
-                let mut bind = dg.bind.write().unwrap();
-                if *bind != entry.bind {
-                    *bind = entry.bind;
+                if dg.bind() != entry.bind {
+                    dg.set_bind(entry.bind);
                 }
             }
         }
@@ -503,7 +510,7 @@ impl KeepAlive {
         let node_status = observed.node_status;
         let group_status = observed.group_status;
         // A.1: apply group status to the in-memory DdbDiskGroup.
-        let current_group_status = *dg.status.read().unwrap();
+        let current_group_status = dg.status();
         if current_group_status != group_status {
             match self.status_machine.transition_disk_group(dg, group_status) {
                 Ok(_) => {
@@ -573,7 +580,7 @@ impl KeepAlive {
             disks_guard.iter().find(|d| d.disk_id == *disk_id).cloned()
         };
         let Some(disk) = disk else { return };
-        let old_status = *disk.effective_status.read().unwrap();
+        let old_status = disk.effective_status();
         // R81: an Init disk's status is owned by the background zone
         // load task — it transitions Init → disk_value.status only
         // after all zones are loaded. Skipping reconciliation here
@@ -584,7 +591,7 @@ impl KeepAlive {
             // disk-group was unbound (bind == (0,0)). If the bind is
             // now set, spawn the zone load task that was deferred in
             // disk_add_init.
-            let bind = *dg.bind.read().unwrap();
+            let bind = dg.bind();
             if bind != (0, 0) {
                 if let Some(ref kv) = self.kv {
                     if disk.try_claim_zone_load() {
@@ -654,7 +661,7 @@ impl KeepAlive {
             disks_guard.iter().find(|d| d.disk_id == *disk_id).cloned()
         };
         let Some(disk) = disk else { return };
-        let old_status = *disk.effective_status.read().unwrap();
+        let old_status = disk.effective_status();
 
         // R81: Bad disks are kept in memory (recovery scan running).
         if old_status == HwStatus::Bad {
@@ -852,7 +859,7 @@ impl KeepAlive {
             warn!(disk = ?disk.disk_id, "recovery scan: no impacted-blocks gauge, skipping");
             return;
         };
-        let bind = *dg.bind.read().unwrap();
+        let bind = dg.bind();
         let cancel = Arc::new(AtomicBool::new(false));
         let task = RecoveryScanTask::new(
             Arc::clone(disk),
@@ -909,7 +916,7 @@ impl KeepAlive {
         // status is already set by `transition_disk` above; the
         // `recover_disk_to_up` helper no longer sets it itself.
         if let Some(ref kv) = self.kv {
-            let bind = *dg.bind.read().unwrap();
+            let bind = dg.bind();
             if let Some(m) = &self.metrics {
                 recover_disk_to_up(disk, bind, kv, self.config.zone_rotate_count, m).await;
             } else {
@@ -956,7 +963,7 @@ impl KeepAlive {
         // Spawn background zone load if we have a kv client and the
         // disk-group is bound to a real data group.
         if let Some(ref kv) = self.kv {
-            let bind = *dg.bind.read().unwrap();
+            let bind = dg.bind();
             if bind == (0, 0) {
                 info!(
                     disk = ?disk_id,
@@ -1091,19 +1098,10 @@ impl KeepAlive {
                                 disk = ?disk_id,
                                 zone = zi,
                                 error = %e2,
-                                "init-state load: strategy 1 also failed; using empty zone"
+                                "init-state load: strategy 1 also failed; quarantining disk"
                             );
                             all_ok = false;
-                            (
-                                crate::model::zone::DdbZone::new(
-                                    disk_id,
-                                    zi,
-                                    dg.disk_group_id,
-                                    unit_capacity,
-                                ),
-                                0,
-                                false,
-                            )
+                            break;
                         }
                     }
                 }
@@ -1123,7 +1121,7 @@ impl KeepAlive {
                 zones_needing_baseline.push((zi, Arc::clone(&zone)));
             }
 
-            disk.add_zone(zone);
+            disk.add_zone(&zone);
         }
 
         // B.2: write baseline ZoneValue records for fresh-disk zones

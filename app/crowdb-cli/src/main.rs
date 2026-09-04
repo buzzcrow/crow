@@ -107,6 +107,7 @@ impl Cli {
                 let v = match verb {
                     BenchVerb::Kv(_) => "kv",
                     BenchVerb::Rpc(_) => "rpc",
+                    BenchVerb::Diskdb(_) => "diskdb",
                 };
                 format!("bench-{v}")
             }

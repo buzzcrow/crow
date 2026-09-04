@@ -97,7 +97,7 @@ reports, or tests that pass without exercising the public client path.
 - **Operational verification** — scanner, recalc, metrics, health, and
   configuration reload are exercised through their public surfaces.
 - **Allocate benchmark** — an operator runs `crowdb-cli bench diskdb
-  allocate` against an automatically initialized three-node cluster
+  allocate` against the three-node cluster produced by cluster initialization
   with four disks per node. Loaders allocate until all disk space is
   exhausted or the configured time limit is reached, then the command
   reports performance and verifies space accounting.
@@ -106,7 +106,7 @@ reports, or tests that pass without exercising the public client path.
   allocate and 30% free distribution; frees draw only from blocks
   successfully allocated by that run. The command stops at its time
   limit and verifies the final live allocation set against diskdb
-  records and capacity statistics. Free-only benchmark mode is not
+  live-set accounting and capacity statistics. Free-only benchmark mode is not
   supported.
 
 ## Solution
@@ -175,16 +175,17 @@ contract.
    `lib/crowdb-test-harness/src/diskdb.rs`: add `crowdb-cli bench
    diskdb allocate` and `crowdb-cli bench diskdb mix`, following the
    existing KV benchmark command structure and result format. The
-   command initializes three KV/diskdb nodes, one disk-group per node,
-   and four disks in each group. It supports `--mode mem|block` for the
-   CROWDB KV backing store and drives requests across all three groups.
+   cluster initialization creates three KV/diskdb nodes, one disk-group
+   per node, and four disks in each group; the command validates that
+   topology before starting. It supports `--mode mem|block` for the
+   configured CROWDB KV backing store and drives requests across all three groups.
    Allocate mode stops when capacity is exhausted or `--duration-secs`
    expires. Mix mode uses a deterministic 70/30 allocate/free selection
    and stops at the deadline; there is no standalone free mode. Report
    per-operation throughput and latency, stop reason, successful/failed operation
    counts, allocated/freed/live units, and capacity before/after. Verify
-   live segments against durable records, then compact/recalculate as
-   needed before comparing reported busy/free/capacity totals.
+   the non-duplicated live segment set and compare its expected bytes
+   with reported busy/free/capacity totals after compaction.
 
 ### Flow diagram
 

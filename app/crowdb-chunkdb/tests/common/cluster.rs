@@ -632,8 +632,8 @@ pub async fn wait_for_disks_ready(
             let disks = dg.disks.read().unwrap();
             let all_ready = disks.len() == expected_disks
                 && disks.iter().all(|d| {
-                    *d.effective_status.read().unwrap() == HwStatus::Up
-                        && u32::try_from(d.zones.read().unwrap().len()).unwrap_or(0) == expected_zones
+                    d.effective_status() == HwStatus::Up
+                        && u32::try_from(d.zones.load().len()).unwrap_or(0) == expected_zones
                 });
             if all_ready {
                 return;

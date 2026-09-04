@@ -33,7 +33,7 @@ fn make_disk(disk_id: DiskId, dg_id: u64, zone_count: u32) -> Arc<DdbDisk> {
     disk.set_effective_status(HwStatus::Up);
     for zi in 0..zone_count {
         let zone = DdbZone::new(disk_id, zi, dg_id, ZONE_CAP);
-        disk.add_zone(Arc::new(zone));
+        disk.add_zone(&Arc::new(zone));
     }
     disk.rebuild_active_zones(2);
     disk
@@ -43,7 +43,7 @@ fn make_disk(disk_id: DiskId, dg_id: u64, zone_count: u32) -> Arc<DdbDisk> {
 fn disk_usage_sums_across_zones() {
     let disk = make_disk(DiskId { high: 0, low: 1 }, 100, 2);
     // Allocate 5 units in zone 0 only.
-    let zones = disk.zones.read().unwrap();
+    let zones = disk.zones.load();
     let _ = zones[0].allocate(5, 100);
     drop(zones);
 
@@ -62,7 +62,7 @@ fn disk_usage_sums_across_zones() {
 #[test]
 fn disk_usage_counts_full_zone_as_busy() {
     let disk = make_disk(DiskId { high: 0, low: 2 }, 100, 1);
-    let zones = disk.zones.read().unwrap();
+    let zones = disk.zones.load();
     // Fill the single zone completely (128 units, 1 at a time).
     for _ in 0..128 {
         assert!(zones[0].allocate(1, 100).is_some());
@@ -86,7 +86,7 @@ fn disk_group_aggregate_usage_sums_disks() {
     // Allocate in disk 1, zone 0.
     {
         let d1 = dg.disks.read().unwrap()[0].clone();
-        let zones = d1.zones.read().unwrap();
+        let zones = d1.zones.load();
         let _ = zones[0].allocate(5, 100);
     }
 
@@ -120,7 +120,7 @@ fn disk_group_zone_usage_returns_brief_counts() {
     let dg = Arc::new(DdbDiskGroup::new(100, 10, 1));
     let d1 = make_disk(DiskId { high: 0, low: 1 }, 100, 2);
     {
-        let zones = d1.zones.read().unwrap();
+        let zones = d1.zones.load();
         let _ = zones[0].allocate(5, 100);
     }
     dg.add_disk(d1);

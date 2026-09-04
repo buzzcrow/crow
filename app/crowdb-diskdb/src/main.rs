@@ -418,8 +418,8 @@ async fn run_zone_load(
         let Some(dg) = container.get_disk_group(dg_id) else {
             continue;
         };
-        let bind = *dg.bind.read().unwrap();
-        let group_status = *dg.status.read().unwrap();
+        let bind = dg.bind();
+        let group_status = dg.status();
         let disks: Vec<(
             crowdb_protocol::common::DiskId,
             crowdb_protocol::diskdb::rpc::DiskValue,
@@ -427,7 +427,7 @@ async fn run_zone_load(
             let disks_guard = dg.disks.read().unwrap();
             disks_guard
                 .iter()
-                .map(|d| (d.disk_id, d.disk_value.read().unwrap().clone()))
+                .map(|d| (d.disk_id, d.disk_value.clone()))
                 .collect()
         };
         let load_start = std::time::Instant::now();
@@ -449,17 +449,12 @@ async fn run_zone_load(
                 return;
             }
         };
-        let Some(current) = container.get_disk_group(dg_id) else {
-            info!(dg_id, "discarding completed load for no-longer-owned disk-group");
-            continue;
-        };
-        if !Arc::ptr_eq(&current, &dg) || *current.bind.read().unwrap() != bind {
+        loaded.set_status(group_status);
+        loaded.rebuild_allocating_disks();
+        if !container.replace_disk_group_if_current(&dg, bind, loaded) {
             info!(dg_id, "discarding stale disk-group load result");
             continue;
         }
-        *loaded.status.write().unwrap() = group_status;
-        loaded.rebuild_allocating_disks();
-        container.replace_disk_group(loaded);
         metrics
             .recovery_duration_ms
             .observe(load_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));

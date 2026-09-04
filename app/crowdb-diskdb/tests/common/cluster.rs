@@ -410,8 +410,8 @@ pub async fn wait_for_disks_ready(
             let disks = dg.disks.read().unwrap();
             let all_ready = disks.len() == expected_disks
                 && disks.iter().all(|d| {
-                    *d.effective_status.read().unwrap() == HwStatus::Up
-                        && u32::try_from(d.zones.read().unwrap().len()).unwrap_or(0) == expected_zones
+                    d.effective_status() == HwStatus::Up
+                        && u32::try_from(d.zones.load().len()).unwrap_or(0) == expected_zones
                 });
             if all_ready {
                 return;
@@ -425,8 +425,8 @@ pub async fn wait_for_disks_ready(
                     disks
                         .iter()
                         .map(|d| {
-                            let s = *d.effective_status.read().unwrap();
-                            let zc = d.zones.read().unwrap().len();
+                            let s = d.effective_status();
+                            let zc = d.zones.load().len();
                             format!("{s:?}({zc}z)")
                         })
                         .collect::<Vec<_>>()
