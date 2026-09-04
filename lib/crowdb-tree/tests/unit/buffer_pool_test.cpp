@@ -10,8 +10,12 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <condition_variable>
 #include <cstdio>
+#include <future>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace crowdb::tree;
@@ -41,6 +45,67 @@ PageAddr addr(int i)
 {
     return static_cast<PageAddr>(i) * kPb;
 }
+
+class BlockingReadStore final : public PageStore
+{
+  public:
+    Status write_at(uint64_t off, const uint8_t *buf, size_t len) override
+    {
+        return inner_.write_at(off, buf, len);
+    }
+
+    Status read_at(uint64_t off, uint8_t *buf, size_t len) const override
+    {
+        if (off == blocked_addr_) {
+            std::unique_lock lk(mu_);
+            read_started_ = true;
+            cv_.notify_all();
+            cv_.wait(lk, [this] { return allow_read_; });
+        }
+        return inner_.read_at(off, buf, len);
+    }
+
+    Status sync() override
+    {
+        return Status::Ok();
+    }
+
+    [[nodiscard]] uint64_t size() const override
+    {
+        return inner_.size();
+    }
+
+    [[nodiscard]] uint32_t iu_size() const override
+    {
+        return 1;
+    }
+
+    void block(PageAddr target)
+    {
+        blocked_addr_ = target;
+    }
+
+    void wait_until_blocked() const
+    {
+        std::unique_lock lk(mu_);
+        cv_.wait(lk, [this] { return read_started_; });
+    }
+
+    void release_read()
+    {
+        std::scoped_lock lk(mu_);
+        allow_read_ = true;
+        cv_.notify_all();
+    }
+
+  private:
+    mutable MemPageStore            inner_{1};
+    mutable std::mutex              mu_;
+    mutable std::condition_variable cv_;
+    PageAddr                        blocked_addr_ = kNoAddr;
+    mutable bool                    read_started_ = false;
+    bool                            allow_read_   = false;
+};
 } // namespace
 
 TEST(BufferPool, MissLoadsFromStoreAfterEviction)
@@ -87,6 +152,41 @@ TEST(BufferPool, HitDoesNotMiss)
     auto after = pool.stats();
     EXPECT_EQ(after.misses, before.misses);
     EXPECT_GT(after.hits, before.hits);
+}
+
+TEST(BufferPool, UnrelatedHitContinuesWhileMissReadIsBlocked)
+{
+    BlockingReadStore store;
+    BufferPool        pool(static_cast<size_t>(2) * kPb, kPb, &store);
+    {
+        FrameRef resident;
+        ASSERT_TRUE(pool.pin_new(1, addr(1), &resident).ok());
+        build_leaf(&pool, &resident, 1, 1);
+    }
+    ASSERT_TRUE(pool.flush_dirty().ok());
+    std::vector<uint8_t> durable(kPb);
+    LeafFrameBuilder     builder(durable.data(), kPb);
+    std::string          cell = encode_cell(2, OpKind::kPut, Slice("v"));
+    ASSERT_TRUE(builder.try_append_sorted(Slice(key(2)), Slice(cell)));
+    builder.finish(2, kInvalidPageId);
+    ASSERT_TRUE(store.write_at(addr(2), durable.data(), durable.size()).ok());
+
+    store.block(addr(2));
+    auto miss = std::async(std::launch::async, [&] {
+        FrameRef loaded;
+        return pool.pin(2, addr(2), &loaded);
+    });
+    store.wait_until_blocked();
+
+    auto hit = std::async(std::launch::async, [&] {
+        FrameRef resident;
+        return pool.pin(1, addr(1), &resident);
+    });
+    EXPECT_EQ(hit.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
+    EXPECT_TRUE(hit.get().ok());
+
+    store.release_read();
+    EXPECT_TRUE(miss.get().ok());
 }
 
 TEST(BufferPool, PinnedFramesAreNotEvicted)

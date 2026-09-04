@@ -18,7 +18,7 @@ Implements [the lock design](design-lock-review.md) for
 
 ## C++ Hot Paths
 
-- [ ] **Buffer-pool reservation state**: define per-frame loading/writeback
+- [x] **Buffer-pool reservation state**: define per-frame loading/writeback
   states and move miss/victim/flush I/O outside `mu_`. Files:
   `lib/crowdb-tree/{include/crowdb-tree/buffer_pool.h,src/buffer_pool.cpp,tests/unit/buffer_pool_test.cpp}`.
 - [x] **Handler RCU table**: atomic immutable handler-table publication and

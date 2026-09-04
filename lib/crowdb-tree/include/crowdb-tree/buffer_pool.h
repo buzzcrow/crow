@@ -21,6 +21,7 @@
 #include "crowdb-tree/page_types.h" // kInvalidPageId
 #include "crowdb-tree/status.h"
 
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -171,11 +172,14 @@ class BufferPool
 
     struct FrameMeta
     {
+        enum class State : uint8_t { kReady, kLoading, kWriteback };
+
         uint64_t page_id = kInvalidPageId;
         PageAddr addr    = 0;
         int32_t  pin     = 0;
         uint8_t  ref     = 0;
         bool     dirty   = false;
+        State    state   = State::kReady;
     };
 
     [[nodiscard]] uint8_t *frame_bytes(uint32_t idx)
@@ -190,18 +194,19 @@ class BufferPool
     [[nodiscard]] int64_t ht_find(uint64_t page_id) const;
     void                  ht_erase(uint64_t page_id);
 
-    // CLOCK: find a victim frame index (evicting/writing back as needed). Returns
-    // -1 if every frame is pinned. Caller holds mu_.
+    // CLOCK: choose an unpinned ready victim. The caller reserves it before I/O.
+    // Returns -1 if every frame is pinned or reserved. Caller holds mu_.
     [[nodiscard]] int64_t acquire_victim();
-    Status                write_back(uint32_t idx);
+    Status                write_back_io(uint32_t idx, PageAddr addr);
 
-    mutable std::mutex     mu_;
-    std::vector<uint8_t>   arena_;
-    std::vector<FrameMeta> frames_;
-    uint32_t               page_bytes_;
-    uint32_t               num_frames_;
-    PageStore             *store_;
-    uint32_t               clock_hand_ = 0;
+    mutable std::mutex      mu_;
+    std::condition_variable state_cv_;
+    std::vector<uint8_t>    arena_;
+    std::vector<FrameMeta>  frames_;
+    uint32_t                page_bytes_;
+    uint32_t                num_frames_;
+    PageStore              *store_;
+    uint32_t                clock_hand_ = 0;
 
     std::vector<uint64_t> ht_key_; // page_id or kInvalidPageId
     std::vector<uint32_t> ht_val_; // frame index

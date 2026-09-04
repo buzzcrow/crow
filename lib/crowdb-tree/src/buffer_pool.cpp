@@ -126,11 +126,10 @@ void BufferPool::ht_erase(uint64_t page_id)
     }
 }
 
-Status BufferPool::write_back(uint32_t idx)
+Status BufferPool::write_back_io(uint32_t idx, PageAddr addr)
 {
-    FrameMeta &m  = frames_[idx];
-    auto       t0 = std::chrono::steady_clock::now();
-    Status     s  = store_->write_at(m.addr, frame_bytes(idx), page_bytes_);
+    auto   t0 = std::chrono::steady_clock::now();
+    Status s  = store_->write_at(addr, frame_bytes(idx), page_bytes_);
     if (m_writeback_l_ != nullptr) {
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
         m_writeback_l_->observe(static_cast<uint64_t>(ns));
@@ -140,11 +139,6 @@ Status BufferPool::write_back(uint32_t idx)
     }
     if (m_page_writeback_bw_ != nullptr) {
         m_page_writeback_bw_->observe(page_bytes_);
-    }
-    m.dirty = false;
-    ++stats_.writebacks;
-    if (m_writebacks_ != nullptr) {
-        m_writebacks_->inc();
     }
     return Status::Ok();
 }
@@ -156,7 +150,7 @@ int64_t BufferPool::acquire_victim()
         uint32_t idx = clock_hand_;
         clock_hand_  = (clock_hand_ + 1) % num_frames_;
         FrameMeta &m = frames_[idx];
-        if (m.pin > 0) {
+        if (m.pin > 0 || m.state != FrameMeta::State::kReady) {
             continue;
         }
         if (m.page_id == kInvalidPageId) {
@@ -166,17 +160,6 @@ int64_t BufferPool::acquire_victim()
             m.ref = 0;
             continue;
         }
-        if (m.dirty) {
-            if (!write_back(idx).ok()) {
-                continue;
-            }
-        }
-        ht_erase(m.page_id);
-        m.page_id = kInvalidPageId;
-        ++stats_.evictions;
-        if (m_evictions_ != nullptr) {
-            m_evictions_->inc();
-        }
         return idx;
     }
     return -1; // everything pinned
@@ -184,44 +167,87 @@ int64_t BufferPool::acquire_victim()
 
 Status BufferPool::pin(uint64_t page_id, PageAddr addr, FrameRef *out)
 {
-    std::scoped_lock lk(mu_);
-    int64_t          hit = ht_find(page_id);
-    if (hit >= 0) {
-        auto       idx = static_cast<uint32_t>(hit);
+    std::unique_lock lk(mu_);
+    for (;;) {
+        int64_t hit = ht_find(page_id);
+        if (hit >= 0) {
+            auto       idx = static_cast<uint32_t>(hit);
+            FrameMeta &m   = frames_[idx];
+            if (m.state != FrameMeta::State::kReady) {
+                state_cv_.wait(lk);
+                continue;
+            }
+            ++m.pin;
+            m.ref = 1;
+            ++stats_.hits;
+            *out = FrameRef(this, idx, frame_bytes(idx), page_id);
+            return Status::Ok();
+        }
+
+        ++stats_.misses;
+        int64_t v = acquire_victim();
+        if (v < 0) {
+            return Status::internal_error("BufferPool: no evictable frame (all pinned)");
+        }
+        auto       idx = static_cast<uint32_t>(v);
         FrameMeta &m   = frames_[idx];
-        ++m.pin;
-        m.ref = 1;
-        ++stats_.hits;
+        if (m.page_id != kInvalidPageId) {
+            const uint64_t old_page_id = m.page_id;
+            const PageAddr old_addr    = m.addr;
+            const bool     dirty       = m.dirty;
+            m.state                    = FrameMeta::State::kWriteback;
+            lk.unlock();
+            Status ws = dirty ? write_back_io(idx, old_addr) : Status::Ok();
+            lk.lock();
+            if (!ws.ok()) {
+                m.state = FrameMeta::State::kReady;
+                state_cv_.notify_all();
+                return ws;
+            }
+            if (dirty) {
+                m.dirty = false;
+                ++stats_.writebacks;
+                if (m_writebacks_ != nullptr) {
+                    m_writebacks_->inc();
+                }
+            }
+            ht_erase(old_page_id);
+            ++stats_.evictions;
+            if (m_evictions_ != nullptr) {
+                m_evictions_->inc();
+            }
+        }
+
+        m.page_id = page_id;
+        m.addr    = addr;
+        m.pin     = 1;
+        m.ref     = 1;
+        m.dirty   = false;
+        m.state   = FrameMeta::State::kLoading;
+        ht_insert(page_id, idx);
+        lk.unlock();
+        Status rs    = store_->read_at(addr, frame_bytes(idx), page_bytes_);
+        bool   valid = rs.ok() && frame_validate(frame_bytes(idx), page_bytes_);
+        lk.lock();
+        if (!valid) {
+            ht_erase(page_id);
+            m.page_id = kInvalidPageId;
+            m.pin     = 0;
+            m.ref     = 0;
+            m.state   = FrameMeta::State::kReady;
+            state_cv_.notify_all();
+            return rs.ok() ? Status::corruption("BufferPool: page CRC on load") : rs;
+        }
+        m.state = FrameMeta::State::kReady;
+        state_cv_.notify_all();
         *out = FrameRef(this, idx, frame_bytes(idx), page_id);
         return Status::Ok();
     }
-    ++stats_.misses;
-    int64_t v = acquire_victim();
-    if (v < 0) {
-        return Status::internal_error("BufferPool: no evictable frame (all pinned)");
-    }
-    auto   idx = static_cast<uint32_t>(v);
-    Status rs  = store_->read_at(addr, frame_bytes(idx), page_bytes_);
-    if (!rs.ok()) {
-        return rs;
-    }
-    if (!frame_validate(frame_bytes(idx), page_bytes_)) {
-        return Status::corruption("BufferPool: page CRC on load");
-    }
-    FrameMeta &m = frames_[idx];
-    m.page_id    = page_id;
-    m.addr       = addr;
-    m.pin        = 1;
-    m.ref        = 1;
-    m.dirty      = false;
-    ht_insert(page_id, idx);
-    *out = FrameRef(this, idx, frame_bytes(idx), page_id);
-    return Status::Ok();
 }
 
 Status BufferPool::pin_new(uint64_t page_id, PageAddr addr, FrameRef *out)
 {
-    std::scoped_lock lk(mu_);
+    std::unique_lock lk(mu_);
     if (ht_find(page_id) >= 0) {
         return Status::invalid_argument("BufferPool: page_id already resident");
     }
@@ -229,43 +255,100 @@ Status BufferPool::pin_new(uint64_t page_id, PageAddr addr, FrameRef *out)
     if (v < 0) {
         return Status::internal_error("BufferPool: no evictable frame (all pinned)");
     }
-    auto idx = static_cast<uint32_t>(v);
+    auto       idx = static_cast<uint32_t>(v);
+    FrameMeta &m   = frames_[idx];
+    if (m.page_id != kInvalidPageId) {
+        const uint64_t old_page_id = m.page_id;
+        const PageAddr old_addr    = m.addr;
+        const bool     dirty       = m.dirty;
+        m.state                    = FrameMeta::State::kWriteback;
+        lk.unlock();
+        Status ws = dirty ? write_back_io(idx, old_addr) : Status::Ok();
+        lk.lock();
+        if (!ws.ok()) {
+            m.state = FrameMeta::State::kReady;
+            state_cv_.notify_all();
+            return ws;
+        }
+        if (dirty) {
+            m.dirty = false;
+            ++stats_.writebacks;
+            if (m_writebacks_ != nullptr) {
+                m_writebacks_->inc();
+            }
+        }
+        ht_erase(old_page_id);
+        ++stats_.evictions;
+        if (m_evictions_ != nullptr) {
+            m_evictions_->inc();
+        }
+    }
     std::memset(frame_bytes(idx), 0, page_bytes_);
-    FrameMeta &m = frames_[idx];
-    m.page_id    = page_id;
-    m.addr       = addr;
-    m.pin        = 1;
-    m.ref        = 1;
-    m.dirty      = false;
+    m.page_id = page_id;
+    m.addr    = addr;
+    m.pin     = 1;
+    m.ref     = 1;
+    m.dirty   = false;
+    m.state   = FrameMeta::State::kReady;
     ht_insert(page_id, idx);
+    state_cv_.notify_all();
     *out = FrameRef(this, idx, frame_bytes(idx), page_id);
     return Status::Ok();
 }
 
 Status BufferPool::acquire_frame(uint32_t *out_idx, uint8_t **out_bytes)
 {
-    std::scoped_lock lk(mu_);
+    std::unique_lock lk(mu_);
     int64_t          v = acquire_victim();
     if (v < 0) {
         return Status::internal_error("BufferPool: no evictable frame (all pinned)");
     }
-    auto idx = static_cast<uint32_t>(v);
+    auto       idx = static_cast<uint32_t>(v);
+    FrameMeta &m   = frames_[idx];
+    if (m.page_id != kInvalidPageId) {
+        const uint64_t old_page_id = m.page_id;
+        const PageAddr old_addr    = m.addr;
+        const bool     dirty       = m.dirty;
+        m.state                    = FrameMeta::State::kWriteback;
+        lk.unlock();
+        Status ws = dirty ? write_back_io(idx, old_addr) : Status::Ok();
+        lk.lock();
+        if (!ws.ok()) {
+            m.state = FrameMeta::State::kReady;
+            state_cv_.notify_all();
+            return ws;
+        }
+        if (dirty) {
+            m.dirty = false;
+            ++stats_.writebacks;
+            if (m_writebacks_ != nullptr) {
+                m_writebacks_->inc();
+            }
+        }
+        ht_erase(old_page_id);
+        ++stats_.evictions;
+        if (m_evictions_ != nullptr) {
+            m_evictions_->inc();
+        }
+    }
     std::memset(frame_bytes(idx), 0, page_bytes_);
-    FrameMeta &m = frames_[idx];
-    m.page_id    = kInvalidPageId; // anonymous: not findable by page_id
-    m.addr       = kNoAddr;
-    m.pin        = 1; // pinned-resident until release_frame (never evicted)
-    m.ref        = 1;
-    m.dirty      = true; // not yet durable
-    *out_idx     = idx;
-    *out_bytes   = frame_bytes(idx);
+    m.page_id = kInvalidPageId; // anonymous: not findable by page_id
+    m.addr    = kNoAddr;
+    m.pin     = 1; // pinned-resident until release_frame (never evicted)
+    m.ref     = 1;
+    m.dirty   = true; // not yet durable
+    m.state   = FrameMeta::State::kReady;
+    state_cv_.notify_all();
+    *out_idx   = idx;
+    *out_bytes = frame_bytes(idx);
     return Status::Ok();
 }
 
 void BufferPool::release_frame(uint32_t idx)
 {
-    std::scoped_lock lk(mu_);
+    std::unique_lock lk(mu_);
     FrameMeta       &m = frames_[idx];
+    state_cv_.wait(lk, [&m] { return m.state == FrameMeta::State::kReady; });
     if (m.page_id != kInvalidPageId && ht_find(m.page_id) == static_cast<int64_t>(idx)) {
         ht_erase(m.page_id);
     }
@@ -286,19 +369,42 @@ void BufferPool::unpin(uint32_t idx)
 
 void BufferPool::mark_dirty(uint64_t page_id)
 {
-    std::scoped_lock lk(mu_);
-    int64_t          hit = ht_find(page_id);
-    if (hit >= 0) {
-        frames_[static_cast<uint32_t>(hit)].dirty = true;
+    std::unique_lock lk(mu_);
+    for (;;) {
+        int64_t hit = ht_find(page_id);
+        if (hit < 0) {
+            return;
+        }
+        FrameMeta &m = frames_[static_cast<uint32_t>(hit)];
+        if (m.state == FrameMeta::State::kReady) {
+            m.dirty = true;
+            return;
+        }
+        state_cv_.wait(lk);
     }
 }
 
 Status BufferPool::flush_dirty()
 {
-    std::scoped_lock lk(mu_);
     for (uint32_t idx = 0; idx < num_frames_; ++idx) {
-        if (frames_[idx].page_id != kInvalidPageId && frames_[idx].dirty) {
-            Status s = write_back(idx);
+        std::unique_lock lk(mu_);
+        FrameMeta       &m = frames_[idx];
+        state_cv_.wait(lk, [&m] { return m.state == FrameMeta::State::kReady; });
+        if (m.page_id != kInvalidPageId && m.dirty) {
+            const PageAddr addr = m.addr;
+            m.state             = FrameMeta::State::kWriteback;
+            lk.unlock();
+            Status s = write_back_io(idx, addr);
+            lk.lock();
+            if (s.ok()) {
+                m.dirty = false;
+                ++stats_.writebacks;
+                if (m_writebacks_ != nullptr) {
+                    m_writebacks_->inc();
+                }
+            }
+            m.state = FrameMeta::State::kReady;
+            state_cv_.notify_all();
             if (!s.ok()) {
                 return s;
             }
