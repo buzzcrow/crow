@@ -103,9 +103,9 @@ space accounting.
 | allocate | 1 | 512 | 1 | 4 | 4 | 4 | 4 | 64 | 64 | 197,085 | 2,461 | 5,161 | 20 s | 0 | exact |
 | mix | 3 | 1 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | 2,514 | 408 | 500 | 20 s | 0 | exact |
 | mix | 3 | 16 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | 43,360 | 359 | 566 | 20 s | 0 | exact |
-| mix | 3 | 128 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | — | — | — | 60 s | timeout | unknown |
-| mix | 3 | 512 | 1 | 4 | 4 | 4 | 4 | 64 | 64 | — | — | — | 60 s | timeout | unknown |
-| mix | 1 | 512 | 1 | 4 | 4 | 4 | 4 | 64 | 64 | — | — | — | 60 s | timeout | unknown |
+| mix | 3 | 128 | 1 | 4 | 4 | 4 | 4 | 32 | 32 | 130,286 | 934 | 1,862 | 20 s | 0 | exact |
+| mix | 3 | 256 | 1 | 4 | 4 | 4 | 4 | 32 | 32 | 154,893 | 1,561 | 3,364 | 20 s | 0 | exact |
+| mix | 1 | 256 | 1 | 4 | 4 | 4 | 4 | 32 | 32 | 162,021 | 1,493 | 3,160 | 20 s | 0 | exact |
 
 `Grp` is the number of KV data groups bound round-robin to DiskDB disk groups;
 three groups in the default three-node topology gives each node's DiskDB disk
@@ -115,9 +115,9 @@ DiskDB server, DiskDB KV-client, and KV-server RPC layers. The fixture uses
 single node's available space.
 
 The active regression matrix runs allocate and 70/30 allocate/free mix at 1,
-16, 128, and 512 threads. The 1/16/128-thread cases use two connections and
-two epoll workers on every RPC layer; 512 threads uses four of each. A separate
-512-thread case binds all DiskDB disk groups to one KV data group to measure
+16, 128, and 256 threads. The 1/16-thread cases use two connections and two
+epoll workers on every RPC layer; 128/256 threads use four of each. A separate
+256-thread case binds all DiskDB disk groups to one KV data group to measure
 the single-group ceiling. Other cases bind one KV data group per node.
 Environment overrides can replace the group, connection, or worker count for
 experiments.
@@ -155,8 +155,10 @@ Reference run roots:
 
 - `bench-log/diskdb-regression-20260905-115721`: completed allocation matrix
   and 1/16-thread mix cases; first 128-thread mix hang.
-- `bench-log/diskdb-regression-20260905-120810`: bounded 128/512-thread mix
-  retries, including the one-group case; all three timed out.
+- `bench-log/diskdb-regression-20260905-123406`: corrected 128/256-thread
+  three-group mix cases.
+- `bench-log/diskdb-regression-20260905-124053`: corrected 256-thread
+  one-group mix case with concurrent verification compaction.
 
 Each root retains command output and configuration plus three KV metrics/RPC
 log pairs, three DiskDB metrics/RPC log pairs, and one CLI metrics/RPC pair per

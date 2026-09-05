@@ -111,13 +111,15 @@ ops/s at 1 / 16 / 128 / 512 threads with three KV groups. The 512-thread
 single-group comparison reached 197,085 ops/s. All allocation cases had zero
 errors, deadline stop, and exact space accounting.
 
-The 1/16-thread mixed cases reached 2,514 and 43,360 ops/s with exact space.
-Mixed cases at 128 and 512 threads did not return after their 20-second
-workload window and were terminated by a 60-second outer timeout, including
-the 512-thread single-group case. Metrics attribute nearly all DiskDB handler
-time to KV persistence; bitmap scan is below one microsecond. The direct KV
-write sentinel peaks near 264K writes/s, also below 400K, so more DiskDB
-worker/connection tuning cannot satisfy the target.
+The mixed benchmark routing stall is fixed by caching disk-to-group ownership
+from successful allocation responses. With window/coalesce 32 and four
+connections/workers, the corrected 128-thread three-group case reaches 130,286
+ops/s; the 256-thread cases reach 154,893 ops/s with three groups and 162,021
+ops/s with one group. All complete at the deadline with zero errors and exact
+space. Metrics attribute nearly all DiskDB handler time to KV persistence;
+bitmap scan is below one microsecond. The direct KV write sentinel peaks near
+264K writes/s, also below 400K, so more DiskDB worker/connection tuning cannot
+satisfy the target.
 
 Continuation requires an architecture choice:
 

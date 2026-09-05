@@ -13,8 +13,8 @@
 #   DISKDB_BENCH_MODES          space-separated modes (default: "mem")
 #   DISKDB_BENCH_CASES          optional space-separated case labels
 #   DISKDB_BENCH_DATA_GROUPS    override the per-case KV data-group count
-#   DISKDB_BENCH_KV_INFLIGHT    KV proposal window (default: 64)
-#   DISKDB_BENCH_KV_COALESCE    KV coalesce max keys (default: 64)
+#   DISKDB_BENCH_KV_INFLIGHT    KV proposal window (default: 32)
+#   DISKDB_BENCH_KV_COALESCE    KV coalesce max keys (default: 32)
 #   DISKDB_BENCH_CONNECTIONS    override all RPC connection counts
 #   DISKDB_BENCH_RPC_WORKERS    override all RPC epoll-worker counts
 #   DISKDB_BENCH_DISK_CAPACITY  bytes per disk (default: 4 TiB)
@@ -24,26 +24,40 @@
 #
 # AMD Ryzen 9 5950X, 16c/32t, Linux 6.8, x86_64 (2026-09-05).
 # Memory KV/WAL, 3 KV nodes, 3 DiskDB instances, 12 x 4-TiB disks, one block
-# per request, and a 20-second workload window:
+# per request, and a 20-second workload window.
 #
-# Workload Grp Thread Block ClientConn DDBConn KVConn EpollWorker Win Coal   ops/s p50 p99 Dur Err     Space
-# allocate    3      1     1          2       2      2           2  64   64   2,500  407   508 20s 0       exact
-# allocate    3     16     1          2       2      2           2  64   64  43,488  359   557 20s 0       exact
-# allocate    3    128     1          2       2      2           2  64   64 139,986  872 1,714 20s 0       exact
-# allocate    3    512     1          4       4      4           4  64   64 190,507 2,473 6,317 20s 0       exact
-# allocate    1    512     1          4       4      4           4  64   64 197,085 2,461 5,161 20s 0       exact
-# mix         3      1     1          2       2      2           2  64   64   2,514  408   500 20s 0       exact
-# mix         3     16     1          2       2      2           2  64   64  43,360  359   566 20s 0       exact
-# mix         3    128     1          2       2      2           2  64   64       -    -     - 60s timeout unknown
-# mix         3    512     1          4       4      4           4  64   64       -    -     - 60s timeout unknown
-# mix         1    512     1          4       4      4           4  64   64       -    -     - 60s timeout unknown
+# Columns:
+#   Wl    — workload (allocate|mix)
+#   Grp   — KV data groups bound to disk groups (3 = one per node)
+#   Thr   — client threads
+#   Blk   — blocks per request
+#   Cli   — CLI-to-DiskDB connections
+#   Ddb   — DiskDB-to-KV connections
+#   Kv    — KV peer-pool connections
+#   Wkr   — epoll workers (client, DiskDB, KV-client, KV-server)
+#   Win   — KV proposal window (default: 32)
+#   Coal  — KV coalesce max keys (default: 32)
+#   ops/s — throughput
+#   p50   — latency p50 in microseconds
+#   p99   — latency p99 in microseconds
+#   Dur   — workload duration
+#   Err   — error count
+#   Spc   — space accounting (exact = busy delta matches expected delta)
 #
-# Grp is the number of KV data groups bound round-robin to DiskDB disk groups.
-# With the default topology, three groups means one KV group per node.
-# ClientConn is CLI-to-DiskDB; DDBConn is DiskDB-to-KV; KVConn is the KV peer
-# pool. EpollWorker applies uniformly to client, DiskDB, KV-client, and
-# KV-server RPC workers. High-concurrency mix cases did not return a benchmark
-# summary and were stopped by the 60-second outer timeout.
+# Wl     Grp  Thr  Blk  Cli  Ddb  Kv  Wkr  Win  Coal    ops/s  p50    p99  Dur  Err      Spc
+# alloc    3    1    1    2    2   2    2   32    32    2,500  407    508  20s  0        exact
+# alloc    3   16    1    2    2   2    2   32    32   43,488  359    557  20s  0        exact
+# alloc    3  128    1    4    4   4    4   32    32  139,986  872  1,714  20s  0        exact
+# alloc    3  256    1    4    4   4    4   32    32        -    -      -  20s  0        -
+# alloc    1  256    1    4    4   4    4   32    32        -    -      -  20s  0        -
+# mix      3    1    1    2    2   2    2   32    32    2,514  408    500  20s  0        exact
+# mix      3   16    1    2    2   2    2   32    32   43,360  359    566  20s  0        exact
+# mix      3  128    1    4    4   4    4   32    32  130,286  934  1,862  20s  0        exact
+# mix      3  256    1    4    4   4    4   32    32  154,893 1,561  3,364  20s  0        exact
+# mix      1  256    1    4    4   4    4   32    32  162,021 1,493  3,160  20s  0        exact
+#
+# Successful allocations populate the client's disk-to-group route cache, so
+# mixed frees do not issue discovery RPCs on their first use.
 #
 # The direct KV write sentinel peaks near 264K writes/s. Because one durable
 # DiskDB allocation produces one KV batch_write, DiskDB TPS is expected to be
@@ -59,8 +73,8 @@ MODES="${DISKDB_BENCH_MODES:-mem}"
 CASES="${DISKDB_BENCH_CASES:-}"
 DATA_GROUP_OVERRIDE="${DISKDB_BENCH_DATA_GROUPS:-}"
 DATA_GROUP_COUNT=3
-KV_INFLIGHT="${DISKDB_BENCH_KV_INFLIGHT:-64}"
-KV_COALESCE="${DISKDB_BENCH_KV_COALESCE:-64}"
+KV_INFLIGHT="${DISKDB_BENCH_KV_INFLIGHT:-32}"
+KV_COALESCE="${DISKDB_BENCH_KV_COALESCE:-32}"
 CONNECTIONS_OVERRIDE="${DISKDB_BENCH_CONNECTIONS:-}"
 RPC_WORKERS_OVERRIDE="${DISKDB_BENCH_RPC_WORKERS:-}"
 KV_RPC_WORKERS=2
@@ -131,10 +145,15 @@ deploy_case() {
     if [ "$mode" = "block" ]; then
         backend_args=(--kv-backend block --wal-backend block-device)
     fi
-    cli cluster local-deploy -n 3 -t kv "${backend_args[@]}" --metrics-interval 1 \
-        --event-write --peer-pool-size "$KV_PEER_POOL" \
-        --max-inflight "$KV_INFLIGHT" --coalesce-max-keys "$KV_COALESCE" \
-        --coalesce-drain-threshold 1 --rpc-workers "$KV_RPC_WORKERS"
+    local kv_args=(--metrics-interval 1 --event-write --peer-pool-size "$KV_PEER_POOL"
+        --rpc-workers "$KV_RPC_WORKERS")
+    if [ "$KV_INFLIGHT" -ne 0 ]; then
+        kv_args+=(--max-inflight "$KV_INFLIGHT")
+    fi
+    if [ "$KV_COALESCE" -ne 0 ]; then
+        kv_args+=(--coalesce-max-keys "$KV_COALESCE" --coalesce-drain-threshold 1)
+    fi
+    cli cluster local-deploy -n 3 -t kv "${backend_args[@]}" "${kv_args[@]}"
     local groups=()
     for group in $(seq 1 "$DATA_GROUP_COUNT"); do
         cli kv group add -s 0 -g "$group" -n 1,2,3
@@ -217,19 +236,19 @@ run_case() {
 echo "=== building release binaries ==="
 pixi run -- cargo build --release -p crowdb-cli -p crowdb-kv-server -p crowdb-diskdb
 mkdir -p "$LOG_ROOT" "$(dirname "$RESULTS_FILE")"
-printf 'workload\tgrp\tthread\tblock\tclient-connection\tdiskdb-connection\tkv-internal-connection\tepollworker\twin\tcoal\tops/s\tp50\tp99\tDur\tErr\tSpace\n' >"$RESULTS_FILE"
+printf 'Wl\tGrp\tThr\tBlk\tCli\tDdb\tKv\tWkr\tWin\tCoal\tops/s\tp50\tp99\tDur\tErr\tSpc\n' >"$RESULTS_FILE"
 
 for mode in $MODES; do
     run_case allocate "$mode" 1 1 "allocate_${mode}_1t" 2 2 3
     run_case allocate "$mode" 16 1 "allocate_${mode}_16t" 2 2 3
-    run_case allocate "$mode" 128 1 "allocate_${mode}_128t" 2 2 3
-    run_case allocate "$mode" 512 1 "allocate_${mode}_512t" 4 4 3
-    run_case allocate "$mode" 512 1 "allocate_${mode}_512t_1grp" 4 4 1
+    run_case allocate "$mode" 128 1 "allocate_${mode}_128t" 4 4 3
+    run_case allocate "$mode" 256 1 "allocate_${mode}_256t" 4 4 3
+    run_case allocate "$mode" 256 1 "allocate_${mode}_256t_1grp" 4 4 1
     run_case mix "$mode" 1 1 "mix_${mode}_1t" 2 2 3
     run_case mix "$mode" 16 1 "mix_${mode}_16t" 2 2 3
-    run_case mix "$mode" 128 1 "mix_${mode}_128t" 2 2 3
-    run_case mix "$mode" 512 1 "mix_${mode}_512t" 4 4 3
-    run_case mix "$mode" 512 1 "mix_${mode}_512t_1grp" 4 4 1
+    run_case mix "$mode" 128 1 "mix_${mode}_128t" 4 4 3
+    run_case mix "$mode" 256 1 "mix_${mode}_256t" 4 4 3
+    run_case mix "$mode" 256 1 "mix_${mode}_256t_1grp" 4 4 1
 done
 
 echo "=== DONE ==="

@@ -184,7 +184,7 @@ fn valid_args(args: &DiskdbArgs) -> bool {
     valid
 }
 
-async fn compact_for_verification(client: &DiskdbClient, groups: &[u64]) -> bool {
+async fn compact_for_verification(client: &Arc<DiskdbClient>, groups: &[u64]) -> bool {
     for _ in 0..3 {
         if let Err(error) = compact_all(client, groups).await {
             eprintln!("diskdb compaction failed: {error}");
@@ -410,19 +410,26 @@ async fn validate_topology(client: &DiskdbClient, groups: &[u64]) -> Result<(), 
     Ok(())
 }
 
-async fn compact_all(client: &DiskdbClient, groups: &[u64]) -> Result<(), DiskdbClientError> {
+async fn compact_all(client: &Arc<DiskdbClient>, groups: &[u64]) -> Result<(), DiskdbClientError> {
+    let mut requests = Vec::new();
     for group in groups {
         let response = client.query_disk_group(*group).await?;
         for disk in response.disk_groups.iter().flat_map(|entry| &entry.disks) {
             if let Some(disk_id) = disk.disk_id {
-                client
-                    .compact_zone(CompactZoneRequest {
-                        disk_id: Some(disk_id),
-                        zone_indices: Vec::new(),
-                    })
-                    .await?;
+                requests.push(CompactZoneRequest {
+                    disk_id: Some(disk_id),
+                    zone_indices: Vec::new(),
+                });
             }
         }
+    }
+    let mut tasks = tokio::task::JoinSet::new();
+    for request in requests {
+        let client = Arc::clone(client);
+        tasks.spawn(async move { client.compact_zone(request).await });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.map_err(|error| DiskdbClientError::Rpc(format!("compaction task failed: {error}")))??;
     }
     Ok(())
 }

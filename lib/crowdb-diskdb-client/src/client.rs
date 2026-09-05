@@ -139,11 +139,18 @@ impl DiskdbClient {
     /// Returns `DiskdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
     pub async fn allocate_blocks(&self, req: AllocateBlocksRequest) -> Result<AllocateResponse> {
         let dg_id = req.disk_group_id;
-        self.with_rpc_retry(dg_id, |endpoint, rpc| {
-            let req = req.clone();
-            async move { rpc.allocate_blocks(&endpoint, &req).await }
-        })
-        .await
+        let response = self
+            .with_rpc_retry(dg_id, |endpoint, rpc| {
+                let req = req.clone();
+                async move { rpc.allocate_blocks(&endpoint, &req).await }
+            })
+            .await?;
+        for segment in &response.segments {
+            if let Some(disk_id) = segment.disk_id {
+                self.disk_to_dg.insert(disk_id, dg_id);
+            }
+        }
+        Ok(response)
     }
 
     /// Free blocks. The request carries `Segment`s (each with

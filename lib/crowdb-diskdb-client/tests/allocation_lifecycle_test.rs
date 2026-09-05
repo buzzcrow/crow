@@ -56,6 +56,42 @@ async fn allocate_commit_and_free_through_client() {
     client.refresh_endpoints().await.expect("refresh endpoints");
     eprintln!("diskdb client endpoints refreshed");
 
+    // Concurrent first frees must route from their allocation responses
+    // without a discovery stampede on an initially empty disk-to-group cache.
+    let routing_client = Arc::clone(&client);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+        let barrier = Arc::new(tokio::sync::Barrier::new(32));
+        let mut tasks = Vec::with_capacity(32);
+        for task_id in 0..32_u64 {
+            let client = Arc::clone(&routing_client);
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                let response = client
+                    .allocate_blocks(AllocateBlocksRequest {
+                        disk_group_id: DG_ID,
+                        unit_count: 1,
+                        count: 1,
+                        exclude_disk_ids: vec![],
+                        owner_chunk: Some(make_chunk_id(1, task_id)),
+                    })
+                    .await
+                    .expect("concurrent route-cache allocation");
+                barrier.wait().await;
+                client
+                    .free_blocks(FreeBlocksRequest {
+                        segments: response.segments,
+                    })
+                    .await
+                    .expect("concurrent route-cache free")
+            }));
+        }
+        for task in tasks {
+            assert_eq!(task.await.expect("route-cache task").freed_count, 1);
+        }
+    })
+    .await
+    .expect("concurrent first frees must not stall routing");
+
     // 5. Smoke test: allocate 3 blocks, verify, free them.
     eprintln!("=== smoke test: allocate / free ===");
     let owner = make_chunk_id(0, 42);
