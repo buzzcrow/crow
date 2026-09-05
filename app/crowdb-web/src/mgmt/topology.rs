@@ -310,6 +310,9 @@ async fn ensure_diskdb_running(
     let req = DiskdbDeployRequest {
         instance_id: None,
         metrics_interval: None,
+        rpc_workers: None,
+        kv_connections: None,
+        kv_client_rpc_workers: None,
         server_id: server.id.clone(),
         listen_port,
         http_port,

@@ -69,7 +69,10 @@ pub async fn run(cli: &Cli, verb: DiskdbBenchVerb) -> ExitCode {
     };
     let client = Arc::new(DiskdbClient::new(
         ServiceRegistryClient::from_shared(Arc::clone(&kv)),
-        Arc::new(DiskdbRpcTransport::new()),
+        Arc::new(DiskdbRpcTransport::with_pool_size(
+            args.diskdb_connections,
+            args.diskdb_client_rpc_workers,
+        )),
     ));
     if let Err(error) = client.refresh_endpoints().await {
         eprintln!("diskdb discovery failed: {error}");
@@ -168,9 +171,15 @@ async fn collect_results(handles: Vec<tokio::task::JoinHandle<TaskResult>>) -> T
 }
 
 fn valid_args(args: &DiskdbArgs) -> bool {
-    let valid = args.concurrency > 0 && args.unit_count > 0 && args.blocks_per_request > 0;
+    let valid = args.concurrency > 0
+        && args.diskdb_connections > 0
+        && args.diskdb_client_rpc_workers > 0
+        && args.unit_count > 0
+        && args.blocks_per_request > 0;
     if !valid {
-        eprintln!("concurrency, unit-count, and blocks-per-request must be non-zero");
+        eprintln!(
+            "concurrency, connection/worker counts, unit-count, and blocks-per-request must be non-zero"
+        );
     }
     valid
 }

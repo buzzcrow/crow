@@ -640,6 +640,12 @@ pub struct DiskdbDeployRequest {
     pub instance_id: Option<u64>,
     /// Metrics flush interval override in seconds.
     pub metrics_interval: Option<u64>,
+    /// crowdb-rpc server worker override.
+    pub rpc_workers: Option<u32>,
+    /// KV client connection-pool override.
+    pub kv_connections: Option<usize>,
+    /// KV client crowdb-rpc worker override.
+    pub kv_client_rpc_workers: Option<u32>,
     /// Main listener port (diskdb `listen_addr`).
     pub listen_port: u16,
     /// HTTP management port (diskdb `http_listen_addr`).
@@ -935,6 +941,15 @@ pub async fn deploy_diskdb_local(
     cmd.arg("--log-dir").arg(workspace_dir.join("log"));
     if let Some(interval) = req.metrics_interval {
         cmd.arg("--metrics-interval").arg(interval.to_string());
+    }
+    if let Some(workers) = req.rpc_workers {
+        cmd.arg("--rpc-workers").arg(workers.to_string());
+    }
+    if let Some(connections) = req.kv_connections {
+        cmd.arg("--kv-connections").arg(connections.to_string());
+    }
+    if let Some(workers) = req.kv_client_rpc_workers {
+        cmd.arg("--kv-client-rpc-workers").arg(workers.to_string());
     }
     cmd.arg("--listen-addr")
         .arg(format!("{}:{}", node.host, req.listen_port));

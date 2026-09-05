@@ -2,14 +2,14 @@ use super::{
     alloc, build_allocate_response, build_commit_response, build_free_response, elapsed_ns, map_free_error,
     mutation_gate, parse_segments, submit_error, submit_fb_response, AllocError, AllocateParams, Arc,
     ChunkId, DiskId, DiskdbRpcService, FBAllocateBlocksRequest, FBCommitBlocksRequest, FBDiskdbRetCode,
-    FBFreeBlocksRequest, FBMsgType, RpcServer, ServerRequest, MAX_ALLOCATE_COUNT,
+    FBFreeBlocksRequest, FBMsgType, RequestGuard, RpcServer, ServerRequest, MAX_ALLOCATE_COUNT,
 };
 
 impl DiskdbRpcService {
     // ── AllocateBlocks ───────────────────────────────────────────
 
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
-    pub(super) fn handle_allocate(&self, req: ServerRequest, server: &Arc<RpcServer>) {
+    pub(super) fn handle_allocate(&self, req: ServerRequest, server: &Arc<RpcServer>, request: RequestGuard) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::EAllocateBlocksResponse.0 as u16;
@@ -27,7 +27,7 @@ impl DiskdbRpcService {
         let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
-            let rpc_start = std::time::Instant::now();
+            let mut request = request;
             let result = alloc::allocate_blocks(
                 &params.dg,
                 params.unit_count,
@@ -44,8 +44,9 @@ impl DiskdbRpcService {
             let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
             match result {
                 Ok(segments) => {
+                    request.mark_success();
                     metrics.allocate_total.inc();
-                    metrics.allocate_rpc_latency.observe(elapsed_ns(rpc_start));
+                    let response_start = std::time::Instant::now();
                     let ctrl = build_allocate_response(
                         req_id,
                         create_nano,
@@ -53,9 +54,14 @@ impl DiskdbRpcService {
                         None,
                         &segments,
                     );
+                    metrics
+                        .allocate_response_build_latency
+                        .observe(elapsed_ns(response_start));
                     submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
                 }
                 Err(AllocError::NoSpace) => {
+                    metrics.allocate_errors_total.inc();
+                    metrics.allocate_no_space_errors.inc();
                     let ctrl = build_allocate_response(
                         req_id,
                         create_nano,
@@ -143,7 +149,7 @@ impl DiskdbRpcService {
 
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
-    pub(super) fn handle_free(&self, req: ServerRequest, server: &Arc<RpcServer>) {
+    pub(super) fn handle_free(&self, req: ServerRequest, server: &Arc<RpcServer>, mut request: RequestGuard) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::EFreeBlocksResponse.0 as u16;
@@ -164,6 +170,7 @@ impl DiskdbRpcService {
         let segments = match parse_segments(fb_req.segments()) {
             Some(s) if !s.is_empty() => s,
             _ => {
+                request.mark_success();
                 let ctrl = build_free_response(req_id, create_nano, FBDiskdbRetCode::Success, None, 0);
                 submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
                 return;
@@ -226,13 +233,13 @@ impl DiskdbRpcService {
         #[allow(clippy::cast_possible_truncation)]
         let freed_count = segments.len() as u32;
         self.rt.spawn(async move {
-            let rpc_start = std::time::Instant::now();
+            let mut request = request;
             let result = alloc::free_blocks(&dg, &segments, &kv).await;
             let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
             match result {
                 Ok(()) => {
+                    request.mark_success();
                     metrics.free_total.inc();
-                    metrics.free_rpc_latency.observe(elapsed_ns(rpc_start));
                     let ctrl =
                         build_free_response(req_id, create_nano, FBDiskdbRetCode::Success, None, freed_count);
                     submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
@@ -249,7 +256,12 @@ impl DiskdbRpcService {
     // ── CommitBlocks ─────────────────────────────────────────────
 
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
-    pub(super) fn handle_commit(&self, req: ServerRequest, server: &Arc<RpcServer>) {
+    pub(super) fn handle_commit(
+        &self,
+        req: ServerRequest,
+        server: &Arc<RpcServer>,
+        mut request: RequestGuard,
+    ) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::ECommitBlocksResponse.0 as u16;
@@ -270,6 +282,7 @@ impl DiskdbRpcService {
         let segments = match parse_segments(fb_req.segments()) {
             Some(s) if !s.is_empty() => s,
             _ => {
+                request.mark_success();
                 let ctrl = build_commit_response(req_id, create_nano, FBDiskdbRetCode::Success, None, 0);
                 submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
                 return;
@@ -307,10 +320,12 @@ impl DiskdbRpcService {
         let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let mut request = request;
             let result = alloc::commit_blocks(&dg, &segments, &kv).await;
             let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
             match result {
                 Ok(committed) => {
+                    request.mark_success();
                     let ctrl =
                         build_commit_response(req_id, create_nano, FBDiskdbRetCode::Success, None, committed);
                     submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);

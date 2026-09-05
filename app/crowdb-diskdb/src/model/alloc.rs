@@ -218,7 +218,11 @@ pub async fn allocate_blocks(
         zone_rotate_count,
     ) {
         Ok(claims) if claims.len() == count as usize => claims,
-        Ok(claims) => claims,
+        Ok(claims) => {
+            metrics.allocate_partial_batches.inc();
+            rollback_claims(&claims, metrics);
+            return Err(AllocError::NoSpace);
+        }
         Err(AllocError::NoSpace) => {
             // No space at all — try compaction fallback then retry.
             tracing::info!("allocate_blocks NoSpace — running synchronous compaction fallback");
@@ -243,8 +247,15 @@ pub async fn allocate_blocks(
     metrics
         .allocate_bitmap_scan_latency
         .observe(elapsed_ns(phase1_start));
+    metrics.allocate_claimed_units.inc_by(
+        claims
+            .iter()
+            .map(|(_, _, range)| u64::from(range.unit_count))
+            .sum(),
+    );
 
     // Phase 2: persist all in one batch_write.
+    let record_start = std::time::Instant::now();
     let records: Vec<(DiskId, u32, u64, BusyBlockValue)> = claims
         .iter()
         .map(|(disk, zone, range)| {
@@ -263,16 +274,18 @@ pub async fn allocate_blocks(
             )
         })
         .collect();
+    metrics
+        .allocate_record_build_latency
+        .observe(elapsed_ns(record_start));
 
     let bind = dg.bind();
     let phase2_start = std::time::Instant::now();
     if let Err(e) = kv.persist_busy_batch(bind, &records).await {
         // Rollback ALL Phase 1 claims.
-        for (_, zone, range) in &claims {
-            let _ = zone.rollback_allocate(range.unit_offset, range.unit_count);
-        }
+        rollback_claims(&claims, metrics);
         tracing::warn!("allocate_blocks persist failed, rolled back {count} claims: {e}");
         metrics.allocate_errors_total.inc();
+        metrics.allocate_kv_errors.inc();
         return Err(AllocError::Persistence);
     }
     metrics
@@ -292,6 +305,15 @@ pub async fn allocate_blocks(
         })
         .collect();
     Ok(segments)
+}
+
+fn rollback_claims(claims: &[AllocClaim], metrics: &crate::metrics::DiskdbMetrics) {
+    let mut units = 0_u64;
+    for (_, zone, range) in claims {
+        let _ = zone.rollback_allocate(range.unit_offset, range.unit_count);
+        units = units.saturating_add(u64::from(range.unit_count));
+    }
+    metrics.allocate_rollback_units.inc_by(units);
 }
 
 // ── Immediate free ──────────────────────────────────────────────

@@ -22,5 +22,7 @@ fn allocate_and_mix_commands_expose_supported_modes() {
         assert!(stdout.contains("possible values: mem, block"));
         assert!(stdout.contains("--duration-secs"));
         assert!(stdout.contains("--concurrency"));
+        assert!(stdout.contains("--diskdb-connections"));
+        assert!(stdout.contains("--diskdb-client-rpc-workers"));
     }
 }

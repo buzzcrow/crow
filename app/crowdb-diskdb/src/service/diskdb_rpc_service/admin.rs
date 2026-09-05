@@ -3,7 +3,8 @@ use super::{
     build_recalc_response, build_trigger_scan_response, compact_zone, submit_error, submit_fb_response,
     unit_capacity_for_zone, Arc, DdbDisk, DdbDiskGroup, DiskId, DiskValue, DiskdbRpcService,
     FBCompactZoneRequest, FBDiskdbRetCode, FBGetScanStatusRequest, FBMsgType, FBRebuildZoneBitmapRequest,
-    FBRecalcDiskUsageRequest, FBTriggerScanRequest, RpcServer, ScanSummary, ServerRequest, ALL_ZONES,
+    FBRecalcDiskUsageRequest, FBTriggerScanRequest, RequestGuard, RpcServer, ScanSummary, ServerRequest,
+    ALL_ZONES,
 };
 
 impl DiskdbRpcService {
@@ -11,7 +12,12 @@ impl DiskdbRpcService {
 
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
-    pub(super) fn handle_rebuild_zone_bitmap(&self, req: ServerRequest, server: &Arc<RpcServer>) {
+    pub(super) fn handle_rebuild_zone_bitmap(
+        &self,
+        req: ServerRequest,
+        server: &Arc<RpcServer>,
+        request: RequestGuard,
+    ) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::ERebuildZoneBitmapResponse.0 as u16;
@@ -99,6 +105,7 @@ impl DiskdbRpcService {
         let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let mut request = request;
             let mut rebuilt_zone_count = 0u32;
             let mut total_busy_units = 0u64;
             let mut total_free_units = 0u64;
@@ -140,6 +147,7 @@ impl DiskdbRpcService {
                 );
                 submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
             } else {
+                request.mark_success();
                 let ctrl = build_rebuild_zone_bitmap_response(
                     req_id,
                     create_nano,
@@ -157,7 +165,12 @@ impl DiskdbRpcService {
     // ── RecalcDiskUsage ──────────────────────────────────────────
 
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
-    pub(super) fn handle_recalc_disk_usage(&self, req: ServerRequest, server: &Arc<RpcServer>) {
+    pub(super) fn handle_recalc_disk_usage(
+        &self,
+        req: ServerRequest,
+        server: &Arc<RpcServer>,
+        request: RequestGuard,
+    ) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::ERecalcDiskUsageResponse.0 as u16;
@@ -195,6 +208,7 @@ impl DiskdbRpcService {
         let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let mut request = request;
             let results = if has_dg {
                 if let Some(r) = recalc.recalc_disk_group(dg_id).await {
                     vec![r]
@@ -214,6 +228,7 @@ impl DiskdbRpcService {
                 recalc.recalc_all().await
             };
             let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
+            request.mark_success();
             let ctrl = build_recalc_response(req_id, create_nano, FBDiskdbRetCode::Success, None, &results);
             submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
         });
@@ -223,7 +238,12 @@ impl DiskdbRpcService {
 
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
-    pub(super) fn handle_compact_zone(&self, req: ServerRequest, server: &Arc<RpcServer>) {
+    pub(super) fn handle_compact_zone(
+        &self,
+        req: ServerRequest,
+        server: &Arc<RpcServer>,
+        request: RequestGuard,
+    ) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::ECompactZoneResponse.0 as u16;
@@ -316,6 +336,7 @@ impl DiskdbRpcService {
         let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let mut request = request;
             let mut results: Vec<(u32, bool, u32, Option<String>)> =
                 Vec::with_capacity(zones_to_compact.len());
             let mut compacted_count = 0u32;
@@ -355,6 +376,7 @@ impl DiskdbRpcService {
                 }
             }
             let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
+            request.mark_success();
             let ctrl = build_compact_zone_response(
                 req_id,
                 create_nano,
@@ -371,7 +393,12 @@ impl DiskdbRpcService {
     // ── TriggerScan ──────────────────────────────────────────────
 
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
-    pub(super) fn handle_trigger_scan(&self, req: ServerRequest, server: &Arc<RpcServer>) {
+    pub(super) fn handle_trigger_scan(
+        &self,
+        req: ServerRequest,
+        server: &Arc<RpcServer>,
+        mut request: RequestGuard,
+    ) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::ETriggerScanResponse.0 as u16;
@@ -399,13 +426,19 @@ impl DiskdbRpcService {
             &summary,
             in_progress,
         );
+        request.mark_success();
         submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
     }
 
     // ── GetScanStatus ────────────────────────────────────────────
 
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
-    pub(super) fn handle_get_scan_status(&self, req: ServerRequest, server: &Arc<RpcServer>) {
+    pub(super) fn handle_get_scan_status(
+        &self,
+        req: ServerRequest,
+        server: &Arc<RpcServer>,
+        mut request: RequestGuard,
+    ) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::EGetScanStatusResponse.0 as u16;
@@ -435,6 +468,7 @@ impl DiskdbRpcService {
             &summary,
             has_run,
         );
+        request.mark_success();
         submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
     }
 

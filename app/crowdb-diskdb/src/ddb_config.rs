@@ -55,6 +55,20 @@ pub struct ServerConfig {
     /// leader does not need to be pre-seeded. At least one must be
     /// reachable for the diskdb to sync group 0.
     pub kv_server_mgmt_seeds: Vec<String>,
+    /// static: KV client connections kept per endpoint.
+    #[serde(default = "default_kv_pool_size")]
+    pub kv_pool_size: usize,
+    /// static: crowdb-rpc I/O workers used by the KV client.
+    #[serde(default = "default_kv_rpc_workers")]
+    pub kv_rpc_workers: u32,
+}
+
+const fn default_kv_pool_size() -> usize {
+    1
+}
+
+const fn default_kv_rpc_workers() -> u32 {
+    2
 }
 
 impl Default for ServerConfig {
@@ -65,6 +79,8 @@ impl Default for ServerConfig {
             rpc_listen_addr: format!("0.0.0.0:{DISKDB_RPC_BASE}"),
             instance_id: None,
             kv_server_mgmt_seeds: vec![format!("http://127.0.0.1:{KV_SERVER_MGMT_BASE}")],
+            kv_pool_size: default_kv_pool_size(),
+            kv_rpc_workers: default_kv_rpc_workers(),
         }
     }
 }
@@ -323,6 +339,12 @@ impl Default for CompactionConfig {
 /// # Errors
 /// Returns `Err(message)` on the first violation.
 pub fn validate(config: &DdbConfig) -> Result<(), String> {
+    if config.server.kv_pool_size == 0 {
+        return Err("server.kv_pool_size must be > 0".to_string());
+    }
+    if config.server.kv_rpc_workers == 0 {
+        return Err("server.kv_rpc_workers must be > 0".to_string());
+    }
     let block = config.storage.block_size_bytes;
     let min_block: u32 = 512 * 1024;
     let max_block: u32 = 2 * 1024 * 1024;

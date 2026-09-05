@@ -46,11 +46,13 @@ use crate::{DiskdbClientError, Result};
 
 /// crowdb-rpc transport for diskdb. Holds the client-side `RpcServer`
 /// (manages connections), `RpcClient` (request/response correlation),
-/// and a `Connection` cache per endpoint.
+/// and a connection pool per endpoint.
 pub struct DiskdbRpcTransport {
     server: Arc<RpcServer>,
     rpc: RpcClient,
-    connections: DashMap<String, Connection>,
+    connections: DashMap<String, Vec<Connection>>,
+    pool_size: usize,
+    conn_rr: AtomicU64,
     next_req_id: AtomicU64,
 }
 
@@ -68,14 +70,22 @@ impl DiskdbRpcTransport {
     /// but is used to establish connections to remote endpoints.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_workers(2)
+        Self::with_pool_size(1, 2)
     }
 
     /// Create a new crowdb-rpc transport with `workers` I/O worker threads.
     #[must_use]
     pub fn with_workers(workers: u32) -> Self {
+        Self::with_pool_size(1, workers)
+    }
+
+    /// Create a transport with `pool_size` connections per endpoint and
+    /// `workers` crowdb-rpc I/O workers.
+    #[must_use]
+    pub fn with_pool_size(pool_size: usize, workers: u32) -> Self {
         let server = Arc::new(RpcServer::with_engines(None, 1, workers));
         server.start();
+        server.register_conn_count_gauge("rpc.client.connections");
         let rpc = RpcClient::new();
         rpc.set_completion_pool_size(1024);
         rpc.start_reaper(5_000_000_000, 500_000_000);
@@ -83,6 +93,8 @@ impl DiskdbRpcTransport {
             server,
             rpc,
             connections: DashMap::new(),
+            pool_size: pool_size.max(1),
+            conn_rr: AtomicU64::new(0),
             next_req_id: AtomicU64::new(1),
         }
     }
@@ -94,17 +106,23 @@ impl DiskdbRpcTransport {
     /// Get or create a `Connection` for the given rpc endpoint.
     fn conn_for(&self, rpc_endpoint: &str) -> Result<Connection> {
         let normalized = normalize_endpoint(rpc_endpoint);
-        if let Some(conn) = self.connections.get(&normalized) {
-            return Ok(conn.clone());
+        if let Some(conns) = self.connections.get(&normalized) {
+            if conns.len() == self.pool_size {
+                let index = rr_index(&self.conn_rr, conns.len());
+                return Ok(conns[index].clone());
+            }
         }
         let (host, port) = parse_endpoint(&normalized)?;
-        let conn = self
-            .server
-            .connect(&host, port)
-            .map_err(|e| DiskdbClientError::Unreachable(format!("rpc connect to {host}:{port}: {e:?}")))?;
-        self.rpc.attach(&conn);
-        self.connections.insert(normalized, conn.clone());
-        Ok(conn)
+        let mut entry = self.connections.entry(normalized).or_default();
+        while entry.len() < self.pool_size {
+            let conn = self.server.connect(&host, port).map_err(|e| {
+                DiskdbClientError::Unreachable(format!("rpc connect to {host}:{port}: {e:?}"))
+            })?;
+            self.rpc.attach(&conn);
+            entry.push(conn);
+        }
+        let index = rr_index(&self.conn_rr, entry.len());
+        Ok(entry[index].clone())
     }
 
     // ── Public RPC methods ─────────────────────────────────────
@@ -300,6 +318,11 @@ impl DiskdbRpcTransport {
         let resp = fut.await.map_err(DiskdbClientError::from)?;
         parse_get_scan_status_response(&resp)
     }
+}
+
+fn rr_index(counter: &AtomicU64, len: usize) -> usize {
+    let len_u64 = u64::try_from(len).unwrap_or(u64::MAX);
+    usize::try_from(counter.fetch_add(1, Ordering::Relaxed) % len_u64).unwrap_or(0)
 }
 
 impl Default for DiskdbRpcTransport {

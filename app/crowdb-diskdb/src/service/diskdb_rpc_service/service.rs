@@ -49,7 +49,7 @@ use tokio::runtime::Handle;
 
 use crate::ddb_config::StorageDefaults;
 use crate::ddb_kv_client::DdbKvClient;
-use crate::metrics::{DiskGroupRecalcResult, DiskdbMetrics, RecalcEngine};
+use crate::metrics::{DiskGroupRecalcResult, DiskdbMetrics, RecalcEngine, RequestGuard, RequestKind};
 use crate::model::alloc::{self, FreeError};
 use crate::model::disk::DdbDisk;
 use crate::model::disk_group::{AllocError, DdbDiskGroup, DiskGroupUsage};
@@ -109,37 +109,64 @@ impl DiskdbRpcService {
     pub fn register_handlers(self: &Arc<Self>, server: &Arc<RpcServer>) {
         server.register_handler(
             FBMsgType::EAllocateBlocksRequest.0 as u16,
-            Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_allocate),
+            Self::make_handler(
+                Arc::clone(self),
+                Arc::clone(server),
+                RequestKind::AllocateBlocks,
+                Self::handle_allocate,
+            ),
         );
         server.register_handler(
             FBMsgType::EFreeBlocksRequest.0 as u16,
-            Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_free),
+            Self::make_handler(
+                Arc::clone(self),
+                Arc::clone(server),
+                RequestKind::FreeBlocks,
+                Self::handle_free,
+            ),
         );
         server.register_handler(
             FBMsgType::ECommitBlocksRequest.0 as u16,
-            Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_commit),
+            Self::make_handler(
+                Arc::clone(self),
+                Arc::clone(server),
+                RequestKind::CommitBlocks,
+                Self::handle_commit,
+            ),
         );
         server.register_handler(
             FBMsgType::EQueryCapacityStatsRequest.0 as u16,
-            Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_query_capacity),
+            Self::make_handler(
+                Arc::clone(self),
+                Arc::clone(server),
+                RequestKind::QueryCapacityStats,
+                Self::handle_query_capacity,
+            ),
         );
         server.register_handler(
             FBMsgType::EGetDiskGroupInfoRequest.0 as u16,
             Self::make_handler(
                 Arc::clone(self),
                 Arc::clone(server),
+                RequestKind::GetDiskGroupInfo,
                 Self::handle_get_disk_group_info,
             ),
         );
         server.register_handler(
             FBMsgType::EGetDiskInfoRequest.0 as u16,
-            Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_get_disk_info),
+            Self::make_handler(
+                Arc::clone(self),
+                Arc::clone(server),
+                RequestKind::GetDiskInfo,
+                Self::handle_get_disk_info,
+            ),
         );
         server.register_handler(
             FBMsgType::ERebuildZoneBitmapRequest.0 as u16,
             Self::make_handler(
                 Arc::clone(self),
                 Arc::clone(server),
+                RequestKind::RebuildZoneBitmap,
                 Self::handle_rebuild_zone_bitmap,
             ),
         );
@@ -148,20 +175,36 @@ impl DiskdbRpcService {
             Self::make_handler(
                 Arc::clone(self),
                 Arc::clone(server),
+                RequestKind::RecalcDiskUsage,
                 Self::handle_recalc_disk_usage,
             ),
         );
         server.register_handler(
             FBMsgType::ECompactZoneRequest.0 as u16,
-            Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_compact_zone),
+            Self::make_handler(
+                Arc::clone(self),
+                Arc::clone(server),
+                RequestKind::CompactZone,
+                Self::handle_compact_zone,
+            ),
         );
         server.register_handler(
             FBMsgType::ETriggerScanRequest.0 as u16,
-            Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_trigger_scan),
+            Self::make_handler(
+                Arc::clone(self),
+                Arc::clone(server),
+                RequestKind::TriggerScan,
+                Self::handle_trigger_scan,
+            ),
         );
         server.register_handler(
             FBMsgType::EGetScanStatusRequest.0 as u16,
-            Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_get_scan_status),
+            Self::make_handler(
+                Arc::clone(self),
+                Arc::clone(server),
+                RequestKind::GetScanStatus,
+                Self::handle_get_scan_status,
+            ),
         );
     }
 
@@ -169,10 +212,12 @@ impl DiskdbRpcService {
     fn make_handler(
         this: Arc<Self>,
         server: Arc<RpcServer>,
-        f: fn(&Self, ServerRequest, &Arc<RpcServer>),
+        kind: RequestKind,
+        f: fn(&Self, ServerRequest, &Arc<RpcServer>, RequestGuard),
     ) -> impl Fn(ServerRequest) + Send + 'static {
         move |req| {
-            f(&this, req, &server);
+            let request = this.metrics.requests.start(kind);
+            f(&this, req, &server, request);
         }
     }
 }

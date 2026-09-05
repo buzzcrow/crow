@@ -97,6 +97,12 @@ pub enum ClusterVerb {
         /// [diskdb] Existing store-0 KV groups used for allocation records.
         #[arg(long, value_delimiter = ',', default_value = "1")]
         data_groups: Vec<u64>,
+        /// [diskdb] KV client connections kept per endpoint. 0 = server default (1).
+        #[arg(long, default_value_t = 0)]
+        kv_connections: usize,
+        /// [diskdb] KV client crowdb-rpc I/O workers. 0 = server default (2).
+        #[arg(long, default_value_t = 0)]
+        kv_client_rpc_workers: u32,
         /// [chunkdb] Number of instances to deploy.
         #[arg(long, default_value_t = 3)]
         chunkdb_instances: usize,
@@ -210,6 +216,8 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
             disk_zone_size_bytes,
             disk_unit_size_bytes,
             data_groups,
+            kv_connections,
+            kv_client_rpc_workers,
             chunkdb_instances,
             allow_unsafe_ec,
         } => match service_type.as_str() {
@@ -240,6 +248,9 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                     zone_size_bytes: disk_zone_size_bytes,
                     unit_size_bytes: disk_unit_size_bytes,
                     data_groups,
+                    rpc_workers: nonzero(rpc_workers),
+                    kv_connections: nonzero(kv_connections),
+                    kv_client_rpc_workers: nonzero(kv_client_rpc_workers),
                 };
                 match crowdb_console_shared::ops::cluster::local_deploy_combined(
                     &ctx,
@@ -386,6 +397,9 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                     zone_size_bytes: disk_zone_size_bytes,
                     unit_size_bytes: disk_unit_size_bytes,
                     data_groups,
+                    rpc_workers: nonzero(rpc_workers),
+                    kv_connections: nonzero(kv_connections),
+                    kv_client_rpc_workers: nonzero(kv_client_rpc_workers),
                 };
                 match crowdb_console_shared::ops::cluster::local_deploy_diskdb(&ctx, &workspace, &config)
                     .await

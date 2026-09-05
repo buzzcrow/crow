@@ -62,6 +62,14 @@ struct Cli {
     #[arg(long, default_value_t = 2)]
     rpc_workers: u32,
 
+    /// KV client connections kept per endpoint. Zero uses config.
+    #[arg(long, default_value_t = 0)]
+    kv_connections: usize,
+
+    /// KV client crowdb-rpc I/O workers. Zero uses config.
+    #[arg(long, default_value_t = 0)]
+    kv_client_rpc_workers: u32,
+
     /// Log directory. Default: "log" (relative to CWD).
     #[arg(long)]
     log_dir: Option<String>,
@@ -182,9 +190,14 @@ async fn main() {
     // One client is shared across all service classes (hardware,
     // service-registry, data-group) since `CrowdbKvClient` is fully
     // interior-mutable; each service class takes it via `from_shared`.
-    let kv_client = Arc::new(CrowdbKvClient::new(ClientConfig::new(
-        config.load().server.kv_server_mgmt_seeds.clone(),
-    )));
+    let kv_config = {
+        let loaded = config.load();
+        let mut client = ClientConfig::new(loaded.server.kv_server_mgmt_seeds.clone());
+        client.pool_size_per_endpoint = loaded.server.kv_pool_size;
+        client.rpc_workers = loaded.server.kv_rpc_workers;
+        client
+    };
+    let kv_client = Arc::new(CrowdbKvClient::new(kv_config));
     let (sys_store, sys_group) = kv_client.system_group();
     info!(
         store_id = sys_store,
@@ -194,9 +207,6 @@ async fn main() {
     );
     let hw = HardwareClient::from_shared(Arc::clone(&kv_client));
     let svc = ServiceRegistryClient::from_shared(Arc::clone(&kv_client));
-    let dg_kv = Arc::new(DdbKvClient::from_shared(Arc::clone(&kv_client)));
-    let dg_kv_sync = DdbKvClient::from_shared(Arc::clone(&kv_client));
-
     // Register diskdb metrics (§11: `zone.allocate.retry.cms.bit`,
     // `disk.bad.impacted_blocks`). The CAS retry counter is attached
     // to each `Zone` during disk-add init so the allocate path can
@@ -211,6 +221,9 @@ async fn main() {
         runner.start();
         info!(interval_secs = args.metrics_interval, "metrics runner started");
     }
+    let dg_kv =
+        Arc::new(DdbKvClient::from_shared(Arc::clone(&kv_client)).with_metrics(Arc::new(metrics.clone())));
+    let dg_kv_sync = DdbKvClient::from_shared(Arc::clone(&kv_client)).with_metrics(Arc::new(metrics.clone()));
 
     // Phase = Syncing. Run initial keep-alive tick (blocking) to
     // populate the in-memory disk-group/disk/zone state.
@@ -538,6 +551,12 @@ fn load_config(args: &Cli) -> DdbConfig {
     }
     if let Some(port) = args.rpc_port {
         config.server.rpc_listen_addr = replace_port(&config.server.rpc_listen_addr, port);
+    }
+    if args.kv_connections > 0 {
+        config.server.kv_pool_size = args.kv_connections;
+    }
+    if args.kv_client_rpc_workers > 0 {
+        config.server.kv_rpc_workers = args.kv_client_rpc_workers;
     }
 
     config

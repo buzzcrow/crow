@@ -76,9 +76,22 @@ fn config_validate_rejects_zero_cas_retry_limit() {
 #[test]
 fn config_defaults_match_design() {
     let config = DdbConfig::default();
+    assert_eq!(config.server.kv_pool_size, 1);
+    assert_eq!(config.server.kv_rpc_workers, 2);
     assert_eq!(config.storage.cas_retry_limit, 100);
     assert!(!config.persistence.free_batch_enabled);
     assert_eq!(config.persistence.free_flush_max_batch, 256);
+}
+
+#[test]
+fn config_rejects_zero_kv_transport_sizes() {
+    let mut config = DdbConfig::default();
+    config.server.kv_pool_size = 0;
+    assert!(validate(&config).is_err());
+
+    let mut config = DdbConfig::default();
+    config.server.kv_rpc_workers = 0;
+    assert!(validate(&config).is_err());
 }
 
 #[test]

@@ -32,19 +32,30 @@ pub type Bind = (u64, u64);
 #[derive(Clone)]
 pub struct DdbKvClient {
     kv: Arc<CrowdbKvClient>,
+    metrics: Option<Arc<crate::metrics::DiskdbMetrics>>,
 }
 
 impl DdbKvClient {
     /// Wrap a `CrowdbKvClient` for data-group access.
     #[must_use]
     pub fn new(kv: CrowdbKvClient) -> Self {
-        Self { kv: Arc::new(kv) }
+        Self {
+            kv: Arc::new(kv),
+            metrics: None,
+        }
     }
 
     /// Wrap an already-shared `CrowdbKvClient`.
     #[must_use]
     pub fn from_shared(kv: Arc<CrowdbKvClient>) -> Self {
-        Self { kv }
+        Self { kv, metrics: None }
+    }
+
+    /// Attach `DiskDB` workflow metrics.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<crate::metrics::DiskdbMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Access the underlying `CrowdbKvClient`.
@@ -133,7 +144,24 @@ impl DdbKvClient {
             });
         }
         let (store_id, group_id) = bind;
-        self.kv.batch_write(store_id, group_id, &ops).await.map(|_| ())
+        let started = std::time::Instant::now();
+        if let Some(metrics) = &self.metrics {
+            metrics.kv_client_inflight.inc();
+            metrics
+                .kv_client_batch_write_ops
+                .inc_by(u64::try_from(ops.len()).unwrap_or(u64::MAX));
+        }
+        let result = self.kv.batch_write(store_id, group_id, &ops).await.map(|_| ());
+        if let Some(metrics) = &self.metrics {
+            metrics.kv_client_inflight.dec();
+            metrics
+                .kv_client_batch_write_latency
+                .observe(started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+            if result.is_err() {
+                metrics.kv_client_errors.inc();
+            }
+        }
+        result
     }
 
     /// Persist one immutable incarnation-qualified free fact.

@@ -2,7 +2,7 @@ use super::{
     build_get_disk_group_info_response, build_get_disk_info_response, build_query_capacity_response,
     build_query_capacity_response_zone, submit_error, submit_fb_response, Arc, DdbDisk, DiskGroupQueryEntry,
     DiskId, DiskdbRpcService, FBDiskdbRetCode, FBGetDiskGroupInfoRequest, FBGetDiskInfoRequest, FBMsgType,
-    FBQueryCapacityStatsRequest, RpcServer, ServerRequest,
+    FBQueryCapacityStatsRequest, RequestGuard, RpcServer, ServerRequest,
 };
 
 impl DiskdbRpcService {
@@ -10,7 +10,12 @@ impl DiskdbRpcService {
 
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
-    pub(super) fn handle_query_capacity(&self, req: ServerRequest, server: &Arc<RpcServer>) {
+    pub(super) fn handle_query_capacity(
+        &self,
+        req: ServerRequest,
+        server: &Arc<RpcServer>,
+        mut request: RequestGuard,
+    ) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::EQueryCapacityStatsResponse.0 as u16;
@@ -85,6 +90,7 @@ impl DiskdbRpcService {
                 let _ = zu; // zone-level bitmap handled in builder
                 let agg = dg.aggregate_usage();
                 let ctrl = build_query_capacity_response_zone(req_id, create_nano, &dg, &agg, &disk, zi);
+                request.mark_success();
                 submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
                 return;
             }
@@ -130,13 +136,19 @@ impl DiskdbRpcService {
 
         let ctrl =
             build_query_capacity_response(req_id, create_nano, &disk_groups, disk_id.is_some() && !has_zone);
+        request.mark_success();
         submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
     }
 
     // ── GetDiskGroupInfo ─────────────────────────────────────────
 
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
-    pub(super) fn handle_get_disk_group_info(&self, req: ServerRequest, server: &Arc<RpcServer>) {
+    pub(super) fn handle_get_disk_group_info(
+        &self,
+        req: ServerRequest,
+        server: &Arc<RpcServer>,
+        mut request: RequestGuard,
+    ) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::EGetDiskGroupInfoResponse.0 as u16;
@@ -182,13 +194,19 @@ impl DiskdbRpcService {
             &disk_ids,
             &[],
         );
+        request.mark_success();
         submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
     }
 
     // ── GetDiskInfo ──────────────────────────────────────────────
 
     #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
-    pub(super) fn handle_get_disk_info(&self, req: ServerRequest, server: &Arc<RpcServer>) {
+    pub(super) fn handle_get_disk_info(
+        &self,
+        req: ServerRequest,
+        server: &Arc<RpcServer>,
+        mut request: RequestGuard,
+    ) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::EGetDiskInfoResponse.0 as u16;
@@ -253,6 +271,7 @@ impl DiskdbRpcService {
         };
         let ctrl =
             build_get_disk_info_response(req_id, create_nano, FBDiskdbRetCode::Success, None, &disk, false);
+        request.mark_success();
         submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
     }
 }

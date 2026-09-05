@@ -78,6 +78,12 @@ pub struct DiskdbArgs {
     /// Concurrent workload tasks.
     #[arg(long, default_value_t = 4)]
     pub concurrency: usize,
+    /// Connections kept per `DiskDB` endpoint.
+    #[arg(long, default_value_t = 1)]
+    pub diskdb_connections: usize,
+    /// crowdb-rpc I/O workers used by the `DiskDB` client transport.
+    #[arg(long, default_value_t = 2)]
+    pub diskdb_client_rpc_workers: u32,
     /// Allocation size in disk units.
     #[arg(long, default_value_t = 1)]
     pub unit_count: u32,

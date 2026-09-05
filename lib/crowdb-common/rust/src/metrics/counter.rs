@@ -89,6 +89,20 @@ impl Gauge {
         self.value.store(v, Ordering::Relaxed);
     }
 
+    /// Increment the gauge atomically.
+    pub fn inc(&self) {
+        self.value.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrement the gauge atomically without wrapping below zero.
+    pub fn dec(&self) {
+        let _ = self
+            .value
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_sub(1))
+            });
+    }
+
     /// Read the current value.
     pub fn snapshot(&self) -> u64 {
         self.value.load(Ordering::Relaxed)

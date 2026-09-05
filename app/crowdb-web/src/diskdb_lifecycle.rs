@@ -103,6 +103,9 @@ pub async fn http_deploy_diskdb(
     let req = DiskdbDeployRequest {
         instance_id: None,
         metrics_interval: None,
+        rpc_workers: None,
+        kv_connections: None,
+        kv_client_rpc_workers: None,
         server_id: format!("diskdb-{node_id}"),
         listen_port,
         http_port,
@@ -240,6 +243,9 @@ pub async fn http_restart_diskdb(
     let req = DiskdbDeployRequest {
         instance_id: None,
         metrics_interval: None,
+        rpc_workers: None,
+        kv_connections: None,
+        kv_client_rpc_workers: None,
         server_id: format!("diskdb-{node_id}"),
         listen_port,
         http_port,

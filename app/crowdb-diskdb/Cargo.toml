@@ -129,3 +129,7 @@ path = "tests/scanner_test.rs"
 [[test]]
 name = "startup_sync_test"
 path = "tests/startup_sync_test.rs"
+
+[[test]]
+name = "request_metrics_test"
+path = "tests/request_metrics_test.rs"

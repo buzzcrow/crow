@@ -596,6 +596,9 @@ pub struct LocalDiskdbDeployConfig {
     pub zone_size_bytes: u64,
     pub unit_size_bytes: u32,
     pub data_groups: Vec<u64>,
+    pub rpc_workers: Option<u32>,
+    pub kv_connections: Option<usize>,
+    pub kv_client_rpc_workers: Option<u32>,
 }
 
 /// Summary of `ChunkDB` instances attached to a local deployment.
@@ -842,7 +845,7 @@ pub async fn local_deploy_diskdb(
     ensure_diskdb_hardware(ctx, &nodes).await?;
     let (disk_group_count, disk_count) = provision_diskdb_topology(ctx, &nodes, cfg).await?;
     let ports = alloc_diskdb_ports(workspace, nodes.len())?;
-    deploy_diskdb_instances(ctx, workspace, &nodes, &ports).await?;
+    deploy_diskdb_instances(ctx, workspace, &nodes, &ports, cfg).await?;
 
     Ok(LocalDiskdbDeploySummary {
         instance_count: nodes.len(),
@@ -987,6 +990,7 @@ async fn deploy_diskdb_instances(
     workspace: &std::path::Path,
     nodes: &[NodeEntry],
     ports: &DiskdbPorts,
+    config: &LocalDiskdbDeployConfig,
 ) -> Result<()> {
     let seeds = ctx
         .config()
@@ -1006,6 +1010,9 @@ async fn deploy_diskdb_instances(
                 server_id: server_id.clone(),
                 instance_id: Some(10_000 + node.id),
                 metrics_interval: Some(1),
+                rpc_workers: config.rpc_workers,
+                kv_connections: config.kv_connections,
+                kv_client_rpc_workers: config.kv_client_rpc_workers,
                 listen_port: ports.listen[index],
                 http_port: ports.http[index],
                 rpc_port: ports.rpc[index],
