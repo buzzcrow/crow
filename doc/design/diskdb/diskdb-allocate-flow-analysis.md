@@ -94,15 +94,15 @@ request. Discovery cases ran for five seconds; the confirmation ran for 20
 seconds. Every case stopped at its deadline with zero errors and exact busy
 space accounting.
 
-| Data groups | Workers | CLI conn | KV conn | ops/s | p50 us | p99 us | Duration |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 3 | 128 | 16 | 8 | 128,559 | 951 | 1,848 | 5 s |
-| 3 | 256 | 16 | 8 | 156,741 | 1,541 | 3,332 | 5 s |
-| 3 | 512 | 16 | 8 | 183,310 | 2,635 | 5,872 | 5 s |
-| 3 | 768 | 16 | 8 | 193,977 | 3,703 | 8,455 | 5 s |
-| 1 | 512 | 16 | 8 | 205,167 | 2,382 | 4,790 | 5 s |
-| 1 | 512 | 4 | 4 | 206,266 | 2,362 | 4,818 | 5 s |
-| 1 | 512 | 4 | 4 | 191,971 | 2,508 | 5,513 | 20 s |
+| Groups | Workers | DDB conn | KV conn | Client workers | DDB workers | KV-client workers | KV workers | Peer pool | Inflight | Coalesce | ops/s | p50 us | p99 us | Duration |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 3 | 128 | 16 | 8 | 4 | 4 | 4 | 4 | 4 | 64 | 64 | 128,559 | 951 | 1,848 | 5 s |
+| 3 | 256 | 16 | 8 | 4 | 4 | 4 | 4 | 4 | 64 | 64 | 156,741 | 1,541 | 3,332 | 5 s |
+| 3 | 512 | 16 | 8 | 4 | 4 | 4 | 4 | 4 | 64 | 64 | 183,310 | 2,635 | 5,872 | 5 s |
+| 3 | 768 | 16 | 8 | 4 | 4 | 4 | 4 | 4 | 64 | 64 | 193,977 | 3,703 | 8,455 | 5 s |
+| 1 | 512 | 16 | 8 | 4 | 4 | 4 | 4 | 4 | 64 | 64 | 205,167 | 2,382 | 4,790 | 5 s |
+| 1 | 512 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 64 | 64 | 206,266 | 2,362 | 4,818 | 5 s |
+| 1 | 512 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 64 | 64 | 191,971 | 2,508 | 5,513 | 20 s |
 
 The 20-second confirmation completed 3,842,826 allocations and reported an
 exact 4,029,495,115,776-byte busy-space delta.

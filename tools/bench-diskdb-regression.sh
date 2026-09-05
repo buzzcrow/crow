@@ -58,14 +58,20 @@
 # Allocation tuning, same host (2026-09-05), memory KV/WAL, one block per
 # request. Discovery cases ran for 5 seconds; confirmation ran for 20 seconds:
 #
-#   Groups  Wkr  CLI/KV conn  ops/s    p50us  p99us  Duration  Err  Space
-#        3  128         16/8  128,559    951  1,848       5 s    0  exact
-#        3  256         16/8  156,741  1,541  3,332       5 s    0  exact
-#        3  512         16/8  183,310  2,635  5,872       5 s    0  exact
-#        3  768         16/8  193,977  3,703  8,455       5 s    0  exact
-#        1  512         16/8  205,167  2,382  4,790       5 s    0  exact
-#        1  512          4/4  206,266  2,362  4,818       5 s    0  exact
-#        1  512          4/4  191,971  2,508  5,513      20 s    0  exact
+#
+# Grp Wkr DC KC CW DW KW KSW Peer Win Coal   ops/s p50us p99us Dur Err Space
+#   3 128 16  8  4  4  4   4    4  64   64 128,559   951 1,848  5s   0 exact
+#   3 256 16  8  4  4  4   4    4  64   64 156,741 1,541 3,332  5s   0 exact
+#   3 512 16  8  4  4  4   4    4  64   64 183,310 2,635 5,872  5s   0 exact
+#   3 768 16  8  4  4  4   4    4  64   64 193,977 3,703 8,455  5s   0 exact
+#   1 512 16  8  4  4  4   4    4  64   64 205,167 2,382 4,790  5s   0 exact
+#   1 512  4  4  4  4  4   4    4  64   64 206,266 2,362 4,818  5s   0 exact
+#   1 512  4  4  4  4  4   4    4  64   64 191,971 2,508 5,513 20s   0 exact
+#
+# DC=CLI-to-DiskDB connections; KC=DiskDB-to-KV connections; CW=CLI RPC
+# workers; DW=DiskDB server RPC workers; KW=DiskDB KV-client RPC workers;
+# KSW=KV server RPC workers; Peer=KV peer pool; Win=KV proposal inflight
+# window; Coal=KV proposal coalesce maximum keys.
 #
 # The direct KV write sentinel peaks near 264K writes/s. Because one durable
 # DiskDB allocation produces one KV batch_write, DiskDB TPS is expected to be
