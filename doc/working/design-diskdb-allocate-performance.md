@@ -25,8 +25,7 @@ write, not the allocation data flow. The starting configuration comes from
 On the same AMD Ryzen 9 5950X reference host, the KV sentinel's best recorded
 run reached about 264K writes/s at 512 tasks and 16 client connections. It used
 four client RPC workers, four KV server RPC workers, `event_write=true`, peer
-pool 4, `max_inflight=64`, `coalesce_max_keys=64`, and
-`coalesce_drain_threshold=1`. It observed about 58 client writes per WAL append
+pool 4, `max_inflight=64`, `coalesce_max_keys=64`. It observed about 58 client writes per WAL append
 and no inflight-window enqueue events. This is evidence that native RPC and KV
 aggregation work and that raising the window alone is not the first lever.
 
@@ -49,8 +48,8 @@ Keep the following controls distinct:
 4. `kv_connections` and `kv_client_rpc_workers`: per-endpoint connection pool
    and C++ I/O workers shared by DiskDB's KV client.
 5. `kv_rpc_workers`, `peer_pool_size`, `max_inflight`,
-   `coalesce_max_keys`, and `coalesce_drain_threshold`: KV server admission,
-   proposal aggregation, and consensus transport controls.
+   and `coalesce_max_keys`: KV server admission, proposal aggregation,
+   and consensus transport controls.
 
 One connection can aggregate concurrent frames in crowdb-rpc. Additional
 DiskDB-layer batching is not introduced merely to create aggregation. A new

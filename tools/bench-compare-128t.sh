@@ -16,7 +16,6 @@ pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG" \
     cluster local-deploy -n 3 -t kv \
     --event-write --peer-pool-size 4 \
     --max-inflight 32 --coalesce-max-keys 16 \
-    --coalesce-drain-threshold 1 \
     --rpc-workers 4 \
     --kv-backend mem-block --wal-backend mem-block 2>&1 | tail -3
 

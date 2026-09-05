@@ -113,17 +113,11 @@ pub struct Cli {
     #[arg(long, default_value_t = 32)]
     pub max_inflight: usize,
 
-    /// R45 max ops per coalesced batch (capped at 255). The leader
+    /// R45 max ops per coalesced batch (capped at 65535). The leader
     /// event-batches concurrent single-key proposes into one multi-key
-    /// Paxos proposal. `0` disables coalescing (default).
+    /// Paxos proposal. `0` disables coalescing. Default: 32.
     #[arg(long)]
     pub coalesce_max_keys: Option<usize>,
-
-    /// R45b drain threshold: skip draining the pending batch when
-    /// in-flight slot-tasks >= this count. Defaults to `max_inflight / 4`
-    /// (derived when omitted). `0` = always drain (disables the heuristic).
-    #[arg(long)]
-    pub coalesce_drain_threshold: Option<usize>,
 
     /// Number of crowdb-rpc connections per peer endpoint for inter-server
     /// consensus RPCs. Round-robined to distribute send-queue pressure.

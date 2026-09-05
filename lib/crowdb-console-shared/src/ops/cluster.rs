@@ -1084,8 +1084,6 @@ pub struct KvDeployTunables {
     pub max_inflight: Option<usize>,
     /// `--coalesce-max-keys` value.
     pub coalesce_max_keys: Option<usize>,
-    /// `--coalesce-drain-threshold` value.
-    pub coalesce_drain_threshold: Option<usize>,
     /// `--event-write` flag.
     pub event_write: Option<bool>,
     /// `--send-queue-capacity` value.
@@ -1260,7 +1258,6 @@ async fn deploy_servers(
             peer_pool_size: tunables.and_then(|t| t.peer_pool_size),
             max_inflight: tunables.and_then(|t| t.max_inflight),
             coalesce_max_keys: tunables.and_then(|t| t.coalesce_max_keys),
-            coalesce_drain_threshold: tunables.and_then(|t| t.coalesce_drain_threshold),
             event_write: tunables.and_then(|t| t.event_write),
             send_queue_capacity: tunables.and_then(|t| t.send_queue_capacity),
             metrics_interval: tunables.and_then(|t| t.metrics_interval),

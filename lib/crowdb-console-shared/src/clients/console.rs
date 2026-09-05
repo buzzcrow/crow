@@ -98,9 +98,6 @@ pub struct DeployNodeServerBody {
     /// `--coalesce-max-keys` value for R45 proposal coalescing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coalesce_max_keys: Option<usize>,
-    /// `--coalesce-drain-threshold` value for R45b drain heuristic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coalesce_drain_threshold: Option<usize>,
     /// `--peer-pool-size` value for inter-server RPC connection pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_pool_size: Option<usize>,

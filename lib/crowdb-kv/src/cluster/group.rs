@@ -22,7 +22,7 @@ use crate::cluster::local_replica::PxLocalReplica;
 use crate::cluster::node_config::NodeConfigStore;
 use crate::cluster::remote_replica::PxRemoteReplica;
 use crate::cluster::replica::Replica;
-use crate::common::config::{AdmissionPolicy, CrowDBConfig, PaxosConfig};
+use crate::common::config::{CrowDBConfig, PaxosConfig};
 use crate::metrics::{Counter, Gauge, LatencySummary};
 use crate::paxos::roles::{Acceptor, DedupTag, PxBallot, PxLogEntry, SlotIndex};
 use crate::paxos::{PxGroupId, PxNodeId};
@@ -363,7 +363,7 @@ impl PxGroup {
             group_snapshot_slot: AtomicU64::new(0),
             inflight: InflightAdmission::new(
                 PaxosConfig::DEFAULT.max_inflight_proposals,
-                PaxosConfig::DEFAULT.inflight_admission,
+                PaxosConfig::DEFAULT.reject_on_inflight_window_full,
             ),
             config_store: None,
             node_config_store: None,
@@ -457,7 +457,7 @@ impl PxGroup {
         self.set_election_config(config.election);
         self.set_inflight_config(
             config.paxos.max_inflight_proposals,
-            config.paxos.inflight_admission,
+            config.paxos.reject_on_inflight_window_full,
         );
         self.coalesce_max_keys.store(
             config.paxos.coalesce_max_keys as u16,
@@ -475,10 +475,10 @@ impl PxGroup {
     /// called before the group starts serving proposals. Also syncs the
     /// params into `self.config.paxos` so the held config stays the
     /// source of truth.
-    pub fn set_inflight_config(&mut self, max_inflight: usize, policy: AdmissionPolicy) {
-        self.inflight = InflightAdmission::new(max_inflight, policy);
+    pub fn set_inflight_config(&mut self, max_inflight: usize, reject_on_window_full: bool) {
+        self.inflight = InflightAdmission::new(max_inflight, reject_on_window_full);
         self.config.paxos.max_inflight_proposals = max_inflight;
-        self.config.paxos.inflight_admission = policy;
+        self.config.paxos.reject_on_inflight_window_full = reject_on_window_full;
     }
 
     /// Current inflight proposal window size (total permits).
@@ -487,10 +487,10 @@ impl PxGroup {
         self.inflight.total_permits()
     }
 
-    /// Current admission policy.
+    /// Current `reject_on_inflight_window_full` setting.
     #[must_use]
-    pub fn inflight_admission_policy(&self) -> AdmissionPolicy {
-        self.inflight.policy
+    pub fn reject_on_inflight_window_full(&self) -> bool {
+        self.inflight.reject_on_window_full
     }
 
     /// Get the config store, if set.

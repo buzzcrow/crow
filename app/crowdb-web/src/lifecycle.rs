@@ -616,9 +616,6 @@ pub struct DeployNodeServerBody {
     /// `--coalesce-max-keys` value for R45 proposal coalescing.
     #[serde(default)]
     coalesce_max_keys: Option<usize>,
-    /// `--coalesce-drain-threshold` value for R45b drain heuristic.
-    #[serde(default)]
-    coalesce_drain_threshold: Option<usize>,
     /// `--peer-pool-size` value for inter-server RPC connection pool.
     #[serde(default)]
     peer_pool_size: Option<usize>,
@@ -711,7 +708,6 @@ pub async fn http_deploy_node_server(
         metrics_interval: body.metrics_interval,
         max_inflight: body.max_inflight,
         coalesce_max_keys: body.coalesce_max_keys,
-        coalesce_drain_threshold: body.coalesce_drain_threshold,
         peer_pool_size: body.peer_pool_size,
         enable_nagle: body.enable_nagle,
         quickack: body.quickack,

@@ -110,7 +110,6 @@ async fn main() {
     info!("  wal_backend         {}", args.wal_backend);
     info!("  max_inflight        {}", args.max_inflight);
     info!("  coalesce_max_keys   {:?}", args.coalesce_max_keys);
-    info!("  coalesce_drain_threshold {:?}", args.coalesce_drain_threshold);
     info!("  peer_pool_size      {}", args.peer_pool_size);
     info!("  event_write         {}", args.event_write);
     info!("  enable_nagle        {}", args.enable_nagle);
@@ -144,9 +143,6 @@ async fn main() {
     if let Some(max_keys) = args.coalesce_max_keys {
         config.paxos.coalesce_max_keys = max_keys;
     }
-    config.paxos.coalesce_drain_threshold = args
-        .coalesce_drain_threshold
-        .unwrap_or(config.paxos.max_inflight_proposals / 4);
     config.server.peer_pool_size = args.peer_pool_size;
     config.server.enable_nagle = args.enable_nagle;
     config.server.quickack = args.quickack;

@@ -10,18 +10,19 @@ use std::sync::{Arc, OnceLock};
 use tracing::warn;
 
 use crate::cluster::group::PxGroup;
-use crate::common::config::AdmissionPolicy;
 use crate::metrics::{Counter, LatencySummary};
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxNodeId;
 
 /// Inflight proposal admission gate. Owns a single semaphore of
-/// `max_inflight` permits and supports both fail-fast (Reject) and
-/// blocking (Queue) admission policies.
+/// `max_inflight` permits. When `reject_on_window_full` is `true`, a
+/// full window fails fast with `None` (caller gets `Busy`); when
+/// `false`, the caller blocks on `acquire().await` until a permit
+/// is freed.
 pub(crate) struct InflightAdmission {
     pub(crate) semaphore: tokio::sync::Semaphore,
     pub(crate) window: usize,
-    pub(crate) policy: AdmissionPolicy,
+    pub(crate) reject_on_window_full: bool,
     /// Cumulative count of proposals that entered the queue (did not
     /// get a fast-path permit).
     pub(crate) total_enqueued: AtomicU64,
@@ -42,11 +43,11 @@ pub(crate) struct InflightRegistryHandles {
 }
 
 impl InflightAdmission {
-    pub(crate) fn new(max_inflight: usize, policy: AdmissionPolicy) -> Self {
+    pub(crate) fn new(max_inflight: usize, reject_on_window_full: bool) -> Self {
         Self {
             semaphore: tokio::sync::Semaphore::new(max_inflight),
             window: max_inflight,
-            policy,
+            reject_on_window_full,
             total_enqueued: AtomicU64::new(0),
             total_wait_us: AtomicU64::new(0),
             waiting: AtomicU64::new(0),
@@ -65,31 +66,30 @@ impl InflightAdmission {
         u64::try_from(self.window.saturating_sub(avail)).unwrap_or(0)
     }
 
-    /// Acquire a permit. Returns `None` if Reject mode and the window is
-    /// full. In Queue mode, blocks until a permit is available.
+    /// Acquire a permit. Returns `None` if `reject_on_window_full` and
+    /// the window is full. Otherwise blocks until a permit is available.
     pub(crate) async fn acquire_permit(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
         // Fast path: try to acquire without blocking.
         if let Ok(permit) = self.semaphore.try_acquire() {
             return Some(permit);
         }
-        // Slow path depends on policy.
-        match self.policy {
-            AdmissionPolicy::Reject => None,
-            AdmissionPolicy::Queue => {
-                self.total_enqueued.fetch_add(1, Ordering::Relaxed);
-                self.waiting.fetch_add(1, Ordering::Relaxed);
-                let t0 = std::time::Instant::now();
-                let permit = self.semaphore.acquire().await.expect("inflight semaphore closed");
-                let wait_us = t0.elapsed().as_micros();
-                self.waiting.fetch_sub(1, Ordering::Relaxed);
-                self.total_wait_us
-                    .fetch_add(u64::try_from(wait_us).unwrap_or(u64::MAX), Ordering::Relaxed);
-                if let Some(h) = self.handles.get() {
-                    h.enqueued.inc();
-                    h.wait_us.observe(u64::try_from(wait_us).unwrap_or(u64::MAX));
-                }
-                Some(permit)
+        // Slow path: reject or queue.
+        if self.reject_on_window_full {
+            None
+        } else {
+            self.total_enqueued.fetch_add(1, Ordering::Relaxed);
+            self.waiting.fetch_add(1, Ordering::Relaxed);
+            let t0 = std::time::Instant::now();
+            let permit = self.semaphore.acquire().await.expect("inflight semaphore closed");
+            let wait_us = t0.elapsed().as_micros();
+            self.waiting.fetch_sub(1, Ordering::Relaxed);
+            self.total_wait_us
+                .fetch_add(u64::try_from(wait_us).unwrap_or(u64::MAX), Ordering::Relaxed);
+            if let Some(h) = self.handles.get() {
+                h.enqueued.inc();
+                h.wait_us.observe(u64::try_from(wait_us).unwrap_or(u64::MAX));
             }
+            Some(permit)
         }
     }
 
@@ -108,7 +108,7 @@ impl std::fmt::Debug for InflightAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InflightAdmission")
             .field("window", &self.window)
-            .field("policy", &self.policy)
+            .field("reject_on_window_full", &self.reject_on_window_full)
             .field("occupied", &self.occupied())
             .field("waiting", &self.waiting.load(Ordering::Relaxed))
             .finish()

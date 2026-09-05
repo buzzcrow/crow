@@ -45,16 +45,16 @@
 #   Spc   — space accounting (exact = busy delta matches expected delta)
 #
 # Wl     Grp  Thr  Blk  Cli  Ddb  Kv  Wkr  Win  Coal    ops/s  p50    p99  Dur  Err      Spc
-# alloc    3    1    1    2    2   2    2   32    32    2,500  407    508  20s  0        exact
-# alloc    3   16    1    2    2   2    2   32    32   43,488  359    557  20s  0        exact
-# alloc    3  128    1    4    4   4    4   32    32  139,986  872  1,714  20s  0        exact
-# alloc    3  256    1    4    4   4    4   32    32        -    -      -  20s  0        -
-# alloc    1  256    1    4    4   4    4   32    32        -    -      -  20s  0        -
-# mix      3    1    1    2    2   2    2   32    32    2,514  408    500  20s  0        exact
-# mix      3   16    1    2    2   2    2   32    32   43,360  359    566  20s  0        exact
-# mix      3  128    1    4    4   4    4   32    32  130,286  934  1,862  20s  0        exact
-# mix      3  256    1    4    4   4    4   32    32  154,893 1,561  3,364  20s  0        exact
-# mix      1  256    1    4    4   4    4   32    32  162,021 1,493  3,160  20s  0        exact
+# alloc    3    1    1    2    2   2    2   32    32    2,481  410    504  20s  0        exact
+# alloc    3   16    1    2    2   2    2   32    32   42,959  362    582  20s  0        exact
+# alloc    3  128    1    4    4   4    4   32    32  130,863  930  1,863  20s  0        exact
+# alloc    3  256    1    4    4   4    4   32    32  159,418 1,514  3,294  20s  0        exact
+# alloc    1  256    1    4    4   4    4   32    32  171,206 1,423  2,883  20s  0        exact
+# mix      3    1    1    2    2   2    2   32    32    2,494  405    500  20s  0        exact
+# mix      3   16    1    2    2   2    2   32    32   43,106  361    568  20s  0        exact
+# mix      3  128    1    4    4   4    4   32    32  128,013  948  1,957  20s  0        exact
+# mix      3  256    1    4    4   4    4   32    32  154,624 1,556  3,456  20s  0        exact
+# mix      1  256    1    4    4   4    4   32    32  171,419 1,419  2,915  20s  0        exact
 #
 # Successful allocations populate the client's disk-to-group route cache, so
 # mixed frees do not issue discovery RPCs on their first use.
@@ -151,7 +151,7 @@ deploy_case() {
         kv_args+=(--max-inflight "$KV_INFLIGHT")
     fi
     if [ "$KV_COALESCE" -ne 0 ]; then
-        kv_args+=(--coalesce-max-keys "$KV_COALESCE" --coalesce-drain-threshold 1)
+        kv_args+=(--coalesce-max-keys "$KV_COALESCE")
     fi
     cli cluster local-deploy -n 3 -t kv "${backend_args[@]}" "${kv_args[@]}"
     local groups=()

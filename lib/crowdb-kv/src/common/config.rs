@@ -16,38 +16,6 @@ use crowdb_common::config::BaseConfig;
 use crate::wal::pipeline_backend::WalBlockAlignment;
 use crate::wal::record::WalRecordFormat;
 
-/// Admission policy for inflight proposals when the window is full.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum AdmissionPolicy {
-    /// Fail fast with `ProposeResult::Busy`.
-    Reject,
-    /// Block the caller on `acquire().await` until a permit is freed.
-    /// Default policy — eliminates client-side reject-retry storms.
-    #[default]
-    Queue,
-}
-
-impl AdmissionPolicy {
-    /// Parse from a CLI string.
-    #[must_use]
-    #[allow(dead_code)]
-    pub(crate) fn parse(s: &str) -> Option<Self> {
-        match s {
-            "reject" => Some(Self::Reject),
-            "queue" => Some(Self::Queue),
-            _ => None,
-        }
-    }
-
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Reject => "reject",
-            Self::Queue => "queue",
-        }
-    }
-}
-
 /// Paxos retry configuration (all fields static — bind at group
 /// creation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -66,21 +34,16 @@ pub struct PaxosConfig {
     /// behind a saturated pipeline (parallel-slot window / performance
     /// targets).
     pub max_inflight_proposals: usize,
-    /// static: admission policy when all permits are occupied: `Reject`
-    /// (fail fast with `Busy`) or `Queue` (block until a permit is
-    /// freed). Default `Reject`.
-    pub inflight_admission: AdmissionPolicy,
+    /// static: when `true`, a full inflight window fails fast with
+    /// `ProposeResult::Busy` (test-only). When `false` (default), the
+    /// caller blocks on `acquire().await` until a permit is freed.
+    pub reject_on_inflight_window_full: bool,
     /// static: R45 max ops per coalesced batch. `0` disables coalescing
-    /// (one proposal per key). Default 0 (opt-in).
+    /// (one proposal per key). Default 32.
     pub coalesce_max_keys: usize,
     /// static: R45b drain threshold — skip draining the pending batch
     /// in `coalesce_drain_after_round` when the in-flight slot-task
-    /// count (`occupied`) is at or above this value. Lets the
-    /// `max_keys` overflow path handle high load (full batches) while
-    /// the drain maintains concurrency at low-moderate load. Library
-    /// default `1`; the `crowdb-kv-server` CLI derives `max_inflight / 4`
-    /// when `--coalesce-drain-threshold` is omitted. `0` = always
-    /// drain (disables the heuristic).
+    /// count (`occupied`) is at or above this value. Default `1`.
     pub coalesce_drain_threshold: usize,
 }
 
@@ -90,8 +53,8 @@ impl PaxosConfig {
         max_slot_retries: 3,
         retry_base_backoff_ms: 5,
         max_inflight_proposals: 32,
-        inflight_admission: AdmissionPolicy::Queue,
-        coalesce_max_keys: 0,
+        reject_on_inflight_window_full: false,
+        coalesce_max_keys: 32,
         coalesce_drain_threshold: 1,
     };
 }
@@ -642,11 +605,10 @@ impl CrowDBConfig {
         self.paxos.max_inflight_proposals
     }
 
-    /// Admission policy (convenience accessor for
-    /// `paxos.inflight_admission`).
+    /// Convenience accessor for `paxos.reject_on_inflight_window_full`.
     #[must_use]
-    pub fn inflight_admission(&self) -> AdmissionPolicy {
-        self.paxos.inflight_admission
+    pub fn reject_on_inflight_window_full(&self) -> bool {
+        self.paxos.reject_on_inflight_window_full
     }
 
     /// Derive the four runtime paths from a node root directory using

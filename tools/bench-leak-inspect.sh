@@ -18,7 +18,6 @@ MALLOC_ARENA_MAX=1 MALLOC_TRIM_THRESHOLD_=0 pixi run -- cargo run --release -p c
     cluster local-deploy -n 3 -t kv \
     --event-write --peer-pool-size 4 \
     --max-inflight 32 --coalesce-max-keys 16 \
-    --coalesce-drain-threshold 1 \
     --rpc-workers 2 \
     --kv-backend mem-block --wal-backend mem-block 2>&1 | tail -3
 

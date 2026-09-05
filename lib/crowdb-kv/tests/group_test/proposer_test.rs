@@ -10,7 +10,7 @@
 
 use crowdb_kv::cluster::group::{ProposeResult, PxGroup};
 use crowdb_kv::cluster::{PxLocalReplica, PxLocalReplicaRole};
-use crowdb_kv::common::config::{AdmissionPolicy, PaxosConfig};
+use crowdb_kv::common::config::PaxosConfig;
 use crowdb_kv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 
 /// Single-voter leader group: quorum is 1, so propose / repair complete
@@ -18,10 +18,7 @@ use crowdb_kv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 fn single_leader_group() -> PxGroup {
     let local = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
     let mut group = PxGroup::new(1, local);
-    group.set_inflight_config(
-        PaxosConfig::DEFAULT.max_inflight_proposals,
-        AdmissionPolicy::Reject,
-    );
+    group.set_inflight_config(PaxosConfig::DEFAULT.max_inflight_proposals, true);
     group
 }
 
@@ -96,7 +93,7 @@ async fn repair_once_fills_gap_and_advances_frontier() {
 fn queue_leader_group(max_inflight: usize) -> PxGroup {
     let local = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
     let mut group = PxGroup::new(1, local);
-    group.set_inflight_config(max_inflight, AdmissionPolicy::Queue);
+    group.set_inflight_config(max_inflight, false);
     group
 }
 

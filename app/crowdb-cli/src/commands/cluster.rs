@@ -53,12 +53,9 @@ pub enum ClusterVerb {
         /// [kv] `--max-inflight` for the spawned server. 0 = server default.
         #[arg(long, default_value_t = 0)]
         max_inflight: usize,
-        /// [kv] `--coalesce-max-keys` for the spawned server. 0 = server default.
+        /// [kv] `--coalesce-max-keys` for the spawned server. 0 = server default (32).
         #[arg(long, default_value_t = 0)]
         coalesce_max_keys: usize,
-        /// [kv] `--coalesce-drain-threshold` for the spawned server. 0 = server default (`max_inflight/4`).
-        #[arg(long, default_value_t = 0)]
-        coalesce_drain_threshold: usize,
         /// [kv] Enable `--event-write` on the spawned server.
         #[arg(long, default_value_t = false)]
         event_write: bool,
@@ -203,7 +200,6 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
             peer_pool_size,
             max_inflight,
             coalesce_max_keys,
-            coalesce_drain_threshold,
             event_write,
             send_queue_capacity,
             metrics_interval,
@@ -233,7 +229,6 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                     peer_pool_size: nonzero(peer_pool_size),
                     max_inflight: nonzero(max_inflight),
                     coalesce_max_keys: nonzero(coalesce_max_keys),
-                    coalesce_drain_threshold: nonzero(coalesce_drain_threshold),
                     event_write: event_write.then_some(true),
                     send_queue_capacity: nonzero(send_queue_capacity),
                     metrics_interval: nonzero(metrics_interval),
@@ -293,7 +288,6 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                     peer_pool_size: nonzero(peer_pool_size),
                     max_inflight: nonzero(max_inflight),
                     coalesce_max_keys: nonzero(coalesce_max_keys),
-                    coalesce_drain_threshold: nonzero(coalesce_drain_threshold),
                     event_write: if event_write { Some(true) } else { None },
                     send_queue_capacity: nonzero(send_queue_capacity),
                     metrics_interval: nonzero(metrics_interval),

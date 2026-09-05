@@ -470,7 +470,12 @@ impl PxGroup {
             remotes,
             inflight: Some(InflightStatus {
                 window: self.inflight.window,
-                policy: self.inflight.policy.label().to_string(),
+                policy: if self.inflight.reject_on_window_full {
+                    "reject"
+                } else {
+                    "queue"
+                }
+                .to_string(),
                 occupied: self.inflight.occupied(),
                 waiting: self.inflight.waiting.load(Ordering::Relaxed),
                 total_enqueued: self.inflight.total_enqueued.load(Ordering::Relaxed),

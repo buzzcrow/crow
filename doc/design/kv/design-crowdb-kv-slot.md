@@ -86,10 +86,10 @@ The blind-ops premise from design-crowdb-kv.md §5.2](design-crowdb-kv.md) makes
 
 The number of in-flight slots is capped at the **window size** (`max_inflight_proposals`, default 32). The proposer uses an `InflightAdmission` gate backed by one or more `Semaphore`s. If a permit is available, the request is admitted, slot is assigned, and proposing begins. The permit is held for the entire proposal duration.
 
-**Admission policy** (`AdmissionPolicy`, internal config, not exposed via CLI):
+**Admission policy** (`reject_on_inflight_window_full: bool`, internal config, not exposed via CLI):
 
-- **`Queue` (default)** — If no permit is available, the caller blocks on `acquire().await` until a permit is freed. This eliminates client-side reject-retry storms under contention (e.g., window=1 with 16 writers). Wait time and queue depth are tracked as metrics (`inflight_total_enqueued`, `inflight_total_wait_us`, `inflight_queue_depth`).
-- **`Reject`** — If no permit is available (`try_acquire` fails), the leader immediately returns `Busy` — a retryable error. No queuing. Used only in tests that need to verify fail-fast behavior.
+- **`false` (default)** — If no permit is available, the caller blocks on `acquire().await` until a permit is freed. This eliminates client-side reject-retry storms under contention (e.g., window=1 with 16 writers). Wait time and queue depth are tracked as metrics (`inflight_total_enqueued`, `inflight_total_wait_us`, `inflight_queue_depth`).
+- **`true`** — If no permit is available (`try_acquire` fails), the leader immediately returns `Busy` — a retryable error. No queuing. Used only in tests that need to verify fail-fast behavior.
 
 **Multi-queue routing** (`--inflight-queues`, default 1): The window is split across N semaphores, each sized `ceil(max_inflight / N)`. Proposals are routed round-robin. Multiple queues reduce semaphore contention under high concurrency without affecting correctness (each slot is an independent Paxos instance; admission ordering does not influence consensus safety).
 
@@ -292,7 +292,9 @@ Detailed further in [`design-crowdb-kv-wal.md`](design-crowdb-kv-wal.md) §4.
 | Parameter | Default | Where it lives |
 | --- | --- | --- |
 | `max_inflight_proposals` | 32 | `PaxosConfig` (total semaphore permits) |
-| `inflight_admission` | `Queue` | `PaxosConfig` (internal, not CLI-exposed) |
+| `reject_on_inflight_window_full` | `false` | `PaxosConfig` (internal, not CLI-exposed) |
+| `coalesce_max_keys` | 32 | `PaxosConfig` (max ops per coalesced batch; 0 = off) |
+| `coalesce_drain_threshold` | 1 | `PaxosConfig` (skip drain at this inflight count) |
 | `max_paxos_retries` | 3 | `PaxosConfig` (per-slot Phase-2 retries) |
 | `max_slot_retries` | 3 | `PaxosConfig` (new-slot retries before giving up) |
 | `retry_base_backoff_ms` | 5 | `PaxosConfig` (exponential backoff base) |
@@ -544,9 +546,10 @@ inflight window above MI=16. The bottleneck is the per-proposal quorum
 RPC rate, not `fsync`.
 
 The `Batch` payload format already supports multiple ops per slot and
-`kv_batch_write` exposes it, but there was no server-side coalescer:
-concurrent single-key proposes each took a distinct slot and paid the
-full quorum round.
+`kv_batch_write` exposes it. Without server-side coalescing, concurrent
+single-key proposes each take a distinct slot and pay the full quorum
+round. The coalescer (enabled by default, `coalesce_max_keys = 32`)
+event-batches these into one multi-key Paxos proposal per batch.
 
 ### 23.2 Drain Threshold
 
@@ -563,8 +566,8 @@ idle (if empty).
 At high load, drains almost never fire (many slot-tasks in flight);
 the `max_keys` overflow path produces full batches. At low load,
 drains always fire (few slot-tasks, threshold not exceeded), so there
-is no latency floor; a lone op flushes immediately. CLI default
-`coalesce_drain_threshold = max_inflight / 4` (see §23.5).
+is no latency floor; a lone op flushes immediately. Default
+`coalesce_drain_threshold = 1` (see §23.5).
 
 ### 23.3 Coalescer Design
 
@@ -604,10 +607,11 @@ concurrent map.
 1. Leadership gate (as before).
 2. Dedup lookup (as before) — a hit returns the cached slot
    immediately, never enters a batch.
-3. If `coalesce_max_keys == 0` (disabled) or `self_weak` is unset:
-   call `propose_inner(payload, &[tag])` directly; bit-identical to
-   the fallback path.
-4. Else (coalescing on): `coalesce_enqueue(payload, tag)`:
+3. If `coalesce_max_keys == 0` (coalescing disabled) or `self_weak` is
+   unset: call `propose_inner(payload, &[tag])` directly; bit-identical
+   to the fallback path.
+4. Else (coalescing on, default `coalesce_max_keys = 32`):
+   `coalesce_enqueue(payload, tag)`:
    - Coalescer is `None` (idle) → create a batch with this op, start a
      1-op slot-task **immediately**. Open a fresh empty batch for ops
      arriving during this round.
@@ -671,19 +675,16 @@ paths pass `&[]` (no tags → no dedup recording, identical to the old
 `PaxosConfig` gains:
 
 - `coalesce_max_keys: usize` — max ops per batch (cap 65535, the
-  payload count field is `u16`). `0` disables coalescing (default).
+  payload count field is `u16`). Default `32`; `0` disables coalescing.
 - `coalesce_drain_threshold: usize` — skip drain when in-flight
-  slot-task count >= this. Library default `1`; the `crowdb-kv-server`
-  CLI derives `max_inflight / 4` when `--coalesce-drain-threshold` is
-  omitted (skip drain once the pipeline is a quarter full; the last
-  finisher always drains). `0` = always drain (pure event mode);
-  higher values skip the drain at high load so the `max_keys` overflow
-  path produces full batches.
+  slot-task count >= this. Default `1` (the last finisher always
+  drains). `0` = always drain (pure event mode); higher values skip
+  the drain at high load so the `max_keys` overflow path produces full
+  batches.
 
-CLI: `--coalesce-max-keys`, `--coalesce-drain-threshold` on
-`crowdb-kv-server`, applied in `main.rs` into `config.paxos`. Wired into
-the group via `set_from_config` (the coalescer reads
-`self.config.paxos.*`).
+CLI: `--coalesce-max-keys` on `crowdb-kv-server`, applied in `main.rs`
+into `config.paxos`. Wired into the group via `set_from_config` (the
+coalescer reads `self.config.paxos.*`).
 
 ### 23.6 Correctness
 
