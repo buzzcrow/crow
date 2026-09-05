@@ -356,7 +356,7 @@ R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
 ## Implementation Process
 
 Each item follows the lifecycle defined in the
-[`/implement-requirement` workflow](../../.devin/workflows/implement-requirement.md):
+[`/implement-requirement` workflow](../../.agents/skills/implement-requirement/SKILL.md):
 understand → design → plan → implement → merge design → cleanup.
 
 After the PR is merged, all obsolete working docs (design draft, plan doc)
