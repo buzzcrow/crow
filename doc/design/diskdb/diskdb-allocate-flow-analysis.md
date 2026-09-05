@@ -81,31 +81,31 @@ The three connection and worker layers remain independent:
 - KV: server RPC workers, peer pool, proposal inflight window, coalesce size,
   drain threshold, event-write mode, WAL, and storage backend.
 
-The high-throughput memory profile starts from the KV write sentinel:
-event-write enabled, peer pool 4, inflight 64, coalesce 64, drain threshold 1,
-and four KV server RPC workers. DiskDB uses four RPC workers on each client and
-server leg. Connection count is recorded explicitly because a per-process,
-per-endpoint pool is not comparable to the direct KV benchmark's total count.
+The high-throughput memory profile starts from the KV write sentinel. The
+current matrix enables event-write and uses inflight 32 and coalesce 32 without
+an explicit drain-threshold override. The 1/16-thread cases use two
+connections and RPC workers on every layer; 128/256-thread cases use four.
+Connection count is recorded explicitly because a per-process, per-endpoint
+pool is not comparable to the direct KV benchmark's total count.
 
 ## 4. Reference Results
 
 AMD Ryzen 9 5950X, 16c/32t, Linux 6.8, x86_64, memory KV/WAL, one block per
-request. Discovery cases ran for five seconds; the confirmation ran for 20
-seconds. Every case stopped at its deadline with zero errors and exact busy
-space accounting.
+request, and 4 TiB per logical disk. Every case ran for 20 seconds, stopped at
+its deadline with zero errors, and reported exact busy-space accounting.
 
 | Workload | Grp | Thread | Block | Client connection | DiskDB connection | KV internal connection | Epoll worker | Window | Coalesce | ops/s | p50 us | p99 us | Duration | Errors | Space |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| allocate | 3 | 1 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | 2,500 | 407 | 508 | 20 s | 0 | exact |
-| allocate | 3 | 16 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | 43,488 | 359 | 557 | 20 s | 0 | exact |
-| allocate | 3 | 128 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | 139,986 | 872 | 1,714 | 20 s | 0 | exact |
-| allocate | 3 | 512 | 1 | 4 | 4 | 4 | 4 | 64 | 64 | 190,507 | 2,473 | 6,317 | 20 s | 0 | exact |
-| allocate | 1 | 512 | 1 | 4 | 4 | 4 | 4 | 64 | 64 | 197,085 | 2,461 | 5,161 | 20 s | 0 | exact |
-| mix | 3 | 1 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | 2,514 | 408 | 500 | 20 s | 0 | exact |
-| mix | 3 | 16 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | 43,360 | 359 | 566 | 20 s | 0 | exact |
-| mix | 3 | 128 | 1 | 4 | 4 | 4 | 4 | 32 | 32 | 130,286 | 934 | 1,862 | 20 s | 0 | exact |
-| mix | 3 | 256 | 1 | 4 | 4 | 4 | 4 | 32 | 32 | 154,893 | 1,561 | 3,364 | 20 s | 0 | exact |
-| mix | 1 | 256 | 1 | 4 | 4 | 4 | 4 | 32 | 32 | 162,021 | 1,493 | 3,160 | 20 s | 0 | exact |
+| allocate | 3 | 1 | 1 | 2 | 2 | 2 | 2 | 32 | 32 | 2,481 | 410 | 504 | 20 s | 0 | exact |
+| allocate | 3 | 16 | 1 | 2 | 2 | 2 | 2 | 32 | 32 | 42,959 | 362 | 582 | 20 s | 0 | exact |
+| allocate | 3 | 128 | 1 | 4 | 4 | 4 | 4 | 32 | 32 | 130,863 | 930 | 1,863 | 20 s | 0 | exact |
+| allocate | 3 | 256 | 1 | 4 | 4 | 4 | 4 | 32 | 32 | 159,418 | 1,514 | 3,294 | 20 s | 0 | exact |
+| allocate | 1 | 256 | 1 | 4 | 4 | 4 | 4 | 32 | 32 | 171,206 | 1,423 | 2,883 | 20 s | 0 | exact |
+| mix | 3 | 1 | 1 | 2 | 2 | 2 | 2 | 32 | 32 | 2,494 | 405 | 500 | 20 s | 0 | exact |
+| mix | 3 | 16 | 1 | 2 | 2 | 2 | 2 | 32 | 32 | 43,106 | 361 | 568 | 20 s | 0 | exact |
+| mix | 3 | 128 | 1 | 4 | 4 | 4 | 4 | 32 | 32 | 128,013 | 948 | 1,957 | 20 s | 0 | exact |
+| mix | 3 | 256 | 1 | 4 | 4 | 4 | 4 | 32 | 32 | 154,624 | 1,556 | 3,456 | 20 s | 0 | exact |
+| mix | 1 | 256 | 1 | 4 | 4 | 4 | 4 | 32 | 32 | 171,419 | 1,419 | 2,915 | 20 s | 0 | exact |
 
 `Grp` is the number of KV data groups bound round-robin to DiskDB disk groups;
 three groups in the default three-node topology gives each node's DiskDB disk
@@ -122,43 +122,46 @@ the single-group ceiling. Other cases bind one KV data group per node.
 Environment overrides can replace the group, connection, or worker count for
 experiments.
 
-The 512-thread three-group allocation completed 3,815,407 allocations and
-reported an exact 4,000,744,210,432-byte busy-space delta. The one-group case
-completed 3,945,202 allocations with an exact 4,136,844,132,352-byte delta.
+The 256-thread three-group allocation completed 3,191,195 allocations and
+reported an exact 3,346,210,488,320-byte busy-space delta. The one-group case
+completed 3,427,099 allocations with an exact 3,593,573,761,024-byte delta.
 
-The direct KV write sentinel peaks near 264K writes/s at 512 tasks and 16
-connections with the same KV server profile. That workload observed about 58
-client writes per WAL append and no inflight-window saturation.
+The direct KV write sentinel peaks near 264K writes/s at 512 tasks with the
+larger 64/64 window/coalesce profile. The closest 32-slot direct-KV references
+reach about 181–191K writes/s at 128/256 threads. Against that range, the
+one-group DiskDB allocation result is within about 6%, while the three-group
+result is within about 12% of the 256-thread KV result.
 
 ## 5. Bottleneck
 
-At 512 workers, DiskDB request latency is dominated by KV persistence. In
-representative one-second windows, whole-handler average latency is about
-1.8–2.7 ms while KV persistence is about 1.6–2.4 ms. Bitmap scan averages below
-one microsecond. The current 512-thread profile uses four connections and four
-workers on every RPC layer.
+At 256 threads, DiskDB request latency is dominated by KV persistence. In
+representative saturated allocation windows, whole-handler average latency is
+about 1.25–1.76 ms while KV persistence is about 1.08–1.50 ms. Bitmap scan and
+record construction average at or below one microsecond. KV batch-write
+service averages about 0.5–0.7 ms, and KV processes consume several cores in
+both user and system time. Inflight slots remain around one to three, so the
+32-slot proposal window is not saturated.
 
-Three data groups are slower than one on the same three KV processes. The
-groups contend for shared CPU and consensus transport; adding groups does not
-provide independent hardware capacity.
+Three data groups are about 7% slower than one at the same 256-thread settings
+for both allocate and mix. All groups are replicated across the same three KV
+processes, so they contend for shared accept-round CPU and consensus transport;
+adding groups does not provide independent hardware capacity.
 
-The durable one-unit path cannot reach 400K operations/s through DiskDB tuning
-alone while it requires one KV client write per operation and the measured
-direct KV ceiling is about 264K operations/s. Reaching a higher rate requires
-raising the underlying KV ceiling or changing the number of DiskDB operations
-represented by one KV client write. Any such batching must preserve durable
-acknowledgement and exact rollback semantics.
+The current bottleneck is KV accept-round and RPC CPU capacity, not DiskDB
+bitmap allocation, the 32-slot inflight window, or disk capacity. The durable
+one-unit path cannot reach 400K operations/s through DiskDB tuning alone while
+it requires one KV client write per operation and the measured direct KV
+ceiling is about 264K operations/s. Reaching a higher rate requires raising the
+underlying KV ceiling or changing the number of DiskDB operations represented
+by one KV client write. Any such batching must preserve durable acknowledgement
+and exact rollback semantics.
 
 ## 6. Retained Logs
 
 Reference run roots:
 
-- `bench-log/diskdb-regression-20260905-115721`: completed allocation matrix
-  and 1/16-thread mix cases; first 128-thread mix hang.
-- `bench-log/diskdb-regression-20260905-123406`: corrected 128/256-thread
-  three-group mix cases.
-- `bench-log/diskdb-regression-20260905-124053`: corrected 256-thread
-  one-group mix case with concurrent verification compaction.
+- `bench-log/diskdb-regression-20260905-133409`: complete current allocation
+  and mixed-workload matrix.
 
 Each root retains command output and configuration plus three KV metrics/RPC
 log pairs, three DiskDB metrics/RPC log pairs, and one CLI metrics/RPC pair per
