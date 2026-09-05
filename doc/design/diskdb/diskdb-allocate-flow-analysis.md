@@ -96,18 +96,21 @@ space accounting.
 
 | Workload | Grp | Thread | Block | Client connection | DiskDB connection | KV internal connection | Epoll worker | Window | Coalesce | ops/s | p50 us | p99 us | Duration | Errors | Space |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| allocate | 3 | 128 | 1 | 16 | 8 | 4 | 4/4/4/4 | 64 | 64 | 128,559 | 951 | 1,848 | 5 s | 0 | exact |
-| allocate | 3 | 256 | 1 | 16 | 8 | 4 | 4/4/4/4 | 64 | 64 | 156,741 | 1,541 | 3,332 | 5 s | 0 | exact |
-| allocate | 3 | 512 | 1 | 16 | 8 | 4 | 4/4/4/4 | 64 | 64 | 183,310 | 2,635 | 5,872 | 5 s | 0 | exact |
-| allocate | 3 | 768 | 1 | 16 | 8 | 4 | 4/4/4/4 | 64 | 64 | 193,977 | 3,703 | 8,455 | 5 s | 0 | exact |
-| allocate | 1 | 512 | 1 | 16 | 8 | 4 | 4/4/4/4 | 64 | 64 | 205,167 | 2,382 | 4,790 | 5 s | 0 | exact |
-| allocate | 1 | 512 | 1 | 4 | 4 | 4 | 4/4/4/4 | 64 | 64 | 206,266 | 2,362 | 4,818 | 5 s | 0 | exact |
-| allocate | 1 | 512 | 1 | 4 | 4 | 4 | 4/4/4/4 | 64 | 64 | 191,971 | 2,508 | 5,513 | 20 s | 0 | exact |
+| allocate | 3 | 1 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | 2,500 | 407 | 508 | 20 s | 0 | exact |
+| allocate | 3 | 16 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | 43,488 | 359 | 557 | 20 s | 0 | exact |
+| allocate | 3 | 128 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | 139,986 | 872 | 1,714 | 20 s | 0 | exact |
+| allocate | 3 | 512 | 1 | 4 | 4 | 4 | 4 | 64 | 64 | 190,507 | 2,473 | 6,317 | 20 s | 0 | exact |
+| allocate | 1 | 512 | 1 | 4 | 4 | 4 | 4 | 64 | 64 | 197,085 | 2,461 | 5,161 | 20 s | 0 | exact |
+| mix | 3 | 1 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | 2,514 | 408 | 500 | 20 s | 0 | exact |
+| mix | 3 | 16 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | 43,360 | 359 | 566 | 20 s | 0 | exact |
+| mix | 3 | 128 | 1 | 2 | 2 | 2 | 2 | 64 | 64 | — | — | — | 60 s | timeout | unknown |
+| mix | 3 | 512 | 1 | 4 | 4 | 4 | 4 | 64 | 64 | — | — | — | 60 s | timeout | unknown |
+| mix | 1 | 512 | 1 | 4 | 4 | 4 | 4 | 64 | 64 | — | — | — | 60 s | timeout | unknown |
 
 `Grp` is the number of KV data groups bound round-robin to DiskDB disk groups;
 three groups in the default three-node topology gives each node's DiskDB disk
-group a distinct KV group. `Epoll worker` is shown as client, DiskDB server,
-DiskDB KV-client, and KV-server RPC workers. The regression fixture now uses
+group a distinct KV group. `Epoll worker` applies uniformly to the client,
+DiskDB server, DiskDB KV-client, and KV-server RPC layers. The fixture uses
 4 TiB per logical disk so a 20-second high-concurrency run does not approach a
 single node's available space.
 
@@ -119,8 +122,9 @@ the single-group ceiling. Other cases bind one KV data group per node.
 Environment overrides can replace the group, connection, or worker count for
 experiments.
 
-The 20-second confirmation completed 3,842,826 allocations and reported an
-exact 4,029,495,115,776-byte busy-space delta.
+The 512-thread three-group allocation completed 3,815,407 allocations and
+reported an exact 4,000,744,210,432-byte busy-space delta. The one-group case
+completed 3,945,202 allocations with an exact 4,136,844,132,352-byte delta.
 
 The direct KV write sentinel peaks near 264K writes/s at 512 tasks and 16
 connections with the same KV server profile. That workload observed about 58
@@ -131,8 +135,8 @@ client writes per WAL append and no inflight-window saturation.
 At 512 workers, DiskDB request latency is dominated by KV persistence. In
 representative one-second windows, whole-handler average latency is about
 1.8–2.7 ms while KV persistence is about 1.6–2.4 ms. Bitmap scan averages below
-one microsecond. Connection reduction from 16/8 to 4/4 changes throughput by
-less than one percent, so excess connection count is not the active limit.
+one microsecond. The current 512-thread profile uses four connections and four
+workers on every RPC layer.
 
 Three data groups are slower than one on the same three KV processes. The
 groups contend for shared CPU and consensus transport; adding groups does not
@@ -149,12 +153,10 @@ acknowledgement and exact rollback semantics.
 
 Reference run roots:
 
-- `bench-log/diskdb-regression-20260905-101733`: 128-worker discovery.
-- `bench-log/diskdb-regression-20260905-101918`: 256/512-worker discovery.
-- `bench-log/diskdb-regression-20260905-102109`: 768-worker discovery.
-- `bench-log/diskdb-regression-20260905-102201`: one-group comparison.
-- `bench-log/diskdb-regression-20260905-102241`: four-connection comparison.
-- `bench-log/diskdb-regression-20260905-102330`: 20-second confirmation.
+- `bench-log/diskdb-regression-20260905-115721`: completed allocation matrix
+  and 1/16-thread mix cases; first 128-thread mix hang.
+- `bench-log/diskdb-regression-20260905-120810`: bounded 128/512-thread mix
+  retries, including the one-group case; all three timed out.
 
 Each root retains command output and configuration plus three KV metrics/RPC
 log pairs, three DiskDB metrics/RPC log pairs, and one CLI metrics/RPC pair per

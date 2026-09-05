@@ -105,20 +105,19 @@ allocations/s while retaining latency, correctness, and cross-process logs.
 ## Blocked
 
 The 400K one-unit durable allocation/s acceptance target is blocked by the
-one-KV-write-per-allocation contract and the measured upstream KV ceiling. Six
-root-cause-driven configurations were run on the reference host:
+one-KV-write-per-allocation contract and the measured upstream KV ceiling. The
+current 20-second allocation matrix reached 2,500 / 43,488 / 139,986 / 190,507
+ops/s at 1 / 16 / 128 / 512 threads with three KV groups. The 512-thread
+single-group comparison reached 197,085 ops/s. All allocation cases had zero
+errors, deadline stop, and exact space accounting.
 
-- three groups at 128/256/512/768 workers: 128,559 / 156,741 / 183,310 /
-  193,977 ops/s;
-- one group at 512 workers with 16/8 and 4/4 client/KV connections: 205,167
-  and 206,266 ops/s for five seconds;
-- the 4/4 configuration confirmed at 191,971 ops/s for 20 seconds.
-
-All cases had zero errors, deadline stop, and exact space accounting. Metrics
-attribute nearly all DiskDB handler time to KV persistence; bitmap scan is
-below one microsecond. The direct KV write sentinel peaks near 264K writes/s,
-also below 400K, so more DiskDB worker/connection tuning cannot satisfy the
-target.
+The 1/16-thread mixed cases reached 2,514 and 43,360 ops/s with exact space.
+Mixed cases at 128 and 512 threads did not return after their 20-second
+workload window and were terminated by a 60-second outer timeout, including
+the 512-thread single-group case. Metrics attribute nearly all DiskDB handler
+time to KV persistence; bitmap scan is below one microsecond. The direct KV
+write sentinel peaks near 264K writes/s, also below 400K, so more DiskDB
+worker/connection tuning cannot satisfy the target.
 
 Continuation requires an architecture choice:
 

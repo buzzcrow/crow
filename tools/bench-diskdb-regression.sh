@@ -22,50 +22,28 @@
 #   DISKDB_BENCH_LOG_ROOT       persistent run root
 #   DISKDB_BENCH_RESULTS        output TSV path
 #
-# AMD (2026-09-04): Ryzen 9 5950X, 16c/32t, Linux 6.8, x86_64.
-# These historical results used the retired private fixture:
+# AMD Ryzen 9 5950X, 16c/32t, Linux 6.8, x86_64 (2026-09-05).
+# Memory KV/WAL, 3 KV nodes, 3 DiskDB instances, 12 x 4-TiB disks, one block
+# per request, and a 20-second workload window:
 #
-#   Workload       Wkr  Blocks  ops/s    p50us  p99us  Stop      Err  Space
-#   allocate         1       1    4,638    217    272  deadline    0  exact
-#   allocate        64       1  110,620    577    768  deadline    0  exact
-#   mix 70/30        1       1    5,046    202    270  deadline    0  exact
-#   mix 70/30       64       1  109,885    581    774  deadline    0  exact
-#
-# Production CLI lifecycle, same host (2026-09-04), 3 KV nodes,
-# 3 diskdb instances, 12 x 1-TiB disks, 20 seconds per case:
-#
-#   Workload       Wkr  Blocks  ops/s    p50us  p99us  Stop      Err  Space
-#   allocate         1       1    2,579    394    482  deadline    0  exact
-#   allocate         4       1   10,932    341    563  deadline    0  exact
-#   allocate        16       1   38,962    395    684  deadline    0  exact
-#   allocate        64       1   60,642  1,007  1,978  deadline    0  exact
-#   allocate        16       4  135,511    453    801  deadline    0  exact
-#   mix 70/30        1       1    2,593    390    489  deadline    0  exact
-#   mix 70/30        4       1   11,386    319    558  deadline    0  exact
-#   mix 70/30       16       1   37,572    409    737  deadline    0  exact
-#   mix 70/30       64       1   60,778  1,007  1,938  deadline    0  FAIL
-#   mix 70/30       16       4  111,232    427    756  deadline    0  FAIL
-#
-# The failed mix cases left 2,189 and 304 acknowledged freed units busy.
-# Compaction logs show records missed by one scan later classified stale
-# behind the prior watermark. Keep these failures as correctness sentinels.
-#
-# Allocation tuning, same host (2026-09-05), memory KV/WAL, one block per
-# request. Discovery cases ran for 5 seconds; confirmation ran for 20 seconds:
-#
-# Workload Grp Thread Block ClientConn DDBConn KVConn EpollWorker Win Coal   ops/s p50 p99 Dur Err Space
-# allocate    3    128     1         16       8      4      4/4/4/4  64   64 128,559  951 1,848  5s   0 exact
-# allocate    3    256     1         16       8      4      4/4/4/4  64   64 156,741 1,541 3,332  5s   0 exact
-# allocate    3    512     1         16       8      4      4/4/4/4  64   64 183,310 2,635 5,872  5s   0 exact
-# allocate    3    768     1         16       8      4      4/4/4/4  64   64 193,977 3,703 8,455  5s   0 exact
-# allocate    1    512     1         16       8      4      4/4/4/4  64   64 205,167 2,382 4,790  5s   0 exact
-# allocate    1    512     1          4       4      4      4/4/4/4  64   64 206,266 2,362 4,818  5s   0 exact
-# allocate    1    512     1          4       4      4      4/4/4/4  64   64 191,971 2,508 5,513 20s   0 exact
+# Workload Grp Thread Block ClientConn DDBConn KVConn EpollWorker Win Coal   ops/s p50 p99 Dur Err     Space
+# allocate    3      1     1          2       2      2           2  64   64   2,500  407   508 20s 0       exact
+# allocate    3     16     1          2       2      2           2  64   64  43,488  359   557 20s 0       exact
+# allocate    3    128     1          2       2      2           2  64   64 139,986  872 1,714 20s 0       exact
+# allocate    3    512     1          4       4      4           4  64   64 190,507 2,473 6,317 20s 0       exact
+# allocate    1    512     1          4       4      4           4  64   64 197,085 2,461 5,161 20s 0       exact
+# mix         3      1     1          2       2      2           2  64   64   2,514  408   500 20s 0       exact
+# mix         3     16     1          2       2      2           2  64   64  43,360  359   566 20s 0       exact
+# mix         3    128     1          2       2      2           2  64   64       -    -     - 60s timeout unknown
+# mix         3    512     1          4       4      4           4  64   64       -    -     - 60s timeout unknown
+# mix         1    512     1          4       4      4           4  64   64       -    -     - 60s timeout unknown
 #
 # Grp is the number of KV data groups bound round-robin to DiskDB disk groups.
 # With the default topology, three groups means one KV group per node.
 # ClientConn is CLI-to-DiskDB; DDBConn is DiskDB-to-KV; KVConn is the KV peer
-# pool. EpollWorker is client/DiskDB/KV-client/KV-server RPC worker count.
+# pool. EpollWorker applies uniformly to client, DiskDB, KV-client, and
+# KV-server RPC workers. High-concurrency mix cases did not return a benchmark
+# summary and were stopped by the 60-second outer timeout.
 #
 # The direct KV write sentinel peaks near 264K writes/s. Because one durable
 # DiskDB allocation produces one KV batch_write, DiskDB TPS is expected to be
@@ -193,9 +171,11 @@ run_case() {
     CASE_NUMBER=$((CASE_NUMBER + 1))
     deploy_case "$label" "$mode"
     local output status line epoll_workers
-    epoll_workers="$DDB_CLIENT_WORKERS/$DDB_RPC_WORKERS/$KV_CLIENT_WORKERS/$KV_RPC_WORKERS"
+    epoll_workers="$workers"
     set +e
-    output=$(cli bench diskdb "$workload" --duration-secs "$DURATION" \
+    output=$(timeout --signal=INT --kill-after=10 "$((DURATION + 40))" \
+        ./target/release/crowdb-cli --log-root "$LOG_ROOT" --config "$CURRENT_CONFIG" \
+        bench diskdb "$workload" --duration-secs "$DURATION" \
         --concurrency "$concurrency" --unit-count 1 --blocks-per-request "$blocks" \
         --diskdb-connections "$DDB_CONNECTIONS" \
         --diskdb-client-rpc-workers "$DDB_CLIENT_WORKERS" \
