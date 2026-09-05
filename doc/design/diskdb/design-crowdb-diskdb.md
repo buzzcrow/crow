@@ -711,6 +711,31 @@ lib/crowdb-diskdb-client    (client library for callers: allocate/free/query; cr
   extension traits are re-exported from `crowdb_protocol`; internal types
   (metas, key layout, `AllocatedRange`, `ActiveZoneContext`, bitmap)
   are Rust structs.
+
+  Liveness and RPC use pure index modules with private implementation
+  children:
+
+  ```text
+  liveness/keepalive.rs
+  └── keepalive/
+      ├── scheduler.rs       KeepAlive facade, tick, and BackgroundTask
+      ├── heartbeat.rs       service-registry heartbeat publication
+      ├── observation.rs     group-0 ownership, bind, and disk observation
+      ├── reconciliation.rs  runtime ownership and disk reconciliation
+      └── loading.rs         generation-fenced asynchronous zone loading
+
+  service/diskdb_rpc_service.rs
+  └── diskdb_rpc_service/
+      ├── service.rs         DiskdbRpcService state and handler registration
+      ├── mutations.rs       allocate, commit, and free handlers
+      ├── queries.rs         capacity and inventory query handlers
+      ├── admin.rs           recovery, compaction, and scanner handlers
+      └── wire.rs            FlatBuffer parsing and response construction
+  ```
+
+  `KeepAlive::tick` is the liveness orchestrator and preserves the order
+  heartbeat → observation → reconciliation. `DiskdbRpcService` remains the
+  public registration facade; all mutations pass through `mutation_gate`.
 - **`lib/crowdb-diskdb-client`** — client library for easy access to the server
   (allocate/free/query), mirroring `crowdb-kv-client`'s retry +
   topology-cache pattern. crowdb-rpc transport; flatbuffers framing.

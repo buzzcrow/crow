@@ -15,13 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R134](R134-diskdb-module-boundaries.md)** — diskdb liveness and RPC
-  module boundaries — Area: diskdb / client — finish separating group-0
-  observation, reconciliation, heartbeat, and loading from the keep-alive
-  scheduler, and split common gates, mutations, queries, and admin handlers
-  behind the existing RPC service interface. Preserve the completed behavior
-  and lock-free hot paths with feature-grouped component coverage.
-
 - **[R131](R131-diskdb-allocate-performance.md)** — diskdb allocation
   throughput — Area: diskdb / client / kv / RPC — Trace and measure the
   complete allocation path, isolate bitmap, persistence, scheduling,

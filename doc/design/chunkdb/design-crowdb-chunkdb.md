@@ -953,44 +953,50 @@ aligns with redundancy unit design.
 app/crowdb-chunkdb/              # chunkdb server binary
 ├── Cargo.toml
 ├── src/
-│   ├── main.rs               # CLI entrypoint
-│   ├── server.rs             # rpc server
-│   ├── lifecycle.rs          # Chunk lifecycle handlers
+│   ├── main.rs               # CLI entrypoint and server wiring
+│   ├── lifecycle.rs          # pure lifecycle index
+│   ├── lifecycle/
+│   │   ├── handler.rs        # lifecycle orchestration
+│   │   ├── lock_map.rs       # per-chunk serialization and payload cache
+│   │   └── state.rs          # lifecycle state transitions
+│   ├── service.rs            # pure service index
+│   ├── service/
+│   │   ├── chunkdb_service.rs
+│   │   ├── chunkdb_rpc_service.rs
+│   │   └── chunkdb_rpc_service/
+│   │       ├── service.rs    # state and handler registration
+│   │       ├── mutations.rs  # mutating chunk handlers
+│   │       ├── queries.rs    # query and list handlers
+│   │       └── wire.rs       # FlatBuffer frames and error mapping
 │   ├── allocator/
-│   │   ├── mod.rs            # ChunkAllocator
-│   │   ├── mirror.rs         # MirrorStripAllocator
-│   │   └── ec.rs             # ECStripAllocator
+│   │   └── pool.rs           # allocation pool
 │   ├── selector/
-│   │   ├── mod.rs            # RackNodeSelector
 │   │   ├── mirror.rs         # Mirror placement
 │   │   └── ec.rs             # EC placement
 │   ├── topology/
-│   │   ├── mod.rs            # TopologyCache, TopologySnapshot
-│   │   └── refresh.rs        # TopologyRefresh task
+│   │   ├── notify.rs         # topology notifications
+│   │   └── refresh.rs        # topology refresh task
 │   ├── storage.rs            # KV persistence
-│   ├── ec.rs                 # EC encoding/decoding orchestration
-│   └── types/
-│       ├── mod.rs            # Common types
-│       ├── chunk.rs          # Chunk types
-│       ├── strip.rs          # Strip types
-│       ├── chunk_id.rs       # Chunk ID generation (128-bit format)
-│       └── placement.rs      # Placement types
+│   ├── routing.rs            # bucket routing
+│   ├── range_guard.rs        # owned-range enforcement
+│   └── migration.rs          # range migration
 
 lib/crowdb-chunkdb-client/       # chunkdb client library
 ├── Cargo.toml
 └── src/
     ├── client.rs             # ChunkdbClient
-    └── types.rs              # Client-side types
-
-lib/crowdb-common/               # Shared library (EC module added)
-├── src/
-│   └── ec.rs                 # isa-l FFI wrapper (encode/decode)
+    └── rpc_transport.rs      # crowdb-rpc transport
 
 lib/crowdb-protocol/             # Protocol definitions
 └── src/fbs/
-    ├── chunkdb_service.fbs # rpc service
-    └── chunkdb_types.fbs   # Data types
+    └── chunkdb.fbs          # service and data types
 ```
+
+The lifecycle index preserves the public `LifecycleHandler`, `ChunkLockMap`,
+and state-machine API. The handler owns chunk operations; the lock-map module
+owns the approved bounded per-chunk mutex and payload cache. RPC registration,
+chunk handlers, and FlatBuffer construction are separate private modules
+behind `ChunkdbRpcService`.
 
 ## 13. Concurrency Model
 
