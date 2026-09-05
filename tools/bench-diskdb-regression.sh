@@ -12,17 +12,12 @@
 #   DISKDB_BENCH_DURATION       seconds per case (default: 20)
 #   DISKDB_BENCH_MODES          space-separated modes (default: "mem")
 #   DISKDB_BENCH_CASES          optional space-separated case labels
-#   DISKDB_BENCH_DATA_GROUPS    number of KV data groups (default: 1)
+#   DISKDB_BENCH_DATA_GROUPS    override the per-case KV data-group count
 #   DISKDB_BENCH_KV_INFLIGHT    KV proposal window (default: 64)
 #   DISKDB_BENCH_KV_COALESCE    KV coalesce max keys (default: 64)
-#   DISKDB_BENCH_KV_RPC_WORKERS KV server RPC workers (default: 4)
-#   DISKDB_BENCH_KV_PEER_POOL   KV peer connections (default: 4)
-#   DISKDB_BENCH_DDB_RPC_WORKERS DiskDB server RPC workers (default: 4)
-#   DISKDB_BENCH_DDB_CONNECTIONS CLI connections per DiskDB (default: 4)
-#   DISKDB_BENCH_DDB_CLIENT_WORKERS CLI DiskDB RPC workers (default: 4)
-#   DISKDB_BENCH_KV_CONNECTIONS DiskDB-to-KV connections (default: 4)
-#   DISKDB_BENCH_KV_CLIENT_WORKERS DiskDB-to-KV RPC workers (default: 4)
-#   DISKDB_BENCH_DISK_CAPACITY  bytes per disk (default: 1 TiB)
+#   DISKDB_BENCH_CONNECTIONS    override all RPC connection counts
+#   DISKDB_BENCH_RPC_WORKERS    override all RPC epoll-worker counts
+#   DISKDB_BENCH_DISK_CAPACITY  bytes per disk (default: 4 TiB)
 #   DISKDB_BENCH_ZONE_SIZE      bytes per zone (default: 256 GiB)
 #   DISKDB_BENCH_LOG_ROOT       persistent run root
 #   DISKDB_BENCH_RESULTS        output TSV path
@@ -58,20 +53,19 @@
 # Allocation tuning, same host (2026-09-05), memory KV/WAL, one block per
 # request. Discovery cases ran for 5 seconds; confirmation ran for 20 seconds:
 #
+# Workload Grp Thread Block ClientConn DDBConn KVConn EpollWorker Win Coal   ops/s p50 p99 Dur Err Space
+# allocate    3    128     1         16       8      4      4/4/4/4  64   64 128,559  951 1,848  5s   0 exact
+# allocate    3    256     1         16       8      4      4/4/4/4  64   64 156,741 1,541 3,332  5s   0 exact
+# allocate    3    512     1         16       8      4      4/4/4/4  64   64 183,310 2,635 5,872  5s   0 exact
+# allocate    3    768     1         16       8      4      4/4/4/4  64   64 193,977 3,703 8,455  5s   0 exact
+# allocate    1    512     1         16       8      4      4/4/4/4  64   64 205,167 2,382 4,790  5s   0 exact
+# allocate    1    512     1          4       4      4      4/4/4/4  64   64 206,266 2,362 4,818  5s   0 exact
+# allocate    1    512     1          4       4      4      4/4/4/4  64   64 191,971 2,508 5,513 20s   0 exact
 #
-# Grp Wkr DC KC CW DW KW KSW Peer Win Coal   ops/s p50us p99us Dur Err Space
-#   3 128 16  8  4  4  4   4    4  64   64 128,559   951 1,848  5s   0 exact
-#   3 256 16  8  4  4  4   4    4  64   64 156,741 1,541 3,332  5s   0 exact
-#   3 512 16  8  4  4  4   4    4  64   64 183,310 2,635 5,872  5s   0 exact
-#   3 768 16  8  4  4  4   4    4  64   64 193,977 3,703 8,455  5s   0 exact
-#   1 512 16  8  4  4  4   4    4  64   64 205,167 2,382 4,790  5s   0 exact
-#   1 512  4  4  4  4  4   4    4  64   64 206,266 2,362 4,818  5s   0 exact
-#   1 512  4  4  4  4  4   4    4  64   64 191,971 2,508 5,513 20s   0 exact
-#
-# DC=CLI-to-DiskDB connections; KC=DiskDB-to-KV connections; CW=CLI RPC
-# workers; DW=DiskDB server RPC workers; KW=DiskDB KV-client RPC workers;
-# KSW=KV server RPC workers; Peer=KV peer pool; Win=KV proposal inflight
-# window; Coal=KV proposal coalesce maximum keys.
+# Grp is the number of KV data groups bound round-robin to DiskDB disk groups.
+# With the default topology, three groups means one KV group per node.
+# ClientConn is CLI-to-DiskDB; DDBConn is DiskDB-to-KV; KVConn is the KV peer
+# pool. EpollWorker is client/DiskDB/KV-client/KV-server RPC worker count.
 #
 # The direct KV write sentinel peaks near 264K writes/s. Because one durable
 # DiskDB allocation produces one KV batch_write, DiskDB TPS is expected to be
@@ -85,17 +79,20 @@ unset CROWDB_ASAN
 DURATION="${DISKDB_BENCH_DURATION:-20}"
 MODES="${DISKDB_BENCH_MODES:-mem}"
 CASES="${DISKDB_BENCH_CASES:-}"
-DATA_GROUP_COUNT="${DISKDB_BENCH_DATA_GROUPS:-1}"
+DATA_GROUP_OVERRIDE="${DISKDB_BENCH_DATA_GROUPS:-}"
+DATA_GROUP_COUNT=3
 KV_INFLIGHT="${DISKDB_BENCH_KV_INFLIGHT:-64}"
 KV_COALESCE="${DISKDB_BENCH_KV_COALESCE:-64}"
-KV_RPC_WORKERS="${DISKDB_BENCH_KV_RPC_WORKERS:-4}"
-KV_PEER_POOL="${DISKDB_BENCH_KV_PEER_POOL:-4}"
-DDB_RPC_WORKERS="${DISKDB_BENCH_DDB_RPC_WORKERS:-4}"
-DDB_CONNECTIONS="${DISKDB_BENCH_DDB_CONNECTIONS:-4}"
-DDB_CLIENT_WORKERS="${DISKDB_BENCH_DDB_CLIENT_WORKERS:-4}"
-KV_CONNECTIONS="${DISKDB_BENCH_KV_CONNECTIONS:-4}"
-KV_CLIENT_WORKERS="${DISKDB_BENCH_KV_CLIENT_WORKERS:-4}"
-DISK_CAPACITY="${DISKDB_BENCH_DISK_CAPACITY:-1099511627776}"
+CONNECTIONS_OVERRIDE="${DISKDB_BENCH_CONNECTIONS:-}"
+RPC_WORKERS_OVERRIDE="${DISKDB_BENCH_RPC_WORKERS:-}"
+KV_RPC_WORKERS=2
+KV_PEER_POOL=2
+DDB_RPC_WORKERS=2
+DDB_CONNECTIONS=2
+DDB_CLIENT_WORKERS=2
+KV_CONNECTIONS=2
+KV_CLIENT_WORKERS=2
+DISK_CAPACITY="${DISKDB_BENCH_DISK_CAPACITY:-4398046511104}"
 ZONE_SIZE="${DISKDB_BENCH_ZONE_SIZE:-274877906944}"
 RUN_STAMP=$(date +%Y%m%d-%H%M%S)
 LOG_ROOT="${DISKDB_BENCH_LOG_ROOT:-$(pwd)/bench-log/diskdb-regression-$RUN_STAMP}"
@@ -104,9 +101,13 @@ CURRENT_CONFIG=""
 FAILURES=0
 CASE_NUMBER=0
 
-if ! [[ "$DURATION" =~ ^[1-9][0-9]*$ ]] || ! [[ "$DATA_GROUP_COUNT" =~ ^[1-9][0-9]*$ ]] \
+if ! [[ "$DURATION" =~ ^[1-9][0-9]*$ ]] \
     || ! [[ "$DISK_CAPACITY" =~ ^[1-9][0-9]*$ ]] || ! [[ "$ZONE_SIZE" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ERROR: duration, data-group count, disk capacity, and zone size must be positive integers" >&2
+    echo "ERROR: duration, disk capacity, and zone size must be positive integers" >&2
+    exit 2
+fi
+if [ -n "$DATA_GROUP_OVERRIDE" ] && ! [[ "$DATA_GROUP_OVERRIDE" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: data-group override must be a positive integer" >&2
     exit 2
 fi
 
@@ -174,13 +175,25 @@ deploy_case() {
 
 run_case() {
     local workload="$1" mode="$2" concurrency="$3" blocks="$4" label="$5"
+    local profile_connections="$6" profile_workers="$7" profile_groups="$8"
     if [ -n "$CASES" ] && [[ " $CASES " != *" $label "* ]]; then
         return
     fi
+    local connections="${CONNECTIONS_OVERRIDE:-$profile_connections}"
+    local workers="${RPC_WORKERS_OVERRIDE:-$profile_workers}"
+    DATA_GROUP_COUNT="${DATA_GROUP_OVERRIDE:-$profile_groups}"
+    DDB_CONNECTIONS="$connections"
+    KV_CONNECTIONS="$connections"
+    KV_PEER_POOL="$connections"
+    DDB_CLIENT_WORKERS="$workers"
+    DDB_RPC_WORKERS="$workers"
+    KV_CLIENT_WORKERS="$workers"
+    KV_RPC_WORKERS="$workers"
     echo ">>> $label ($workload, mode=$mode, concurrency=$concurrency, blocks=$blocks)"
     CASE_NUMBER=$((CASE_NUMBER + 1))
     deploy_case "$label" "$mode"
-    local output status line
+    local output status line epoll_workers
+    epoll_workers="$DDB_CLIENT_WORKERS/$DDB_RPC_WORKERS/$KV_CLIENT_WORKERS/$KV_RPC_WORKERS"
     set +e
     output=$(cli bench diskdb "$workload" --duration-secs "$DURATION" \
         --concurrency "$concurrency" --unit-count 1 --blocks-per-request "$blocks" \
@@ -192,19 +205,24 @@ run_case() {
     printf '%s\n' "$output"
     line=$(sed -n '/^diskdb bench /p' <<<"$output" | tail -n 1)
     if [ -z "$line" ]; then
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t0\t0\t0\t0\t0\t1\tunknown\t0\t0\t%s\n' \
-            "$label" "$workload" "$mode" "$concurrency" "$blocks" "$DATA_GROUP_COUNT" \
-            "$DDB_CONNECTIONS" "$DDB_CLIENT_WORKERS" "$DDB_RPC_WORKERS" "$KV_CONNECTIONS" \
-            "$KV_CLIENT_WORKERS" "$KV_RPC_WORKERS" "$KV_INFLIGHT" "$KV_COALESCE" "$status" >>"$RESULTS_FILE"
+        printf '%s/%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t0\t0\t%ss\t1\tunknown\n' \
+            "$workload" "$mode" "$DATA_GROUP_COUNT" "$concurrency" "$blocks" \
+            "$DDB_CONNECTIONS" "$KV_CONNECTIONS" "$KV_PEER_POOL" "$epoll_workers" \
+            "$KV_INFLIGHT" "$KV_COALESCE" "$DURATION" >>"$RESULTS_FILE"
     else
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$label" "$workload" "$mode" "$concurrency" "$blocks" "$DATA_GROUP_COUNT" \
-            "$DDB_CONNECTIONS" "$DDB_CLIENT_WORKERS" "$DDB_RPC_WORKERS" "$KV_CONNECTIONS" \
-            "$KV_CLIENT_WORKERS" "$KV_RPC_WORKERS" "$KV_INFLIGHT" "$KV_COALESCE" \
-            "$(field "$line" ops_per_sec)" "$(field "$line" p50_us)" "$(field "$line" p99_us)" \
-            "$(field "$line" allocated)" "$(field "$line" freed)" "$(field "$line" live)" \
-            "$(field "$line" errors)" "$(field "$line" stop)" \
-            "$(field "$line" busy_delta)" "$(field "$line" expected_delta)" "$status" >>"$RESULTS_FILE"
+        local busy_delta expected_delta space
+        busy_delta=$(field "$line" busy_delta)
+        expected_delta=$(field "$line" expected_delta)
+        space=mismatch
+        if [ -n "$busy_delta" ] && [ "$busy_delta" = "$expected_delta" ]; then
+            space=exact
+        fi
+        printf '%s/%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%ss\t%s\t%s\n' \
+            "$workload" "$mode" "$DATA_GROUP_COUNT" "$concurrency" "$blocks" \
+            "$DDB_CONNECTIONS" "$KV_CONNECTIONS" "$KV_PEER_POOL" "$epoll_workers" \
+            "$KV_INFLIGHT" "$KV_COALESCE" "$(field "$line" ops_per_sec)" \
+            "$(field "$line" p50_us)" "$(field "$line" p99_us)" "$DURATION" \
+            "$(field "$line" errors)" "$space" >>"$RESULTS_FILE"
     fi
     if ! verify_logs "$label"; then
         FAILURES=$((FAILURES + 1))
@@ -219,23 +237,19 @@ run_case() {
 echo "=== building release binaries ==="
 pixi run -- cargo build --release -p crowdb-cli -p crowdb-kv-server -p crowdb-diskdb
 mkdir -p "$LOG_ROOT" "$(dirname "$RESULTS_FILE")"
-printf 'label\tworkload\tmode\tconcurrency\tblocks_per_request\tdata_groups\tddb_connections\tddb_client_workers\tddb_server_workers\tkv_connections\tkv_client_workers\tkv_server_workers\tkv_inflight\tkv_coalesce\tops_s\tp50_us\tp99_us\tallocated\tfreed\tlive\terrors\tstop\tbusy_delta\texpected_delta\texit\n' >"$RESULTS_FILE"
+printf 'workload\tgrp\tthread\tblock\tclient-connection\tdiskdb-connection\tkv-internal-connection\tepollworker\twin\tcoal\tops/s\tp50\tp99\tDur\tErr\tSpace\n' >"$RESULTS_FILE"
 
 for mode in $MODES; do
-    run_case allocate "$mode" 1 1 "allocate_${mode}_1t"
-    run_case allocate "$mode" 4 1 "allocate_${mode}_4t"
-    run_case allocate "$mode" 16 1 "allocate_${mode}_16t"
-    run_case allocate "$mode" 64 1 "allocate_${mode}_64t"
-    run_case allocate "$mode" 128 1 "allocate_${mode}_128t"
-    run_case allocate "$mode" 256 1 "allocate_${mode}_256t"
-    run_case allocate "$mode" 512 1 "allocate_${mode}_512t"
-    run_case allocate "$mode" 768 1 "allocate_${mode}_768t"
-    run_case allocate "$mode" 16 4 "allocate_${mode}_16t_4block"
-    run_case mix "$mode" 1 1 "mix_${mode}_1t"
-    run_case mix "$mode" 4 1 "mix_${mode}_4t"
-    run_case mix "$mode" 16 1 "mix_${mode}_16t"
-    run_case mix "$mode" 64 1 "mix_${mode}_64t"
-    run_case mix "$mode" 16 4 "mix_${mode}_16t_4block"
+    run_case allocate "$mode" 1 1 "allocate_${mode}_1t" 2 2 3
+    run_case allocate "$mode" 16 1 "allocate_${mode}_16t" 2 2 3
+    run_case allocate "$mode" 128 1 "allocate_${mode}_128t" 2 2 3
+    run_case allocate "$mode" 512 1 "allocate_${mode}_512t" 4 4 3
+    run_case allocate "$mode" 512 1 "allocate_${mode}_512t_1grp" 4 4 1
+    run_case mix "$mode" 1 1 "mix_${mode}_1t" 2 2 3
+    run_case mix "$mode" 16 1 "mix_${mode}_16t" 2 2 3
+    run_case mix "$mode" 128 1 "mix_${mode}_128t" 2 2 3
+    run_case mix "$mode" 512 1 "mix_${mode}_512t" 4 4 3
+    run_case mix "$mode" 512 1 "mix_${mode}_512t_1grp" 4 4 1
 done
 
 echo "=== DONE ==="
